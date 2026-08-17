@@ -223,6 +223,17 @@ package.
 the design's "the plugin's front door is the manifest, for every backend". Cost is
 one extra fetch, only when a manifest is actually found.
 
+**One consequence worth confirming you want**, because it is a real behaviour
+change and not obviously right: when a manifest is applied, it *is* the listing, so
+a file that is in the deposit but **not** in the manifest disappears from `ls()` and
+`exists()` returns `False` for it. That is what "the manifest is the directory
+listing" means, and hiding it would be worse — so it is reported rather than
+silent: the drift report lists it under `unrecorded`, a warning is logged, and
+`archivefs check` prints it. If you would rather unrecorded extras stayed visible
+in the listing, that is a one-line change in `apply_manifest`; I chose the design
+doc's reading. (A manifest that matches *nothing* is a different case and is now
+refused outright — see D11.)
+
 ---
 
 ## D6 — 🩹 The archive version token is **not** DVC's `version_id`
