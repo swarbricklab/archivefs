@@ -521,3 +521,18 @@ def test_invalidate_cache_clears_the_per_file_cache(fs):
     assert BAM in fs._file_cache
     fs.invalidate_cache()
     assert not fs._file_cache
+
+
+def test_a_bare_file_accession_behaves_as_a_file_everywhere(fs):
+    """EGAF accessions are globally unique, so ega://EGAF… needs no dataset."""
+    assert fs.isfile(BAM)
+    assert fs.exists(BAM)
+    assert fs.ls(BAM, detail=False) == [BAM]
+    assert fs.find(BAM) == [BAM]  # walk must not treat it as an empty directory
+    assert len(fs.cat_file(BAM)) == 194821
+
+
+def test_glob_over_accessions(fs):
+    hits = fs.glob(f"{DATASET}/EGAF000072437*")
+    assert hits
+    assert all(h.startswith(f"{DATASET}/EGAF000072437") for h in hits)
