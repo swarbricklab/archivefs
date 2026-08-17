@@ -57,8 +57,11 @@ logger = logging.getLogger(__name__)
 DEFAULT_API_URL = "https://ega.ebi.ac.uk:8443/v2"
 DEFAULT_AUTH_URL = "https://ega.ebi.ac.uk:8443/ega-openid-connect-server/token"
 DEFAULT_CLIENT_ID = "f20cd2d3-682a-4568-a53e-4262ef54c8f4"
+# Not a secret in any meaningful sense: it is a public OAuth2 client secret,
+# shipped inside pyega3's own config for every user of EGA. The *user's* password
+# is the credential, and that is never hard-coded anywhere.
 DEFAULT_CLIENT_SECRET = (
-    "AMenuDLjVdVo4BSwi0QD54LL6NeVDEZRzEQUJ7hJOM3g4imDZBHHX0hNfKHPeQIGkskhtCmqAJtt"
+    "AMenuDLjVdVo4BSwi0QD54LL6NeVDEZRzEQUJ7hJOM3g4imDZBHHX0hNfKHPeQIGkskhtCmqAJtt"  # noqa: S105
     "_jm7EKq-rWw"
 )
 
@@ -377,7 +380,10 @@ class EGAFileSystem(ArchiveFileSystem):
         # re-encryption timestamp and changes if the object is replaced.
         stamp = re.search(r"\.(\d{10,})\.cip$", meta.get("fileName") or "")
         if stamp:
-            info["version_id"] = stamp.group(1)
+            # Deliberately NOT called `version_id`: DVC reads that key as a cloud
+            # object version and switches on machinery we cannot honour (see
+            # docs/decisions.md D6).
+            info["archive_version"] = stamp.group(1)
         return info
 
     def _load_members(self, container: str) -> dict[str, dict]:

@@ -171,7 +171,7 @@ def test_info_is_honest_about_missing_checksums(fs):
     assert info["md5"] is None
     assert "GEO does not publish per-file checksums" in info["checksum_source"]
     # a weak-but-real change-detection token
-    assert info["version_id"]
+    assert info["archive_version"]
 
 
 def test_checksum_returns_none_rather_than_a_fake(fs):

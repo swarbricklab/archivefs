@@ -57,7 +57,7 @@ def record_json() -> dict:
             "id": "aaa",
             "key": "archive.zip",
             "size": len(ZIP_BYTES),
-            "checksum": f"md5:{hashlib.md5(ZIP_BYTES).hexdigest()}",
+            "checksum": f"md5:{hashlib.md5(ZIP_BYTES).hexdigest()}",  # noqa: S324
             "links": {
                 "self": f"https://zenodo.org/api/records/{RECID}/files/archive.zip/content"
             },
@@ -66,7 +66,7 @@ def record_json() -> dict:
             "id": "bbb",
             "key": "samples.csv",
             "size": len(CSV_BYTES),
-            "checksum": f"md5:{hashlib.md5(CSV_BYTES).hexdigest()}",
+            "checksum": f"md5:{hashlib.md5(CSV_BYTES).hexdigest()}",  # noqa: S324
             "links": {
                 "self": f"https://zenodo.org/api/records/{RECID}/files/samples.csv/content"
             },
@@ -176,8 +176,8 @@ def test_missing_member_lists_what_is_there(fs):
 def test_info_is_download_free_and_md5_bearing(fs, fake_zenodo):
     info = fs.info(f"{RECID}/samples.csv")
     assert info["size"] == len(CSV_BYTES)
-    assert info["md5"] == hashlib.md5(CSV_BYTES).hexdigest()
-    assert info["version_id"] == DOI
+    assert info["md5"] == hashlib.md5(CSV_BYTES).hexdigest()  # noqa: S324
+    assert info["archive_version"] == DOI
     assert fake_zenodo.bytes_served == 0
 
 
@@ -198,7 +198,7 @@ def test_exists(fs):
 def test_cat_file_and_md5_agree(fs):
     data = fs.cat_file(f"{RECID}/samples.csv")
     assert data == CSV_BYTES
-    assert hashlib.md5(data).hexdigest() == fs.info(f"{RECID}/samples.csv")["md5"]
+    assert hashlib.md5(data).hexdigest() == fs.info(f"{RECID}/samples.csv")["md5"]  # noqa: S324
 
 
 def test_ranged_reads(fs):
@@ -282,10 +282,10 @@ def test_zip_member_integrity_contract_is_explicit(zfs):
     # CRC32 from the central directory. Documented rather than hidden.
     assert info["md5"] is None
     assert info["crc32"] is not None
-    assert info["zenodo"]["container_md5"] == hashlib.md5(ZIP_BYTES).hexdigest()
+    assert info["zenodo"]["container_md5"] == hashlib.md5(ZIP_BYTES).hexdigest()  # noqa: S324
     assert info["zenodo"]["container"] == f"{RECID}/archive.zip"
     assert "CRC32" in info["zenodo"]["integrity"]
-    assert info["version_id"] == DOI  # immutability is what makes it sound
+    assert info["archive_version"] == DOI  # immutability is what makes it sound
 
 
 def test_zip_interior_sizes_are_real(zfs):
@@ -315,7 +315,7 @@ def test_live_record_listing_and_bytes():
     assert info["size"] == 853
     assert info["md5"] == "49f6a914ea33912471512ac9228c6923"
     data = fs.cat_file("1486184/github-mark.zip")
-    assert hashlib.md5(data).hexdigest() == info["md5"]
+    assert hashlib.md5(data).hexdigest() == info["md5"]  # noqa: S324
 
 
 @pytest.mark.network
@@ -361,7 +361,7 @@ def test_zip_view_refuses_a_slipping_archive(fake_zenodo):
     fake_zenodo.bodies["archive.zip"] = buffer.getvalue()
     fake_zenodo.record["files"][0]["size"] = len(buffer.getvalue())
     fake_zenodo.record["files"][0]["checksum"] = (
-        f"md5:{hashlib.md5(buffer.getvalue()).hexdigest()}"
+        f"md5:{hashlib.md5(buffer.getvalue()).hexdigest()}"  # noqa: S324
     )
     fs = ZenodoFileSystem(extract_zips=True, skip_instance_cache=True)
     with pytest.raises(UnsafeArchiveMemberError):

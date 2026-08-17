@@ -34,7 +34,7 @@ MANIFEST_NAME = f"{GSE}.chiro.json"
 
 
 def md5(data: bytes) -> str:
-    return hashlib.md5(data).hexdigest()
+    return hashlib.md5(data).hexdigest()  # noqa: S324
 
 
 def build_manifest(names=None, *, relocate=True, tamper_size=False) -> bytes:

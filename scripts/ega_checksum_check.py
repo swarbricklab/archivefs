@@ -214,7 +214,7 @@ def main() -> int:
             fh.write(part.read_bytes())
     elapsed = time.time() - t0
 
-    digest = hashlib.md5(out.read_bytes()).hexdigest()
+    digest = hashlib.md5(out.read_bytes()).hexdigest()  # noqa: S324
     size = out.stat().st_size
     print(f"materialised {size} bytes in {elapsed:.1f}s -> md5 {digest}")
 

@@ -238,7 +238,7 @@ def apply_manifest(
             accounted.add(source)
             native_info = native[native_path]
             # Carry everything the backend needs to fetch, and its own metadata.
-            for key in ("url", "ega", "geo", "zenodo", "version_id"):
+            for key in ("url", "ega", "geo", "zenodo", "archive_version"):
                 if key in native_info:
                     info.setdefault(key, native_info[key])
             info["source_native_path"] = native_path

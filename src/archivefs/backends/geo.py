@@ -193,7 +193,7 @@ class SupplementaryView(GEOView):
             info["geo"]["contains"] = contained or None
             if entry.get("modified"):
                 info["geo"]["modified"] = entry["modified"]
-                info["version_id"] = str(entry["modified"])
+                info["archive_version"] = str(entry["modified"])
 
     def _from_index(self, accession: str, directory: str) -> dict[str, dict]:
         try:
@@ -332,7 +332,7 @@ class GEOFileSystem(ArchiveFileSystem):
         if entry.get("modified"):
             # Weak, but honest, and it is what GEO gives: a conventional record
             # plus a modification time. Change detection, not content identity.
-            info["version_id"] = str(entry["modified"])
+            info["archive_version"] = str(entry["modified"])
         return info
 
     def _load_members(self, container: str) -> dict[str, dict]:
@@ -374,7 +374,7 @@ class GEOFileSystem(ArchiveFileSystem):
             )
         info["size"] = int(length)
         if response.headers.get("Last-Modified"):
-            info.setdefault("version_id", response.headers["Last-Modified"])
+            info.setdefault("archive_version", response.headers["Last-Modified"])
         return info["size"]
 
     # --------------------------------------------------------------- transfer

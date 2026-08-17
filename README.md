@@ -12,38 +12,114 @@ version-controlled provenance.
 ```
 ega://EGAD00001006673                  # dataset → directory
 ega://EGAD00001006673/EGAF00004908765  # single file
-zenodo://<record_id>/<filename>
-geo://<GSE_accession>                   # supplementary / processed files
-dbgap://<phs_id>/<SRR_accession>        # deferred
+zenodo://1486184/data.zip              # record id …
+zenodo://10.5281/zenodo.1486184        # … or DOI (concept DOI → latest version)
+geo://GSE176078                        # supplementary / processed files
+dbgap://<phs_id>/<SRR_accession>       # deferred, registered, refuses clearly
 ```
+
+## What it does today
+
+```console
+$ archivefs ls -l zenodo://1486184
+       853 B  49f6a914ea33912471512ac9228c6923  1486184/github-mark.zip
+
+$ dvc import-url --no-download zenodo://1486184/github-mark.zip logo.zip
+$ cat logo.zip.dvc
+deps:
+- md5: 49f6a914ea33912471512ac9228c6923    # download-free, from record metadata
+  size: 853
+  path: zenodo://1486184/github-mark.zip   # an accession — never a secret
+outs:
+- path: logo.zip
+
+$ dvc pull logo.zip.dvc                    # bytes on demand, verified by DVC
+```
+
+The same works for `ega://` with credentials resolved from the environment at pull
+time, and for `geo://` anonymously.
 
 ## Why
 
-- **Reproducible provenance in one step.** `dvc import` someone's archived data into
-  your project and get download + a pinned, checksummed reference together.
+- **Reproducible provenance in one step.** `dvc import-url` someone's archived data
+  into your project and get download + a pinned, checksummed reference together.
 - **Checksum certainty.** Once data is in the DVC ecosystem you get integrity
   guarantees and version control over inputs.
-- **Look before you leap.** `dvc list-url` shows what's in a record before you
-  download it.
+- **Look before you leap.** `dvc list-url` / `archivefs ls` show what is in a record
+  before you download it.
 - **Works on anyone's deposits**, whether or not our tooling was used to create them.
+
+## Install
+
+```
+pip install archivefs           # all three backends: Zenodo, GEO, EGA
+pip install archivefs[chiro]    # + read .chiro.json manifests
+pip install archivefs[dvc]      # + the DVC adaptor
+```
+
+EGA needs no extra: the backend speaks EGA's REST API directly. (`pyega3` pins
+`requests==2.26.0`, which would hold the whole environment hostage — see
+[`docs/decisions.md`](docs/decisions.md) D2.)
+
+### Using it with DVC
+
+DVC does **not** discover fsspec filesystems from entry points, so one extra step is
+needed once per environment:
+
+```console
+$ archivefs dvc enable     # writes a .pth that registers our protocols with DVC
+$ archivefs dvc status     # check it works
+```
+
+Why this is necessary, and what was tried instead, is
+[`docs/decisions.md`](docs/decisions.md) D4. `archivefs dvc disable` undoes it;
+`ARCHIVEFS_NO_DVC_HOOK=1` disables it for one command.
 
 ## Design
 
-A single package with **per-backend extras** (modelled on `dvc[s3]`, `dvc[ssh]`):
+A single package, a shared base, and thin per-backend byte-fetchers:
 
-```
-pip install archivefs           # base + light backends (Zenodo, GEO)
-pip install archivefs[ega]      # + pyega3
-pip install archivefs[dbgap]    # + SRA-toolkit orchestration (deferred)
-```
+- **`archivefs.base`** — path grammar, retry/error contract, length-checked and
+  alignment-aware ranged reads, download-free `info()`, read-only enforcement.
+- **`archivefs.credentials`** — one precedence chain for every archive:
+  `storage_options` (i.e. `.dvc/config.local`) → environment → on-disk file. A
+  credential declares whether it is a secret, so "no secret in the committed
+  artifact" is a check rather than a promise.
+- **`archivefs.chiro`** — `.chiro`-first resolution: when a deposit carries a
+  manifest, the manifest *is* the listing and the checksums.
+- **`archivefs.zipsafe`** — zip-slip, symlink, zip-bomb and corruption checks,
+  applied at listing time as well as on extraction.
+- **`archivefs.backends.*`** — per-archive: how to list this repository, and where its
+  bytes live. That is all that is left.
 
-Each backend is a thin fsspec `AbstractFileSystem`: "how do I list this repo" and
-"how do I fetch bytes given a path + credential." Everything else (credential
-resolution, the `--no-download` manifest contract, materialisation) is shared.
+Credentials are always resolved at **pull time** from the local environment and
+**never** written into the committed `.dvc` file.
 
-Credentials are always resolved at **pull time** from the local environment
-(`.dvc/config.local` → env var → on-disk cache) and **never** written into the
-committed `.dvc` file.
+## Status
+
+All three planned backends work against the live archives, with the plan's blocking
+question resolved.
+
+| backend | state | download-free checksum | notes |
+|---|---|---|---|
+| `zenodo://` | working | ✅ MD5 from record metadata | DOI + concept-DOI addressing; opt-in ZIP transparency |
+| `ega://` | working | ✅ MD5 of the *decrypted* bytes (verified) | OAuth2 + refresh-on-401; 16-byte range alignment |
+| `geo://` | working | ⚠️ none published — a `.chiro` sidecar fixes it | index-based listing; SRA seam drawn, not built |
+| `dbgap://` | deferred | — | registered so the error explains itself |
+
+Verified end to end: `dvc list-url`, `dvc import-url --no-download` (single file and
+directory), and `dvc pull` for all three, including a controlled-access EGA pull with
+credentials only in the environment. Live tests are opt-in
+(`ARCHIVEFS_TEST_{EGA,ZENODO,GEO,DVC}=1`); the default test run is offline.
+
+**Read next:**
+
+- **Decisions and deviations:** [`docs/decisions.md`](docs/decisions.md) — including
+  the resolved EGA checksum question and two undocumented archive behaviours worth
+  knowing about.
+- **Ideas and extensions:** [`docs/ideas.md`](docs/ideas.md)
+- **Architecture:** [`docs/design.md`](docs/design.md) · **checklist:**
+  [`docs/plan.md`](docs/plan.md)
 
 ## Relationship to Chirograph
 
@@ -55,22 +131,12 @@ download-free checksums, drift detection, and friendly workspace layout — but 
 format; `archivefs` is the data-access layer. Neither depends on the other to be
 useful.
 
-## Status
+## Development
 
-Design stage — no backends implemented yet. See the plan for build order.
-
-- **Full design plan:** [`docs/plan.md`](docs/plan.md)
-- **Format the plugin optionally consumes:**
-  [Chirograph spec](https://github.com/swarbricklab/chirograph/blob/main/docs/chiro-format-spec.md)
-
-## Build order (summary)
-
-1. **EGA** — highest current pain, accession-clean. (First: resolve the EGA
-   decrypted-checksum question — it gates the `info()` contract.)
-2. **Zenodo** — cleanest reference case; extract the shared base from EGA+Zenodo.
-3. **GEO-supplementary** — tractable; the SRA-raw path is out of scope (our raw
-   reads live in EGA, not GEO).
-4. **dbGaP** — deferred (in scope, not yet adopted).
-
-See [`docs/plan.md`](docs/plan.md) for the full rationale, credential model, Zenodo
-ZIP-transparency handling, and per-repository notes.
+```console
+$ conda env update -n archivefs -f environment.yaml
+$ conda activate archivefs
+$ pytest                       # offline
+$ pytest -m network            # add ARCHIVEFS_TEST_*=1 to actually run these
+$ ruff check src tests scripts
+```

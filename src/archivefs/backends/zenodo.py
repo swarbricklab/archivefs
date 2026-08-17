@@ -221,7 +221,9 @@ class ZenodoFileSystem(ArchiveFileSystem):
                 "checksum_type": algorithm.upper() or None,
                 # The version DOI is an immutable token for this exact byte
                 # sequence — the load-bearing part of the ZIP integrity argument.
-                "version_id": provenance["doi"],
+                # Named `archive_version`, not `version_id`: DVC reads the latter
+                # as a cloud object version (docs/decisions.md D6).
+                "archive_version": provenance["doi"],
                 "url": (entry.get("links") or {}).get(
                     "content", f"{self.api_url}/records/{recid}/files/{key}/content"
                 ),
@@ -360,7 +362,7 @@ class ZenodoFileSystem(ArchiveFileSystem):
                     "directory); per-member md5 is computed at extraction time"
                 ),
             }
-            info["version_id"] = container["version_id"]
+            info["archive_version"] = container["archive_version"]
         return info
 
     # ---------------------------------------------------- read surface (+ZIP)

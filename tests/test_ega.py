@@ -253,7 +253,7 @@ def test_info_is_download_free_and_carries_the_plain_md5(fs):
 
 def test_info_version_token_from_reencryption_stamp(fs):
     info = fs.info(f"{DATASET}/{BAM}")
-    assert info["version_id"] == "1664408722194"
+    assert info["archive_version"] == "1664408722194"
 
 
 def test_file_addressable_without_its_dataset(fs):
@@ -426,7 +426,7 @@ def test_live_bytes_match_advertised_md5(live_fs):
     info = live_fs.info(path)
     data = live_fs.cat_file(path)
     assert len(data) == info["size"]
-    assert hashlib.md5(data).hexdigest() == info["md5"]
+    assert hashlib.md5(data).hexdigest() == info["md5"]  # noqa: S324
 
 
 @pytest.mark.network

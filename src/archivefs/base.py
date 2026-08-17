@@ -454,7 +454,7 @@ class ArchiveFileSystem(AbstractFileSystem):
         info = self._resolve(path)
         return (
             info.get("md5")
-            or info.get("version_id")
+            or info.get("archive_version")
             or f"{info.get('name')}:{info.get('size')}"
         )
 
