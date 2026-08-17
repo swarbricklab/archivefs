@@ -144,6 +144,19 @@ surface. This is the command that turns "my pull failed" into a one-line answer.
 
 ---
 
+### 15. Concurrency, once someone imports something large
+Two things I fixed rather than built out, both worth revisiting the first time a
+multi-hundred-GB EGA dataset is imported:
+
+* **Listing resolution is serialised** behind one re-entrant lock
+  ([`decisions.md` D11](decisions.md)). Correct, and cheap because listings are
+  cached per container, but a per-container lock would let unrelated records resolve
+  in parallel.
+* **Reads are serial** (idea #9), and EGA's own throughput (~425 KB/s on one
+  connection, ~1 MB/s on four) means a large dataset takes hours. Any parallel
+  fetcher must respect the 16-byte alignment rule and keep the length checks — the
+  short-body behaviour that motivated them was *observed under concurrency*.
+
 ## Speculative, but I would enjoy being wrong about the value
 
 ### 11. A verification-report artifact for papers
