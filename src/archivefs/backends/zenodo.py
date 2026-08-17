@@ -26,6 +26,7 @@ from __future__ import annotations
 import logging
 import re
 from typing import Any, ClassVar
+from urllib.parse import quote
 
 from archivefs.base import ArchiveFileSystem
 from archivefs.credentials import Credential
@@ -117,7 +118,21 @@ class ZenodoFileSystem(ArchiveFileSystem):
         container, _ = self._split(self._strip_protocol(path))
         record = self._records.pop(container, None)
         if record is not None:
-            self._records.pop(str(record.get("id")), None)
+            # One record answers to several spellings — record id, version DOI,
+            # concept DOI — and dropping only the one the caller used leaves the
+            # others serving the listing we were asked to forget.
+            for alias in (
+                str(record.get("id")),
+                record.get("doi"),
+                record.get("conceptdoi"),
+                str(record.get("conceptrecid")),
+            ):
+                if alias:
+                    self._records.pop(alias, None)
+                    self._member_cache.pop(alias, None)
+                    self._manifest_used.pop(alias, None)
+                    self._manifests.pop(alias, None)
+                    self._drift.pop(alias, None)
         for zip_path in [p for p in self._zip_views if p.startswith(f"{container}/")]:
             self._zip_views.pop(zip_path, None)
 
@@ -263,8 +278,15 @@ class ZenodoFileSystem(ArchiveFileSystem):
                 # Named `archive_version`, not `version_id`: DVC reads the latter
                 # as a cloud object version (docs/decisions.md D6).
                 "archive_version": provenance["doi"],
-                "url": (entry.get("links") or {}).get(
-                    "content", f"{self.api_url}/records/{recid}/files/{key}/content"
+                # The API's own link first (real records carry it under "self"),
+                # and a *quoted* fallback: a "#" or "?" in a filename would
+                # otherwise truncate the URL at what urlsplit reads as a fragment
+                # or query, fetching something else entirely.
+                "url": (entry.get("links") or {}).get("content")
+                or (entry.get("links") or {}).get("self")
+                or (
+                    f"{self.api_url}/records/{recid}/files/"
+                    f"{quote(key, safe='/')}/content"
                 ),
                 "zenodo": {**provenance, "key": key},
             }
@@ -334,13 +356,29 @@ class ZenodoFileSystem(ArchiveFileSystem):
         same central directory *before* any member is advertised: a path we would
         refuse to write must not be offered to a consumer that will write it.
         """
+        import zipfile
+
         from fsspec.implementations.zip import ZipFileSystem
 
         from archivefs.zipsafe import inspect_zip
 
         zip_path = self._strip_protocol(zip_path)
         if zip_path not in self._zip_views:
-            view = ZipFileSystem(fo=self._open_container(zip_path))
+            try:
+                view = ZipFileSystem(fo=self._open_container(zip_path))
+            except zipfile.BadZipFile as exc:
+                # zipfile reads the end of the file inside `except OSError: pass`,
+                # so an expired token (PermissionError) or a 503 partway through
+                # comes back as "File is not a zip file" — telling the user their
+                # perfectly good archive is corrupt. Re-read four bytes to surface
+                # whatever actually went wrong; if that succeeds, it really is not
+                # a ZIP.
+                container, member = self.split_path(zip_path)
+                self._fetch_range(self._member(container, member), 0, 4)
+                raise ArchiveNotFoundError(
+                    f"{zip_path} is not a readable ZIP archive ({exc}). Import it "
+                    f"as an opaque file (extract_zips off) if it is not one."
+                ) from exc
             inspect_zip(view.zip, self.zip_limits, target=zip_path)
             self._zip_views[zip_path] = view
         return self._zip_views[zip_path]

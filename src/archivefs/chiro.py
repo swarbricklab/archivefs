@@ -298,7 +298,10 @@ def verify_materialised(
     verification logic is chirograph's, not a second implementation living here.
     Returns chirograph's ``VerificationReport``.
     """
-    from chirograph import verify as chiro_verify
+    # Through the guard, so an absent package is a MissingExtraError naming the
+    # install rather than a traceback: "missing extras are not import errors".
+    chirograph = _chirograph()
+    chiro_verify = chirograph.verify
 
     manifest = fs.manifest_for(container)
     if manifest is None:

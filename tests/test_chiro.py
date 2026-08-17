@@ -460,3 +460,128 @@ def test_an_unfetchable_manifest_is_not_an_empty_directory(geo):
     fs2 = GEOFileSystem(chiro=f"{GSE}/absent.chiro.json", skip_instance_cache=True)
     with pytest.raises(ManifestError):
         fs2.find(GSE)
+
+
+def test_concurrent_readers_all_see_the_manifest(geo, monkeypatch):
+    """The cache seed that stopped manifest recursion must not publish a
+    half-resolved listing to other threads.
+
+    DVC runs one filesystem instance across a thread pool (and cachable=False
+    guarantees they share it), so a second thread hitting the seeded native listing
+    would silently lose the manifest's checksums, paths and drift report.
+    """
+    import threading
+    import time as time_mod
+
+    server = geo(manifest=build_manifest())
+    fs = GEOFileSystem(skip_instance_cache=True)
+
+    # make the manifest fetch slow enough for a second thread to arrive mid-flight
+    slow = fs._fetch_range
+
+    def delayed(info, start, end):
+        if str(info.get("name", "")).endswith(".chiro.json"):
+            time_mod.sleep(0.3)
+        return slow(info, start, end)
+
+    monkeypatch.setattr(fs, "_fetch_range", delayed)
+
+    results: dict[str, object] = {}
+
+    def read(tag: str) -> None:
+        try:
+            results[tag] = sorted(fs.find(GSE))
+        except Exception as exc:  # noqa: BLE001 - recorded, asserted below
+            results[tag] = exc
+
+    threads = [threading.Thread(target=read, args=(f"t{i}",)) for i in range(3)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    expected = [
+        f"{GSE}/sampleA/barcodes.tsv.gz",
+        f"{GSE}/sampleA/matrix.mtx.gz",
+        f"{GSE}/sampleB/matrix.mtx.gz",
+    ]
+    assert list(results.values()) == [expected] * 3, results
+    assert fs.manifest_path_for(GSE) == f"{GSE}/{MANIFEST_NAME}"
+    assert server.manifest is not None
+
+
+def test_a_manifest_that_matches_nothing_is_refused(geo):
+    """Every entry a ghost means the manifest describes a different layout.
+
+    Producing a listing of files that all fail to read would be a slow way to
+    learn that.
+    """
+    geo(manifest=build_manifest(names=["GSE176078_sampleZ_absent.mtx.gz"]))
+    fs = GEOFileSystem(skip_instance_cache=True)
+    with pytest.raises(ManifestError) as exc:
+        fs.ls(GSE)
+    message = str(exc.value)
+    assert "not one of them matches" in message
+    assert "chiro=False" in message
+
+
+def test_a_manifest_that_nests_one_file_inside_another_is_refused(geo, monkeypatch):
+    """`data.txt` and `data.txt/inner.txt` cannot both exist on a filesystem, and a
+    children-only ls would report the file and never descend."""
+    entries = [
+        chirograph.FileEntry(relpath="data.txt", md5=md5(b"a"), size=1, source_path=n)
+        for n in ["GSE176078_sampleA_matrix.mtx.gz"]
+    ] + [
+        chirograph.FileEntry(
+            relpath="data.txt/inner.txt",
+            md5=md5(b"b"),
+            size=1,
+            source_path="GSE176078_sampleB_matrix.mtx.gz",
+        )
+    ]
+    manifest = chirograph.Manifest(
+        provenance_type=chirograph.PROVENANCE_SELF, files=entries, record_accession=GSE
+    ).to_bytes()
+    geo(manifest=manifest)
+    fs = GEOFileSystem(skip_instance_cache=True)
+    with pytest.raises(ManifestError) as exc:
+        fs.ls(GSE)
+    assert "inside another" in str(exc.value)
+
+
+@pytest.mark.parametrize("flag", ["true", "TRUE", "yes", "on", "1", "auto"])
+def test_true_ish_chiro_flags_mean_discover(geo, flag):
+    """`chiro = true` in an INI config is the obvious way to write "yes"."""
+    geo(manifest=build_manifest())
+    fs = GEOFileSystem(chiro=flag, skip_instance_cache=True)
+    assert fs.manifest_path_for(GSE) == f"{GSE}/{MANIFEST_NAME}"
+
+
+@pytest.mark.parametrize("flag", ["false", "FALSE", "no", "off", "0", "none"])
+def test_false_ish_chiro_flags_mean_off(geo, flag):
+    geo(manifest=build_manifest())
+    fs = GEOFileSystem(chiro=flag, skip_instance_cache=True)
+    assert fs.manifest_path_for(GSE) is None
+
+
+def test_verify_without_chirograph_names_the_extra(geo, monkeypatch, tmp_path):
+    """`from chirograph import verify` at the top of the function bypassed the guard,
+    so the user got a traceback instead of the install instruction."""
+    geo(manifest=build_manifest())
+    fs = GEOFileSystem(skip_instance_cache=True)
+    fs.ls(GSE)  # resolve while chirograph is still importable
+
+    real_import = chiro_mod._chirograph
+
+    def missing():
+        from archivefs.errors import MissingExtraError
+
+        raise MissingExtraError("chiro", "chirograph", "verifying a tree")
+
+    monkeypatch.setattr(chiro_mod, "_chirograph", missing)
+    try:
+        with pytest.raises(MissingExtraError) as exc:
+            chiro_mod.verify_materialised(fs, GSE, str(tmp_path))
+        assert "pip install 'archivefs[chiro]'" in str(exc.value)
+    finally:
+        monkeypatch.setattr(chiro_mod, "_chirograph", real_import)

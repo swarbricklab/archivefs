@@ -236,6 +236,12 @@ class SupplementaryView(GEOView):
         for href in parser.hrefs:
             if href.startswith(("/", "?", "#", "http://", "https://")):
                 continue  # parent link, sort links, HHS footer
+            if href.endswith("/"):
+                # A subdirectory. Unproven for GEO supplementary dirs (the ones I
+                # checked are flat) but advertising one as a file would serve the
+                # directory index HTML as its "bytes", which is worse than skipping.
+                logger.debug("skipping subdirectory %s in %s", href, directory)
+                continue
             name = unquote(href).rstrip("/")
             if not name or name == "filelist.txt":
                 continue

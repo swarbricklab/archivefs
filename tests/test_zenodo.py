@@ -499,3 +499,33 @@ def test_container_md5_is_download_free_but_member_md5_cannot_be(zfs, fake_zenod
     assert member["crc32"] is not None  # from the central directory
     # listing the interior read only the central directory, not the payload
     assert fake_zenodo.bytes_served < len(ZIP_BYTES) / 4
+
+
+def test_a_failed_zip_fetch_is_not_reported_as_a_corrupt_archive(fake_zenodo):
+    """zipfile reads the end of a file inside `except OSError: pass`, so a 401 or a
+    503 came back as "File is not a zip file" — telling the user their perfectly
+    good archive was corrupt."""
+    fake_zenodo.restricted = True
+    fs = ZenodoFileSystem(extract_zips=True, skip_instance_cache=True)
+    with pytest.raises(AuthenticationError) as exc:
+        fs.find(f"{RECID}/archive.zip")
+    assert "ZENODO_TOKEN" in str(exc.value)
+    assert "not a zip" not in str(exc.value).lower()
+
+
+def test_a_genuinely_non_zip_member_still_says_so(fake_zenodo):
+    fake_zenodo.bodies["archive.zip"] = b"this is not a zip at all"
+    fake_zenodo.record["files"][0]["size"] = len(fake_zenodo.bodies["archive.zip"])
+    fs = ZenodoFileSystem(extract_zips=True, skip_instance_cache=True)
+    with pytest.raises(ArchiveNotFoundError) as exc:
+        fs.ls(f"{RECID}/archive.zip")
+    assert "not a readable ZIP" in str(exc.value)
+
+
+def test_invalidating_one_spelling_invalidates_the_aliases(fs, fake_zenodo):
+    """A record answers to a record id, a version DOI and a concept DOI."""
+    fs.ls(DOI)
+    fs.ls(RECID)
+    fs.invalidate_cache(RECID)
+    assert DOI not in fs._records
+    assert CONCEPT_DOI not in fs._records

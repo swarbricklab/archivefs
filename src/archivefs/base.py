@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 import time
 from typing import Any, ClassVar
 
@@ -119,6 +120,14 @@ class ArchiveFileSystem(AbstractFileSystem):
         )
         self.session = self._make_session()
         self._member_cache: dict[str, dict[str, dict]] = {}
+        # Re-entrant, and it has to be: resolving a manifest that lives inside the
+        # deposit re-enters _members() on the same thread (that is what the cache
+        # seed below is for). Without the lock, seeding publishes a *half-resolved*
+        # native listing to every other thread — which is worse than the duplicate
+        # work it replaced, because those threads then see no manifest, no
+        # checksums and no drift report. DVC runs one filesystem instance across a
+        # thread pool, so this is the normal case, not an exotic one.
+        self._member_lock = threading.RLock()
         #: container -> manifest path actually used (or None)
         self._manifest_used: dict[str, str | None] = {}
         #: container -> DriftReport, when a manifest was applied
@@ -198,8 +207,14 @@ class ArchiveFileSystem(AbstractFileSystem):
     def _auth_headers(self) -> dict:
         return {}
 
-    def _refresh_credentials(self) -> bool:
-        """Called once on a ``401``. Return ``True`` if a retry is worthwhile."""
+    def _refresh_credentials(self, sent: dict | None = None) -> bool:
+        """Called once on a ``401``. Return ``True`` if a retry is worthwhile.
+
+        ``sent`` is the header block the rejected request actually carried, so an
+        implementation can tell "the credential I used has already been replaced by
+        a peer thread" from "it is still current and really was refused". Reading
+        the *current* credential instead gets that backwards under concurrency.
+        """
         return False
 
     def _auth_remediation(self, status: int, url: str) -> str:
@@ -244,7 +259,7 @@ class ArchiveFileSystem(AbstractFileSystem):
                 continue
 
             status = response.status_code
-            if status == 401 and may_refresh and self._refresh_credentials():
+            if status == 401 and may_refresh and self._refresh_credentials(all_headers):
                 logger.debug("%s: refreshed credentials after 401", self.archive_name)
                 may_refresh = False
                 continue
@@ -286,12 +301,13 @@ class ArchiveFileSystem(AbstractFileSystem):
     # ---------------------------------------------------------------- metadata
 
     def _members(self, container: str) -> dict[str, dict]:
-        if container not in self._member_cache:
-            native = self._load_members(container)
-            self._member_cache[container] = self._resolve_with_manifest(
-                container, native
-            )
-        return self._member_cache[container]
+        with self._member_lock:
+            if container not in self._member_cache:
+                native = self._load_members(container)
+                self._member_cache[container] = self._resolve_with_manifest(
+                    container, native
+                )
+            return self._member_cache[container]
 
     def invalidate_cache(self, path: str | None = None) -> None:
         if path is None:
@@ -331,9 +347,13 @@ class ArchiveFileSystem(AbstractFileSystem):
         ):
             return native
 
+        # "auto" and the true-ish spellings all mean "discover one"; anything else
+        # is a path. `chiro = true` in an INI config is the obvious way to write
+        # "yes", and treating it as a filename fails in a baffling way.
         explicit = (
             self.chiro
-            if isinstance(self.chiro, str) and self.chiro.strip().lower() != "auto"
+            if isinstance(self.chiro, str)
+            and self.chiro.strip().lower() not in ("auto", "true", "1", "yes", "on")
             else None
         )
         if explicit is None:
@@ -374,6 +394,25 @@ class ArchiveFileSystem(AbstractFileSystem):
             )
         finally:
             self._member_cache.pop(container, None)
+        if members and all(info.get("missing_upstream") for info in members.values()):
+            # Every entry a ghost means the manifest does not describe *this*
+            # listing — most often an EGA manifest written against display names
+            # while the layout keys members by accession. Producing a listing of
+            # files that all fail to read would be a slow way to learn that.
+            raise ManifestError(
+                f"{manifest_path} describes {len(members)} file(s) and not one of "
+                f"them matches anything in {container}. The manifest's source_paths "
+                f"are probably written against a different layout or a different "
+                f"record; check `record_accession` in the manifest. Pass "
+                f"chiro=False to use the archive's own listing instead."
+            )
+        clash = _prefix_clash(members)
+        if clash:
+            raise ManifestError(
+                f"{manifest_path} maps one file's path inside another's: "
+                f"{clash[0]!r} and {clash[1]!r}. One of them cannot be written to "
+                f"disk, and a listing that hides it would lose data silently."
+            )
         self._manifest_used[container] = manifest_path
         self._manifests[container] = manifest
         self._drift[container] = drift
@@ -485,6 +524,25 @@ class ArchiveFileSystem(AbstractFileSystem):
     def info(self, path: str, **kwargs: Any) -> dict:
         return self._resolve(path)
 
+    def walk(
+        self,
+        path: str,
+        maxdepth: int | None = None,
+        topdown: bool = True,
+        on_error: str = "raise",
+        **kwargs: Any,
+    ):
+        """Like fsspec's, but errors are raised rather than omitted.
+
+        fsspec defaults to ``on_error="omit"``, which turns an expired token or a
+        503 partway through a tree into *silently fewer files* and exit code 0.
+        For a tool whose entire purpose is retrieving a complete, verified copy of
+        a deposit, that default is the wrong way round.
+        """
+        return super().walk(
+            path, maxdepth=maxdepth, topdown=topdown, on_error=on_error, **kwargs
+        )
+
     # NB: everything below derives from ``self.info()``, never from ``_resolve()``
     # directly. A subclass that presents something differently — Zenodo showing a
     # ZIP member as a directory, GEO resolving a missing size — overrides ``info``,
@@ -572,7 +630,11 @@ class ArchiveFileSystem(AbstractFileSystem):
                 timeout=self.transfer_timeout,
             )
             try:
-                served = self._range_start(response)
+                served = (
+                    self._range_start(response)
+                    if response.status_code == 206
+                    else None
+                )
                 if served is not None and served != start:
                     # Free to check, and it catches both a regression in our own
                     # alignment arithmetic and a proxy that re-ranges the request.
@@ -594,7 +656,19 @@ class ArchiveFileSystem(AbstractFileSystem):
                 if got == want:
                     return b"".join(chunks)
                 if response.status_code == 200 and got > want:
-                    # The server ignored the Range and sent the whole object.
+                    # The server ignored the Range and sent the whole object. Say
+                    # so: for a large object with a small block size this repeats
+                    # per read, and a slow pull with no explanation is worse than a
+                    # slow pull with one.
+                    logger.warning(
+                        "%s ignored the Range header for %s and sent %d bytes for a "
+                        "%d-byte request; slicing locally. Reads of this object will "
+                        "be slow.",
+                        self.archive_name,
+                        info.get("name"),
+                        got,
+                        want,
+                    )
                     return b"".join(chunks)[start:end]
                 last_error = f"asked for {want} bytes, got {got}"
             finally:
@@ -689,6 +763,24 @@ class ArchiveFileSystem(AbstractFileSystem):
     mv = _unsupported
     copy = _unsupported
     pipe_file = _unsupported
+
+
+def _prefix_clash(members: dict[str, dict]) -> tuple[str, str] | None:
+    """Find a member path that is a strict path-prefix of another.
+
+    ``data.txt`` and ``data.txt/inner.txt`` cannot both exist on a filesystem, and
+    a children-only ``ls`` would report the file and never descend — losing the
+    second silently, which is the failure mode this whole module is careful about.
+    """
+    files = sorted(p for p, info in members.items() if info.get("type") != "directory")
+    for i, earlier in enumerate(files):
+        prefix = f"{earlier}/"
+        for later in files[i + 1 :]:
+            if later.startswith(prefix):
+                return earlier, later
+            if not later.startswith(earlier):
+                break
+    return None
 
 
 class ArchiveFile(AbstractBufferedFile):

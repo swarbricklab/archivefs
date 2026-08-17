@@ -118,6 +118,7 @@ class EGAAuth:
         self.session = session
         self._token: str | None = None
         self._expires_at = 0.0
+        self._fetched_at = 0.0
         self._lock = threading.Lock()
 
     @property
@@ -128,14 +129,17 @@ class EGAAuth:
     def token(self, *, force: bool = False, stale: str | None = None) -> str:
         """The current token, fetching or refreshing only when it is really needed.
 
-        ``stale`` is the token whose rejection prompted the caller to ask for a
-        refresh. If someone else has already replaced it, this returns the
-        replacement instead of fetching again — otherwise every worker thread that
-        hits the hour boundary POSTs its own token request, serialised behind this
-        lock, and the last one waits for all the others.
+        ``stale`` is the token the rejected request actually carried (threaded down
+        from the request's own headers, *not* read back afterwards — by then a peer
+        may have replaced it, and the guard would match nothing). If it has already
+        been replaced, this returns the replacement rather than fetching again;
+        otherwise every worker thread hitting the hour boundary POSTs its own token
+        request, serialised behind this lock so the last one waits for all of them.
         """
         with self._lock:
             if force and stale is not None and self._token not in (None, stale):
+                # A peer already replaced the token this caller was using.
+                logger.debug("EGA token already refreshed by another reader")
                 return self._token
             fresh_enough = (
                 self._token is not None
@@ -182,7 +186,8 @@ class EGAAuth:
         response.raise_for_status()
         payload = response.json()
         self._token = payload["access_token"]
-        self._expires_at = time.time() + int(
+        self._fetched_at = time.time()
+        self._expires_at = self._fetched_at + int(
             payload.get("expires_in") or TOKEN_LIFETIME_SECONDS
         )
         logger.debug("EGA token acquired for %s", self.username)
@@ -305,11 +310,14 @@ class EGAFileSystem(ArchiveFileSystem):
     def _auth_headers(self) -> dict:
         return {"Authorization": f"Bearer {self.auth.token()}"}
 
-    def _refresh_credentials(self) -> bool:
-        # EGA tokens live an hour; a multi-hundred-GB dataset import does not fit
-        # in one, so this path is routine rather than exceptional. Pass the token
-        # that was just rejected so concurrent readers refresh once between them.
-        self.auth.token(force=True, stale=self.auth.current_token)
+    def _refresh_credentials(self, sent: dict | None = None) -> bool:
+        # EGA tokens live an hour; a multi-hundred-GB dataset import does not fit in
+        # one, so this path is routine rather than exceptional. The token that was
+        # rejected is the one the request carried — read it from there, so
+        # concurrent readers share a single refresh instead of one each.
+        header = (sent or {}).get("Authorization", "")
+        rejected = header[len("Bearer ") :] if header.startswith("Bearer ") else None
+        self.auth.token(force=True, stale=rejected)
         return True
 
     def _auth_remediation(self, status: int, url: str) -> str:

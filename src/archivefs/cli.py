@@ -130,6 +130,15 @@ def cmd_ls(args: argparse.Namespace) -> int:
         entries = [fs.info(p) for p in fs.find(path)]
     else:
         entries = fs.ls(path, detail=True)
+        if args.long:
+            # A listing leaves an unknown size unknown, because resolving one can
+            # cost a request per file (GEO). Asking for -l is asking for that.
+            entries = [
+                fs.info(e["name"])
+                if e.get("type") == "file" and e.get("size") is None
+                else e
+                for e in entries
+            ]
     if args.json:
         print(json.dumps(entries, indent=2, default=str))
         return 0
@@ -150,6 +159,7 @@ def cmd_stat(args: argparse.Namespace) -> int:
 
 def cmd_get(args: argparse.Namespace) -> int:
     import hashlib
+    import posixpath
     from pathlib import Path
 
     fs, path = _filesystem(args.url, args.option)
@@ -158,6 +168,9 @@ def cmd_get(args: argparse.Namespace) -> int:
         destination.mkdir(parents=True, exist_ok=True)
         targets = [(p, destination / p[len(path) :].lstrip("/")) for p in fs.find(path)]
     else:
+        if destination.is_dir():
+            # `cp`-style: a directory destination means "in here, same name".
+            destination = destination / posixpath.basename(path)
         targets = [(path, destination)]
 
     failures = 0

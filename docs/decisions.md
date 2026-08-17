@@ -377,7 +377,7 @@ the base that answers a question about a path must ask `info()`.
 
 ---
 
-## D11 — 🩹 What an adversarial read of the finished code found
+## D11 — 🩹 What adversarial review of the finished code found
 
 Worth recording separately, because the pattern is instructive: **every one of these
 was silent**, and the two worst were in the features the design is proudest of. A
@@ -450,9 +450,54 @@ attributed to that archive (now promoted back out using the directory index, whi
 was served, which costs nothing and guards D3's alignment arithmetic against both a
 regression here and a proxy that re-ranges.
 
-**The lesson I would keep:** the tests were green throughout, and driving the real
-consumer (`dvc import-url` with `extract_zips`) plus an adversarial read found nine
-things the tests agreed with. Both are cheap; neither substitutes for the other.
+**A second pass, after those fixes, found one regression I had introduced and eight
+more:**
+
+* **The cache seed that stopped the manifest recursion made listing
+  thread-unsafe.** Seeding the *native* listing before fetching the manifest
+  published a half-resolved listing to every other thread — and DVC runs one
+  filesystem instance across a thread pool, so this is the normal case. A second
+  thread saw no manifest, no checksums and no drift report, or a spurious
+  `FileNotFoundError` on a relocated path. Reproduced with two threads and a slow
+  manifest fetch. Fixed with a re-entrant lock (re-entrant because the
+  same-thread re-entry is exactly what the seed is for), and a regression test that
+  races three readers.
+* **Zenodo's fallback data URL was unquoted** — and it is the *common* path, since
+  real record JSON carries the URL under `links.self` rather than `links.content`.
+  A `#` or `?` in a filename truncated the URL. Now prefers the API's own link and
+  quotes the fallback.
+* **The token-stampede fix was incomplete**: it read the *current* token after the
+  401, which under concurrency is a token a peer may already have refreshed, so the
+  guard matched nothing. The rejected token is now threaded down from the failed
+  request's own headers, which is the only value that is definitionally correct.
+* **A 401 or 503 while opening a ZIP was reported as "File is not a zip file"** —
+  `zipfile` reads the end of a file inside `except OSError: pass`, so an auth
+  failure told the user their perfectly good archive was corrupt. Now re-reads four
+  bytes to surface the real error, and only then says "not a ZIP".
+* **`walk()` now defaults to `on_error="raise"`.** fsspec's default omits the
+  subtree an error came from, which is the same silently-fewer-files failure as the
+  `ls()` bug arriving through a different door.
+* **`chiro = true` was treated as a manifest filename** (the false-ish spellings had
+  been handled, the true-ish ones had not).
+* **A manifest that matches nothing is refused**, instead of producing a listing
+  where every entry is a ghost that fails only when read — usually a manifest
+  written against a different layout.
+* **A manifest that nests one file inside another's path is refused** (`data.txt`
+  plus `data.txt/inner.txt` cannot both exist, and the children-only `ls` would
+  report the file and never descend).
+* `archivefs verify` raised a bare `ImportError` without chirograph rather than the
+  documented `MissingExtraError`; the `Content-Range` check now applies only to
+  `206` so it cannot pre-empt the whole-object-`200` fallback (which now warns,
+  since it silently re-downloads per block); `invalidate_cache` clears a record's
+  DOI aliases as well as its id; `archivefs get <file> <dir>` writes into the
+  directory; and `archivefs ls -l` resolves the sizes a listing deliberately leaves
+  unknown.
+
+**The lesson I would keep:** the tests were green at every stage, and each of three
+different cheap checks — driving the real consumer (`dvc import-url` with
+`extract_zips`), installing into a clean venv, and two adversarial reads — found
+things the others did not. The most valuable single habit was asking "if this went
+wrong, would anything say so?", because nearly every bug above answered no.
 
 ---
 

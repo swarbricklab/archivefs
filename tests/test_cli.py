@@ -241,3 +241,22 @@ def test_ls_is_children_only_and_R_recurses(fake_geo, capsys):
         f"{GSE}/sampleA/counts.csv.gz",
         f"{GSE}/sampleB/meta.tsv",
     ]
+
+
+def test_get_into_an_existing_directory_keeps_the_name(fake_geo, tmp_path, capsys):
+    """`cp`-style: a directory destination means "in here, under the same name"."""
+    fake_geo(manifest_bytes())
+    target_dir = tmp_path / "into"
+    target_dir.mkdir()
+    assert main(["get", f"geo://{GSE}/meta.tsv", str(target_dir)]) == 0
+    assert (target_dir / "meta.tsv").read_bytes() == BODIES["meta.tsv"]
+
+
+def test_ls_long_resolves_unknown_sizes(fake_geo, capsys):
+    """A listing leaves an unknown size unknown; -l is a request to resolve it."""
+    fake_geo()  # no manifest, so GEO's index gives no usable sizes
+    assert main(["ls", f"geo://{GSE}"]) == 0
+    assert main(["ls", "-l", f"geo://{GSE}"]) == 0
+    out = capsys.readouterr().out
+    assert "?" not in out.split("\n")[-2]  # the -l lines carry real numbers
+    assert str(len(BODIES["meta.tsv"])) in out

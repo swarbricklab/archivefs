@@ -357,3 +357,20 @@ def test_member_names_are_quoted_in_urls(fake_geo, monkeypatch):
     url = fs.ls(GSE)[0]["url"]
     assert url.endswith("odd%23name.txt")
     assert "#" not in url
+
+
+def test_walk_raises_rather_than_omitting_a_failing_subtree(fake_geo, monkeypatch):
+    """fsspec's walk defaults to on_error="omit", which turns a mid-tree failure
+    into silently fewer files and exit 0 — the wrong default for a tool whose job
+    is a complete, verified copy."""
+    fs = GEOFileSystem(skip_instance_cache=True)
+    fs.ls(GSE)  # warm the listing
+
+    def explode(*args, **kwargs):
+        raise OSError("network went away")
+
+    monkeypatch.setattr(fs, "ls", explode)
+    with pytest.raises(OSError, match="network went away"):
+        fs.find(GSE)
+    # the default is ours, and a caller can still ask for the old behaviour
+    assert list(fs.walk(GSE, on_error="omit")) == []
