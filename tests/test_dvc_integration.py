@@ -195,3 +195,35 @@ def test_ega_without_credentials_fails_with_our_message(repo):
     combined = result.stdout + result.stderr
     # our remediation must survive DVC's error wrapping
     assert "EGA_PASSWORD" in combined or "no username and password found" in combined
+
+
+def test_update_refreshes_and_materialises(repo):
+    """`dvc update` is half of the design's target UX; it must work both ways."""
+    root, run = repo
+    assert run("import-url", "--no-download", ZENODO_FILE, "logo.zip").returncode == 0
+    assert run("update", "logo.zip.dvc", "--no-download").returncode == 0
+    assert not (root / "logo.zip").exists()
+    assert run("update", "logo.zip.dvc").returncode == 0
+    assert hashlib.md5((root / "logo.zip").read_bytes()).hexdigest() == ZENODO_MD5  # noqa: S324
+
+
+def test_zip_transparency_through_a_dvc_remote(repo):
+    """The workspace must hold the extracted tree, not the archive.
+
+    This caught a real bug: info() called the ZIP a directory while isdir() —
+    which is what DVC's download path asks — called it a file, so the workspace
+    got the .zip. Every derived predicate now goes through info().
+    """
+    root, run = repo
+    assert run("remote", "add", "-q", "zen", "zenodo://1486184").returncode == 0
+    assert run("remote", "modify", "-q", "zen", "extract_zips", "true").returncode == 0
+
+    result = run("import-url", "remote://zen/github-mark.zip", "tree")
+    assert result.returncode == 0, result.stderr
+    spec = yaml.safe_load((root / "tree.dvc").read_text())
+    assert spec["deps"][0]["md5"].endswith(".dir")
+    assert spec["deps"][0]["nfiles"] == 2
+
+    extracted = sorted(p.name for p in (root / "tree").iterdir())
+    assert extracted == ["github-mark.svg", "md5sum"]
+    assert not (root / "tree").is_file()

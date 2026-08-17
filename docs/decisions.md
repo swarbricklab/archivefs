@@ -327,7 +327,45 @@ the same checks anyway. Revisit if we meet a real archive `zipfile` cannot open.
 
 ---
 
-## D10 — smaller calls, in one place
+## D10 — 🩹 Every derived predicate goes through `info()`, never the internal lookup
+
+**Found by driving the real thing**, which is why it is worth writing down: no unit
+test caught it, and the symptom was silent.
+
+The base implemented `exists`/`isdir`/`isfile`/`checksum`/`ukey`/`cat_file`/`_open`
+in terms of its *internal* metadata lookup (`_resolve`) rather than the public
+`info()`. Zenodo overrides `info()` to present a ZIP member as a directory when
+`extract_zips` is on — so `info()` said "directory" while `isdir()` said "file".
+
+DVC's download path asks `isdir()`. Result: `dvc import-url` recorded the dep
+correctly as a directory (`.dir` hash, `nfiles: 2`) and then **wrote the `.zip`
+into the workspace instead of its contents** — precisely the "half-solution where
+the manifest says ZIP but the workspace holds a directory" the design warns against,
+with no error anywhere.
+
+**Fix:** the derived methods call `self.info()`; `_resolve()` is only what `info()`
+is built from. A comment in the base says why, because the tempting "optimisation"
+is to call `_resolve` and skip a layer. Regression tests at both levels: fsspec
+(`isdir`/`isfile`/`exists` must agree with `info()["type"]`) and end-to-end (a DVC
+remote with `extract_zips` must leave an extracted *tree* in the workspace).
+
+**Verified after the fix:**
+
+```
+$ dvc remote add zen zenodo://1486184 && dvc remote modify zen extract_zips true
+$ dvc import-url remote://zen/github-mark.zip tree/
+$ find tree -type f
+tree/md5sum
+tree/github-mark.svg
+```
+
+**The general lesson**, worth keeping in mind for the next backend: a subclass
+expresses "how this archive presents itself" by overriding `info()`, so anything in
+the base that answers a question about a path must ask `info()`.
+
+---
+
+## D11 — smaller calls, in one place
 
 * **`checksum()` is overridden** on every backend. `AbstractFileSystem.checksum`
   hashes `info()` + mtime, which would throw away a real MD5 in favour of a token

@@ -395,3 +395,25 @@ def test_a_version_identifier_does_not_warn(fs, caplog):
     with caplog.at_level("WARNING"):
         fs.ls(DOI)
     assert "concept identifier" not in caplog.text
+
+
+def test_isdir_agrees_with_info_for_a_transparent_zip(zfs):
+    """They disagreed once, and DVC materialised the ZIP instead of its contents.
+
+    Every derived predicate must go through info(), which is where a backend
+    expresses "this member is presented as a directory".
+    """
+    path = f"{RECID}/archive.zip"
+    assert zfs.info(path)["type"] == "directory"
+    assert zfs.isdir(path) is True
+    assert zfs.isfile(path) is False
+    assert zfs.exists(path) is True
+    # and the interior really is walkable, which is what DVC's download path needs
+    assert zfs.find(path)
+
+
+def test_opaque_zip_is_a_file_everywhere(fs):
+    path = f"{RECID}/archive.zip"
+    assert fs.info(path)["type"] == "file"
+    assert fs.isfile(path) is True
+    assert fs.isdir(path) is False

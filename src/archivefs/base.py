@@ -422,22 +422,28 @@ class ArchiveFileSystem(AbstractFileSystem):
     def info(self, path: str, **kwargs: Any) -> dict:
         return self._resolve(path)
 
+    # NB: everything below derives from ``self.info()``, never from ``_resolve()``
+    # directly. A subclass that presents something differently — Zenodo showing a
+    # ZIP member as a directory, GEO resolving a missing size — overrides ``info``,
+    # and calling ``_resolve`` here would silently bypass that. It did: with
+    # ``extract_zips`` on, ``info()`` called a ZIP a directory while ``isdir()``
+    # called it a file, so DVC materialised the archive instead of its contents.
     def exists(self, path: str, **kwargs: Any) -> bool:
         try:
-            self._resolve(path)
+            self.info(path)
         except (ArchiveNotFoundError, AuthenticationError):
             return False
         return True
 
     def isdir(self, path: str) -> bool:
         try:
-            return self._resolve(path).get("type") == "directory"
+            return self.info(path).get("type") == "directory"
         except ArchiveNotFoundError:
             return False
 
     def isfile(self, path: str) -> bool:
         try:
-            return self._resolve(path).get("type") == "file"
+            return self.info(path).get("type") == "file"
         except ArchiveNotFoundError:
             return False
 
@@ -448,10 +454,10 @@ class ArchiveFileSystem(AbstractFileSystem):
         throw away a real MD5 in favour of a token that says nothing about the
         bytes. Every consumer that asks for a checksum wants the former.
         """
-        return self._resolve(path).get("md5")
+        return self.info(path).get("md5")
 
     def ukey(self, path: str) -> str:
-        info = self._resolve(path)
+        info = self.info(path)
         return (
             info.get("md5")
             or info.get("archive_version")
@@ -543,7 +549,7 @@ class ArchiveFileSystem(AbstractFileSystem):
     def cat_file(
         self, path: str, start: int | None = None, end: int | None = None, **kwargs: Any
     ) -> bytes:
-        info = self._resolve(path)
+        info = self.info(path)
         if info.get("type") == "directory":
             raise IsADirectoryError(path)
         size = self._size_of(info)
@@ -565,7 +571,7 @@ class ArchiveFileSystem(AbstractFileSystem):
                 f"{self.archive_name} is read-only through archivefs. Deposit is a "
                 f"separate, human-supervised process — see the deposition SOP."
             )
-        info = self._resolve(path)
+        info = self.info(path)
         if info.get("type") == "directory":
             raise IsADirectoryError(path)
         return ArchiveFile(
