@@ -63,13 +63,15 @@ def fake_geo(monkeypatch):
     return make
 
 
-def manifest_bytes() -> bytes:
+def manifest_bytes(relocate: bool = False) -> bytes:
     chirograph = pytest.importorskip("chirograph")
+    samples = {"counts.csv.gz": "sampleA", "meta.tsv": "sampleB"}
     entries = [
         chirograph.FileEntry(
-            relpath=name,
+            relpath=f"{samples[name]}/{name}" if relocate else name,
             md5=hashlib.md5(body).hexdigest(),  # noqa: S324
             size=len(body),
+            source_path=name if relocate else None,
         )
         for name, body in BODIES.items()
     ]
@@ -223,3 +225,19 @@ def test_our_errors_are_printed_not_raised(fake_geo, capsys):
     err = capsys.readouterr().err
     assert "ArchiveNotFoundError" in err
     assert "Traceback" not in err
+
+
+def test_ls_is_children_only_and_R_recurses(fake_geo, capsys):
+    """ls() must be children-only (fsspec's walk keys files by basename), so the
+    recursive listing needs its own flag."""
+    fake_geo(manifest_bytes(relocate=True))
+    assert main(["ls", f"geo://{GSE}"]) == 0
+    shallow = capsys.readouterr().out.split()
+    assert shallow == [f"{GSE}/sampleA", f"{GSE}/sampleB"]
+
+    assert main(["ls", "-R", f"geo://{GSE}"]) == 0
+    deep = capsys.readouterr().out.split()
+    assert sorted(deep) == [
+        f"{GSE}/sampleA/counts.csv.gz",
+        f"{GSE}/sampleB/meta.tsv",
+    ]

@@ -37,6 +37,7 @@ Designed with GEO and dbGaP in view, per the plan:
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any, ClassVar
 
@@ -150,6 +151,21 @@ class ArchiveFileSystem(AbstractFileSystem):
         """Split into ``(container, member)``. Override for exotic grammars."""
         container, _, member = path.partition("/")
         return container, member
+
+    def relpath(self, container: str, path: str) -> str:
+        """A member's path *within* its container.
+
+        Not ``path.split("/", 1)[-1]``: a container is not always one segment.
+        Zenodo's DOI form (``10.5281/zenodo.1486184``) is two, and assuming one
+        turned ``…/data.csv`` into ``zenodo.1486184/data.csv`` — which then missed
+        every manifest lookup and, worse, sent manifest resolution back through
+        ``cat_file`` into unbounded recursion (125 live API calls before Python
+        gave up).
+        """
+        if path == container:
+            return ""
+        prefix = f"{container}/"
+        return path[len(prefix) :] if path.startswith(prefix) else path
 
     # ------------------------------------------------------- subclass contract
 
@@ -307,16 +323,21 @@ class ArchiveFileSystem(AbstractFileSystem):
         from archivefs import chiro as chiro_mod
 
         self._manifest_used[container] = None
-        if self.chiro is False or self.chiro is None:
+        # Config files are INI, so "false" can arrive as a string. Treating that as
+        # a *manifest path* would be an obscure way to disobey the user.
+        if not self.chiro or (
+            isinstance(self.chiro, str)
+            and self.chiro.strip().lower() in ("false", "0", "no", "off", "none")
+        ):
             return native
 
         explicit = (
             self.chiro
-            if isinstance(self.chiro, str) and self.chiro != "auto"
+            if isinstance(self.chiro, str) and self.chiro.strip().lower() != "auto"
             else None
         )
         if explicit is None:
-            names = [path.split("/", 1)[-1] for path in native]
+            names = [self.relpath(container, path) for path in native]
             discovered = chiro_mod.discover_manifest(names)
             if discovered is None:
                 return native
@@ -337,12 +358,22 @@ class ArchiveFileSystem(AbstractFileSystem):
             logger.warning("%s", message)
             return native
 
-        manifest = chiro_mod.load_manifest(
-            self, manifest_path, native.get(manifest_path)
-        )
-        members, drift = chiro_mod.apply_manifest(
-            self, container, native, manifest_path, manifest
-        )
+        # Seed the cache with the native listing *before* fetching the manifest.
+        # Fetching it may go back through cat_file() — it does whenever the path
+        # is not an exact key of this listing, e.g. a mistyped or withdrawn
+        # `chiro=` path — and without this the lookup re-enters _members() for the
+        # container currently being resolved, once per frame, hammering the archive
+        # until Python's recursion limit stops it (200+ metadata requests observed).
+        self._member_cache[container] = native
+        try:
+            manifest = chiro_mod.load_manifest(
+                self, manifest_path, native.get(manifest_path)
+            )
+            members, drift = chiro_mod.apply_manifest(
+                self, container, native, manifest_path, manifest
+            )
+        finally:
+            self._member_cache.pop(container, None)
         self._manifest_used[container] = manifest_path
         self._manifests[container] = manifest
         self._drift[container] = drift
@@ -392,7 +423,7 @@ class ArchiveFileSystem(AbstractFileSystem):
         matched = self._match_member(members, path, member)
         if matched is not None:
             return matched
-        available = sorted(p.split("/", 1)[-1] for p in members)
+        available = sorted(self.relpath(container, p) for p in members)
         shown = ", ".join(available[:6]) + (" …" if len(available) > 6 else "")
         raise ArchiveNotFoundError(
             f"{member!r} is not in {container}. It holds: {shown or '(nothing)'}"
@@ -401,6 +432,21 @@ class ArchiveFileSystem(AbstractFileSystem):
     # ----------------------------------------------------- fsspec read surface
 
     def ls(self, path: str = "", detail: bool = True, **kwargs: Any) -> list:
+        """Immediate children of ``path`` — *not* every descendant.
+
+        The distinction is not cosmetic. fsspec's ``walk`` (and so ``find``,
+        ``glob``, ``expand_path`` and ``get(recursive=True)``, which DVC's
+        directory pull goes through) keys each directory's files **by basename**.
+        Return a flattened tree here and two members with the same basename at
+        different depths overwrite each other: the pull writes fewer files than
+        the deposit holds, exit code 0, no warning.
+
+        That is not hypothetical for us — it is the normal shape of the two
+        features that produce nested paths: a ``.chiro`` manifest relocating a flat
+        deposit into a per-sample tree (``sampleA/matrix.mtx``,
+        ``sampleB/matrix.mtx``) and EGA's ``layout="nested"``, which exists
+        *because* display names repeat across accessions.
+        """
         path = self._strip_protocol(path)
         if not path:
             entries = self._list_root()
@@ -408,16 +454,33 @@ class ArchiveFileSystem(AbstractFileSystem):
 
         container, member = self._split(path)
         members = self._members(container)
-        if not member:
-            entries = list(members.values())
-            return entries if detail else [e["name"] for e in entries]
+        if member and path in members:  # a file lists as itself
+            info = members[path]
+            return [info] if detail else [info["name"]]
 
-        prefix = f"{path}/"
-        nested = [info for p, info in members.items() if p.startswith(prefix)]
-        if nested:
-            return nested if detail else [i["name"] for i in nested]
-        info = self._resolve(path)
-        return [info] if detail else [info["name"]]
+        prefix = f"{container}/" if not member else f"{path}/"
+        entries: dict[str, dict] = {}
+        for member_path, info in members.items():
+            if not member_path.startswith(prefix):
+                continue
+            head, separator, _ = member_path[len(prefix) :].partition("/")
+            if separator:
+                child = f"{prefix}{head}"
+                entries.setdefault(
+                    child, {"name": child, "type": "directory", "size": 0}
+                )
+            else:
+                entries[member_path] = info
+
+        if not entries:
+            # Either a path that does not exist (raises, with a helpful message)
+            # or an empty directory.
+            info = self._resolve(path)
+            if info.get("type") == "file":
+                return [info] if detail else [info["name"]]
+            return []
+        out = [entries[key] for key in sorted(entries)]
+        return out if detail else [e["name"] for e in out]
 
     def info(self, path: str, **kwargs: Any) -> dict:
         return self._resolve(path)
@@ -429,9 +492,15 @@ class ArchiveFileSystem(AbstractFileSystem):
     # ``extract_zips`` on, ``info()`` called a ZIP a directory while ``isdir()``
     # called it a file, so DVC materialised the archive instead of its contents.
     def exists(self, path: str, **kwargs: Any) -> bool:
+        """``False`` means "not in the archive", never "could not tell".
+
+        An expired token or a revoked DAC approval is not absence, and reporting it
+        as absence hides the one message that would tell the user what to fix, so
+        :class:`~archivefs.errors.AuthenticationError` propagates.
+        """
         try:
             self.info(path)
-        except (ArchiveNotFoundError, AuthenticationError):
+        except ArchiveNotFoundError:
             return False
         return True
 
@@ -503,6 +572,17 @@ class ArchiveFileSystem(AbstractFileSystem):
                 timeout=self.transfer_timeout,
             )
             try:
+                served = self._range_start(response)
+                if served is not None and served != start:
+                    # Free to check, and it catches both a regression in our own
+                    # alignment arithmetic and a proxy that re-ranges the request.
+                    # EGA answers a misaligned start with the right length and the
+                    # wrong bytes, so length alone is not evidence of correctness.
+                    raise OSError(
+                        f"{self.archive_name} served bytes from offset {served} "
+                        f"when {start} was requested for {info.get('name')}; "
+                        f"refusing the response rather than trusting it."
+                    )
                 chunks = []
                 got = 0
                 for chunk in response.iter_content(1024 * 1024):
@@ -536,6 +616,13 @@ class ArchiveFileSystem(AbstractFileSystem):
             f"This is usually transient server-side; retry, and reduce concurrency "
             f"if it persists."
         )
+
+    @staticmethod
+    def _range_start(response: Any) -> int | None:
+        """The offset a ``206`` says it is serving from, if it says."""
+        header = response.headers.get("Content-Range", "")
+        match = re.match(r"\s*bytes\s+(\d+)-", header)
+        return int(match.group(1)) if match else None
 
     def _size_of(self, info: dict) -> int:
         size = info.get("size")

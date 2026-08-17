@@ -417,3 +417,69 @@ def test_opaque_zip_is_a_file_everywhere(fs):
     assert fs.info(path)["type"] == "file"
     assert fs.isfile(path) is True
     assert fs.isdir(path) is False
+
+
+def test_a_zero_byte_file_is_readable(fake_zenodo):
+    """`size or filesize` turned a legitimately empty file into an unknown size,
+    and then into an OSError on the first read — failing the whole pull."""
+    fake_zenodo.record["files"].append(
+        {
+            "id": "ccc",
+            "key": "empty.txt",
+            "size": 0,
+            "checksum": f"md5:{hashlib.md5(b'').hexdigest()}",  # noqa: S324
+            "links": {
+                "self": f"https://zenodo.org/api/records/{RECID}/files/empty.txt/content"
+            },
+        }
+    )
+    fake_zenodo.bodies["empty.txt"] = b""
+    fs = ZenodoFileSystem(skip_instance_cache=True)
+    assert fs.info(f"{RECID}/empty.txt")["size"] == 0
+    assert fs.cat_file(f"{RECID}/empty.txt") == b""
+    with fs.open(f"{RECID}/empty.txt", "rb") as handle:
+        assert handle.read() == b""
+
+
+def test_a_file_with_no_published_checksum_reports_none_not_empty_string(fake_zenodo):
+    fake_zenodo.record["files"].append(
+        {
+            "id": "ddd",
+            "key": "nochecksum.txt",
+            "size": 3,
+            "links": {
+                "self": f"https://zenodo.org/api/records/{RECID}/files/nochecksum.txt/content"
+            },
+        }
+    )
+    fake_zenodo.bodies["nochecksum.txt"] = b"abc"
+    fs = ZenodoFileSystem(skip_instance_cache=True)
+    info = fs.info(f"{RECID}/nochecksum.txt")
+    assert info["md5"] is None  # not ""
+    assert info["checksum"] is None
+    assert info["checksum_type"] is None
+    assert fs.checksum(f"{RECID}/nochecksum.txt") is None
+
+
+def test_invalidate_cache_drops_the_record_json_too(fs, fake_zenodo):
+    """The record JSON *contains* the file listing, so a stale record is a stale
+    listing however thoroughly the member cache is cleared."""
+    assert "samples.csv" in " ".join(fs.ls(RECID, detail=False))
+    fake_zenodo.record["files"] = [
+        entry for entry in fake_zenodo.record["files"] if entry["key"] != "samples.csv"
+    ]
+    fs.invalidate_cache()
+    assert "samples.csv" not in " ".join(fs.ls(RECID, detail=False))
+
+
+def test_extract_zips_off_as_a_string_means_off(fake_zenodo):
+    """DVC config files are INI, so booleans arrive as strings; "false" is truthy."""
+    fs = ZenodoFileSystem(extract_zips=False, skip_instance_cache=True)
+    assert fs.info(f"{RECID}/archive.zip")["type"] == "file"
+
+
+def test_chiro_off_as_a_string_is_not_a_manifest_path(fake_zenodo):
+    fs = ZenodoFileSystem(chiro="false", skip_instance_cache=True)
+    # "false" must not be treated as the name of a manifest to fetch
+    assert fs.ls(RECID, detail=False)
+    assert fs.manifest_path_for(RECID) is None

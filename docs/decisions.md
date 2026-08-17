@@ -365,7 +365,86 @@ the base that answers a question about a path must ask `info()`.
 
 ---
 
-## D11 — smaller calls, in one place
+## D11 — 🩹 What an adversarial read of the finished code found
+
+Worth recording separately, because the pattern is instructive: **every one of these
+was silent**, and the two worst were in the features the design is proudest of. A
+reviewer was pointed at the finished package and asked for correctness bugs the tests
+did not cover. Findings, with what each would have done to real data:
+
+**`ls()` returned every descendant, not the immediate children.** fsspec's `walk`
+— and therefore `find`, `glob`, `expand_path` and `get(recursive=True)`, which is
+how DVC pulls a directory — keys each directory's files **by basename**. Given a
+flattened listing, two members with the same basename at different depths overwrite
+each other, so the pull writes fewer files than the deposit holds, exit code 0, no
+warning. And this is the *normal* shape of the two features that produce nested
+paths: a `.chiro` manifest relocating a flat deposit into `sampleA/matrix.mtx` +
+`sampleB/matrix.mtx`, and EGA's `layout="nested"`, which exists precisely *because*
+display names repeat. Demonstrated against this repo's own test fixture: `ls` showed
+three files, `find` showed two. Fixed by returning children and synthesising
+directory entries; regression tests assert both matrices survive `find` and `glob`,
+and that their bytes differ so a collision would be real loss.
+
+**`path.split("/", 1)[-1]` assumed a container is one path segment.** Zenodo's DOI
+form is two (`10.5281/zenodo.1486184`). Every manifest lookup missed, so a
+manifest-bearing record looked like it had lost every file — and the fallback fetch
+re-entered the listing being built, once per frame, for **125 live API calls** before
+Python's recursion limit stopped it. Fixed with one `relpath(container, path)` helper
+used everywhere, plus a cache seed so that path cannot recurse at all even when a
+`chiro=` setting is mistyped.
+
+**An unfetchable manifest became an empty directory.** `ArchiveNotFoundError`
+subclasses `FileNotFoundError`, which fsspec's `walk` swallows — so a 404 on the
+manifest turned into a listing of nothing, i.e. a pull that succeeds and writes
+nothing. Manifest fetch failures are now `ManifestError`, which is deliberately
+*not* a `FileNotFoundError`.
+
+**An ambiguous EGA display name returned the first match.** Display names repeat
+across accessions, so this handed back a *different* file's bytes under the requested
+name — with that file's own md5 alongside, so a checksum check would have **passed**.
+Now refused, naming the accessions.
+
+**`extract_zips = false` in a DVC config meant true.** DVC config files are INI, so
+every value arrives as a string, and `"false"` is truthy. The keys were registered as
+bare `object`; booleans now go through DVC's own `Bool`, and `chiro` tolerates a
+stringified "false" rather than treating it as the name of a manifest to fetch.
+
+**A zero-byte Zenodo file was unreadable** (`size or filesize` turned `0` into
+`None`, then into an `OSError` on read), and a file with no published checksum got
+`md5 == ""` instead of `None` — which every consumer would read as "a checksum was
+published".
+
+**A `fileSize` below the encryption header gave a negative size**, and a read then
+returned `b""` with no error. EGA answers `200`-with-empty-fields for objects an
+account cannot see, so this was reachable.
+
+**Token refresh stampeded.** Every worker thread hitting the hour boundary POSTed its
+own token request, serialised behind the lock the class docstring said prevented
+exactly that. Refresh now passes the token it saw rejected and returns early if
+someone else already replaced it.
+
+**`invalidate_cache()` did not invalidate the backends' own caches.** A Zenodo
+record's JSON *contains* its file listing, so a refresh re-derived the same stale
+listing from a cache hit and appeared to do nothing.
+
+**`exists()` swallowed `AuthenticationError`**, reporting an expired token or revoked
+DAC approval as "not there" — hiding the one message that says what to fix.
+
+Smaller: two ZIP member names that normalise to one key silently dropped one
+(now refused); a `#` in a GEO filename truncated its URL at what `urljoin` reads as a
+fragment (now quoted); a top-level GEO file listed after an archive block was
+attributed to that archive (now promoted back out using the directory index, which
+*can* tell them apart); and `_fetch_checked` now checks the `Content-Range` start it
+was served, which costs nothing and guards D3's alignment arithmetic against both a
+regression here and a proxy that re-ranges.
+
+**The lesson I would keep:** the tests were green throughout, and driving the real
+consumer (`dvc import-url` with `extract_zips`) plus an adversarial read found nine
+things the tests agreed with. Both are cheap; neither substitutes for the other.
+
+---
+
+## D12 — smaller calls, in one place
 
 * **`checksum()` is overridden** on every backend. `AbstractFileSystem.checksum`
   hashes `info()` + mtime, which would throw away a real MD5 in favour of a token

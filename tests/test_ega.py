@@ -187,14 +187,37 @@ def test_ls_display_layout_uses_filenames(fake_ega):
 
 
 def test_ls_nested_layout_is_pyega3_shaped(fake_ega):
+    bam = "HG00096.GRCh38DH__1097r__10.10000-10100__21.5000000-5050000.bam"
     fs = EGAFileSystem(layout="nested", skip_instance_cache=True)
-    names = fs.ls(DATASET, detail=False)
-    assert f"{DATASET}/{BAM}/HG00096.GRCh38DH__1097r__10.10000-10100__21.5000000-5050000.bam" in names
-    # the accession level is a real directory
+    # ls gives children: the accession level is a real directory
+    assert f"{DATASET}/{BAM}" in fs.ls(DATASET, detail=False)
     assert fs.isdir(f"{DATASET}/{BAM}")
-    assert fs.ls(f"{DATASET}/{BAM}", detail=False) == [
-        f"{DATASET}/{BAM}/HG00096.GRCh38DH__1097r__10.10000-10100__21.5000000-5050000.bam"
-    ]
+    assert fs.ls(f"{DATASET}/{BAM}", detail=False) == [f"{DATASET}/{BAM}/{bam}"]
+    # find is the recursive one, and reaches every member
+    assert f"{DATASET}/{BAM}/{bam}" in fs.find(DATASET)
+    assert len(fs.find(DATASET)) == len(FILES)
+
+
+def test_nested_layout_survives_duplicate_display_names(fake_ega, monkeypatch):
+    """Why the nested layout exists: display names repeat across accessions.
+
+    A flattened ls() let fsspec's basename-keyed walk drop all but one of them.
+    """
+    clashing = [dict(f) for f in FILES]
+    for entry in clashing:
+        entry["displayFileName"] = "sample.bam"
+    server = fake_ega
+
+    def handler(method, url, headers, kwargs):
+        if url.endswith(f"/metadata/datasets/{DATASET}/files"):
+            return FakeResponse(200, json=clashing)
+        return FakeEGA.__call__(server, method, url, headers, kwargs)
+
+    monkeypatch.setattr(base_mod, "requests", FakeRequestsModule(handler))
+    fs = EGAFileSystem(layout="nested", skip_instance_cache=True)
+    found = fs.find(DATASET)
+    assert len(found) == len(FILES)  # not 1
+    assert all(p.endswith("/sample.bam") for p in found)
 
 
 def test_display_layout_disambiguates_collisions(fake_ega, monkeypatch):
@@ -434,3 +457,67 @@ def test_live_ranged_read(live_fs):
     path = f"EGAD00001009826/{BAM}"
     whole = live_fs.cat_file(path)
     assert live_fs.cat_file(path, start=1000, end=2000) == whole[1000:2000]
+
+
+def test_an_ambiguous_display_name_is_refused_not_guessed(fake_ega, monkeypatch):
+    """Returning the first match hands back a *different* file's bytes — with that
+    file's md5 alongside, so a checksum check would pass."""
+    clashing = [dict(f) for f in FILES[:2]]
+    for entry in clashing:
+        entry["displayFileName"] = "sample.bam"
+    server = fake_ega
+
+    def handler(method, url, headers, kwargs):
+        if url.endswith(f"/metadata/datasets/{DATASET}/files"):
+            return FakeResponse(200, json=clashing)
+        return FakeEGA.__call__(server, method, url, headers, kwargs)
+
+    monkeypatch.setattr(base_mod, "requests", FakeRequestsModule(handler))
+    fs = EGAFileSystem(skip_instance_cache=True)  # default accession layout
+    with pytest.raises(ArchiveNotFoundError) as exc:
+        fs.info(f"{DATASET}/sample.bam")
+    message = str(exc.value)
+    assert "ambiguous" in message
+    assert clashing[0]["fileId"] in message and clashing[1]["fileId"] in message
+    # addressing by accession still works, unambiguously
+    assert fs.info(f"{DATASET}/{clashing[0]['fileId']}")["ega"]["file_id"] == (
+        clashing[0]["fileId"]
+    )
+
+
+def test_an_implausible_filesize_does_not_become_a_negative_size(fake_ega, monkeypatch):
+    """EGA answers 200-with-empty-fields for objects an account cannot see.
+
+    fileSize 0 minus the 16-byte header gave size -16, and a read then returned
+    b"" with no error at all.
+    """
+    hidden = [{**FILES[0], "fileSize": 0, "plainChecksum": None}]
+    server = fake_ega
+
+    def handler(method, url, headers, kwargs):
+        if url.endswith(f"/metadata/datasets/{DATASET}/files"):
+            return FakeResponse(200, json=hidden)
+        return FakeEGA.__call__(server, method, url, headers, kwargs)
+
+    monkeypatch.setattr(base_mod, "requests", FakeRequestsModule(handler))
+    fs = EGAFileSystem(skip_instance_cache=True)
+    info = fs.info(f"{DATASET}/{hidden[0]['fileId']}")
+    assert info["size"] is None  # unknown, not -16
+
+
+def test_concurrent_401s_refresh_the_token_once(fs, fake_ega):
+    """One refresh between all the readers, not one per reader."""
+    fs.cat_file(f"{DATASET}/{BAM}")
+    before = fake_ega.token_requests
+    stale = fs.auth.current_token
+    # two readers both see the same rejected token and both ask for a refresh
+    fs.auth.token(force=True, stale=stale)
+    fs.auth.token(force=True, stale=stale)
+    assert fake_ega.token_requests == before + 1
+
+
+def test_invalidate_cache_clears_the_per_file_cache(fs):
+    fs.info(BAM)
+    assert BAM in fs._file_cache
+    fs.invalidate_cache()
+    assert not fs._file_cache

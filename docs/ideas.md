@@ -185,7 +185,7 @@ Worth revisiting once the imminent multi-part deposit exists as a concrete examp
 ## Things I deliberately did **not** do
 
 * **No SRA orchestration.** The GEO view registry makes it a one-class addition
-  ([`decisions.md` D10](decisions.md)), and a test proves an external view slots in.
+  ([`decisions.md` D12](decisions.md)), and a test proves an external view slots in.
   Building it now would be speculative work on the one path our data model excludes.
 * **No `[ega]` extra / pyega3 delegation.** See [D2](decisions.md). Reversible if
   someone wants pyega3's transfer tuning.

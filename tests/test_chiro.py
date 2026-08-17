@@ -122,14 +122,32 @@ def geo(monkeypatch):
 def test_manifest_becomes_the_listing_and_relocates_paths(geo):
     geo(manifest=build_manifest())
     fs = GEOFileSystem(skip_instance_cache=True)
-    names = sorted(fs.ls(GSE, detail=False))
-    # workspace layout from relpath, not the flat deposited names
-    assert names == [
+    # workspace layout from relpath, not the flat deposited names: the manifest's
+    # per-sample tree shows up as directories...
+    assert sorted(fs.ls(GSE, detail=False)) == [f"{GSE}/sampleA", f"{GSE}/sampleB"]
+    # ...and every file is reachable. find(), not ls(), is the recursive one — and
+    # it must not lose sampleA/matrix vs sampleB/matrix to a basename collision.
+    assert sorted(fs.find(GSE)) == [
         f"{GSE}/sampleA/barcodes.tsv.gz",
         f"{GSE}/sampleA/matrix.mtx.gz",
         f"{GSE}/sampleB/matrix.mtx.gz",
     ]
     assert fs.manifest_path_for(GSE) == f"{GSE}/{MANIFEST_NAME}"
+
+
+def test_colliding_basenames_across_samples_all_survive(geo):
+    """The bug this shape hides: fsspec's walk keys files by basename.
+
+    A flattened ls() made find()/glob()/DVC's directory pull drop one of two
+    same-named files in different sample directories, silently and with exit 0.
+    """
+    geo(manifest=build_manifest())
+    fs = GEOFileSystem(skip_instance_cache=True)
+    matrices = [p for p in fs.find(GSE) if p.endswith("matrix.mtx.gz")]
+    assert len(matrices) == 2, matrices
+    assert sorted(fs.glob(f"{GSE}/*/matrix.mtx.gz")) == matrices
+    # and the bytes differ, so a collision would be real data loss
+    assert fs.cat_file(matrices[0]) != fs.cat_file(matrices[1])
 
 
 def test_checksums_are_download_free_where_geo_had_none(geo):
@@ -190,7 +208,7 @@ def test_manifests_can_be_switched_off(geo):
 def test_explicit_manifest_path(geo):
     geo(manifest=build_manifest())
     fs = GEOFileSystem(chiro=f"{GSE}/{MANIFEST_NAME}", skip_instance_cache=True)
-    assert f"{GSE}/sampleA/matrix.mtx.gz" in fs.ls(GSE, detail=False)
+    assert f"{GSE}/sampleA/matrix.mtx.gz" in fs.find(GSE)
 
 
 def test_ambiguous_discovery_refuses_to_guess(geo):
@@ -242,7 +260,7 @@ def test_missing_upstream_file_is_listed_but_refuses_to_read(geo):
     drift = fs.drift(GSE)
     assert drift.missing_upstream == ["sampleB/matrix.mtx.gz"]
     # still listed, so the loss is visible rather than silently absent
-    assert f"{GSE}/sampleB/matrix.mtx.gz" in fs.ls(GSE, detail=False)
+    assert f"{GSE}/sampleB/matrix.mtx.gz" in fs.find(GSE)
     with pytest.raises(ManifestError) as exc:
         fs.cat_file(f"{GSE}/sampleB/matrix.mtx.gz")
     assert "diverged" in str(exc.value)
@@ -307,7 +325,7 @@ def test_verify_materialised_delegates_to_chirograph(geo, tmp_path):
     geo(manifest=build_manifest())
     fs = GEOFileSystem(skip_instance_cache=True)
     # materialise the deposit the way DVC would, then verify it
-    for path in fs.ls(GSE, detail=False):
+    for path in fs.find(GSE):
         relative = path[len(GSE) + 1 :]
         target = tmp_path / relative
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -322,7 +340,7 @@ def test_verify_materialised_delegates_to_chirograph(geo, tmp_path):
 def test_verify_catches_a_corrupted_file(geo, tmp_path):
     geo(manifest=build_manifest())
     fs = GEOFileSystem(skip_instance_cache=True)
-    for path in fs.ls(GSE, detail=False):
+    for path in fs.find(GSE):
         relative = path[len(GSE) + 1 :]
         target = tmp_path / relative
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -355,3 +373,90 @@ def test_body_hash_matches_chirographs_own(geo):
     geo(manifest=payload)
     fs = GEOFileSystem(skip_instance_cache=True)
     assert fs.info(f"{GSE}/sampleA/matrix.mtx.gz")["chiro"]["body_hash"] == declared
+
+
+def test_a_bogus_explicit_manifest_path_fails_fast(geo):
+    """It used to recurse: cat_file re-entered the listing being built, once per
+    frame, hammering the archive until Python's recursion limit stopped it."""
+    geo(manifest=build_manifest())
+    fs = GEOFileSystem(chiro=f"{GSE}/typo.chiro.json", skip_instance_cache=True)
+    with pytest.raises((ManifestError, FileNotFoundError)) as exc:
+        fs.ls(GSE)
+    assert "RecursionError" not in str(exc.value)
+
+
+def test_a_multi_segment_container_resolves_manifests(monkeypatch):
+    """Zenodo's DOI form is two path segments; assuming one broke everything.
+
+    The manifest lookups all missed (so every entry looked missing-upstream) and
+    the fetch fell back through cat_file into unbounded recursion.
+    """
+    from archivefs import base as base_mod_
+    from archivefs.backends.zenodo import ZenodoFileSystem
+
+    doi = "10.5281/zenodo.1486184"
+    bodies = {"data.csv": b"a,b\n1,2\n"}
+    manifest = chirograph.Manifest(
+        provenance_type=chirograph.PROVENANCE_SELF,
+        files=[
+            chirograph.FileEntry(
+                relpath="tidy/data.csv",
+                md5=md5(bodies["data.csv"]),
+                size=len(bodies["data.csv"]),
+                source_path="data.csv",
+            )
+        ],
+        record_accession="1486184",
+    ).to_bytes()
+    payloads = {**bodies, "rec.chiro.json": manifest}
+
+    def handler(method, url, headers, kwargs):
+        if url.endswith("/records/1486184"):
+            return FakeResponse(
+                200,
+                json={
+                    "id": 1486184,
+                    "doi": doi,
+                    "conceptrecid": "1486183",
+                    "revision": 1,
+                    "files": [
+                        {
+                            "key": name,
+                            "size": len(body),
+                            "checksum": f"md5:{md5(body)}",
+                            "links": {"content": f"https://zenodo.invalid/{name}"},
+                        }
+                        for name, body in payloads.items()
+                    ],
+                },
+            )
+        name = url.rsplit("/", 1)[-1]
+        if name in payloads:
+            return ranged(payloads[name], headers)
+        return FakeResponse(404, b"not found")
+
+    monkeypatch.setattr(base_mod_, "requests", FakeRequestsModule(handler))
+    fs = ZenodoFileSystem(skip_instance_cache=True)
+    assert fs.find(doi) == [f"{doi}/tidy/data.csv"]
+    info = fs.info(f"{doi}/tidy/data.csv")
+    assert not info.get("missing_upstream")
+    assert info["md5"] == md5(bodies["data.csv"])
+    assert fs.cat_file(f"{doi}/tidy/data.csv") == bodies["data.csv"]
+    assert fs.drift(doi).clean
+
+
+def test_an_unfetchable_manifest_is_not_an_empty_directory(geo):
+    """fsspec's walk() swallows FileNotFoundError, so ManifestError must not be one.
+
+    Otherwise a manifest that 404s turns the whole deposit into an empty listing —
+    a pull that succeeds and writes nothing.
+    """
+    geo(manifest=build_manifest())
+    fs = GEOFileSystem(chiro=f"{GSE}/absent.chiro.json", skip_instance_cache=True)
+    with pytest.raises(ManifestError):
+        fs.ls(GSE)
+    assert not isinstance(ManifestError("x"), FileNotFoundError)
+    # and the failure survives find(), which is what DVC's directory pull uses
+    fs2 = GEOFileSystem(chiro=f"{GSE}/absent.chiro.json", skip_instance_cache=True)
+    with pytest.raises(ManifestError):
+        fs2.find(GSE)

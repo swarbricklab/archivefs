@@ -298,3 +298,62 @@ def test_live_ranged_read_is_byte_exact(live_fs):
 def test_live_sample_accession(live_fs):
     names = live_fs.ls("GSM5354513", detail=False)
     assert names == ["GSM5354513/GSM5354513_CID3586.tar.gz"]
+
+
+def test_a_top_level_file_listed_after_an_archive_is_not_swallowed(fake_geo):
+    """GEO's filelist attributes every File row to the preceding Archive row.
+
+    The format cannot distinguish a genuine top-level file that happens to be
+    listed after an archive block — but the directory index can, so anything the
+    index also shows is promoted back out of the archive's contents.
+    """
+    fs = GEOFileSystem(skip_instance_cache=True)
+    counts = fs.info(f"{GSE}/{COUNTS}")
+    # the filelist lists COUNTS nowhere, but were it listed inside the tar block it
+    # must still come back as a top-level file with its own size
+    assert counts["type"] == "file"
+    contains = fs.info(f"{GSE}/GSE176078_RAW.tar")["geo"]["contains"]
+    assert COUNTS not in (contains or [])
+
+
+def test_filelist_promotion(fake_geo, monkeypatch):
+    listing = (
+        "#Archive/File\tName\tTime\tSize\tType\n"
+        "Archive\tGSE176078_RAW.tar\t04/10/2022 15:24:46\t558264320\tTAR\n"
+        "File\tGSM1_a.tar.gz\t06/02/2021 08:51:11\t19721175\tTAR\n"
+        f"File\t{COUNTS}\t04/10/2022 15:24:46\t5532343\tTXT\n"
+    )
+    original = FakeGEO.__call__
+
+    def handler(method, url, headers, kwargs):
+        if url.endswith("suppl/filelist.txt"):
+            return FakeResponse(200, listing.encode())
+        return original(fake_geo, method, url, headers, kwargs)
+
+    monkeypatch.setattr(base_mod, "requests", FakeRequestsModule(handler))
+    fs = GEOFileSystem(skip_instance_cache=True)
+    # the counts file is in the directory index, so it is top-level with a size...
+    assert fs.info(f"{GSE}/{COUNTS}")["size"] == 5532343
+    # ...while the genuine archive member (absent from the index) stays inside
+    contains = fs.info(f"{GSE}/GSE176078_RAW.tar")["geo"]["contains"]
+    assert contains == ["GSM1_a.tar.gz"]
+
+
+def test_member_names_are_quoted_in_urls(fake_geo, monkeypatch):
+    """A "#" in a filename would truncate the URL at what urljoin reads as a
+    fragment, quietly fetching the wrong object."""
+    index = '<html><a href="odd#name.txt">odd#name.txt</a></html>'
+    original = FakeGEO.__call__
+
+    def handler(method, url, headers, kwargs):
+        if url.endswith("suppl/filelist.txt"):
+            return FakeResponse(404, b"absent")
+        if url.endswith("/suppl/"):
+            return FakeResponse(200, index.encode())
+        return original(fake_geo, method, url, headers, kwargs)
+
+    monkeypatch.setattr(base_mod, "requests", FakeRequestsModule(handler))
+    fs = GEOFileSystem(skip_instance_cache=True)
+    url = fs.ls(GSE)[0]["url"]
+    assert url.endswith("odd%23name.txt")
+    assert "#" not in url

@@ -234,3 +234,22 @@ def test_status_probe_reports_what_actually_works():
     assert report["dvc_installed"] is True
     assert sorted(report["registered"]) == sorted(dvcfs.DVC_PROTOCOLS)
     assert report["deferred"] == ["dbgap"]
+
+
+def test_boolean_config_values_are_coerced_not_passed_as_strings():
+    """A DVC config file is INI, so `extract_zips = false` arrives as "false".
+
+    Registered as a bare object, that string reached the filesystem and was
+    truthy: ZIPs were presented as directories against the user's instruction.
+    """
+    dvcfs.register()
+    from dvc.config_schema import SCHEMA
+
+    validated = SCHEMA["remote"][str](
+        {"url": "zenodo://1486184", "extract_zips": "false"}
+    )
+    assert validated["extract_zips"] is False
+    validated = SCHEMA["remote"][str](
+        {"url": "zenodo://1486184", "extract_zips": "true"}
+    )
+    assert validated["extract_zips"] is True

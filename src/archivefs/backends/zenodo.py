@@ -102,6 +102,25 @@ class ZenodoFileSystem(ArchiveFileSystem):
         #: zip member path -> ZipFileSystem, created lazily
         self._zip_views: dict[str, Any] = {}
 
+    def invalidate_cache(self, path: str | None = None) -> None:
+        """Also drop the record JSON and any open ZIP views.
+
+        The base only knows about the member listing, but a Zenodo record's JSON
+        *contains* that listing — so without this, a refresh re-derived the same
+        stale listing from a cache hit and looked like it had done nothing.
+        """
+        super().invalidate_cache(path)
+        if path is None:
+            self._records.clear()
+            self._zip_views.clear()
+            return
+        container, _ = self._split(self._strip_protocol(path))
+        record = self._records.pop(container, None)
+        if record is not None:
+            self._records.pop(str(record.get("id")), None)
+        for zip_path in [p for p in self._zip_views if p.startswith(f"{container}/")]:
+            self._zip_views.pop(zip_path, None)
+
     # ------------------------------------------------------------------- auth
 
     def _auth_headers(self) -> dict:
@@ -224,14 +243,21 @@ class ZenodoFileSystem(ArchiveFileSystem):
             algorithm, _, digest = checksum.partition(":")
             if not digest:  # some responses give a bare hex digest
                 algorithm, digest = "md5", checksum
-            is_md5 = algorithm.lower() == "md5"
+            # No digest at all is not "md5 of nothing": leaving it as "" would make
+            # every consumer believe a checksum was published.
+            is_md5 = bool(digest) and algorithm.lower() == "md5"
+            # `or` would turn a legitimately empty (0-byte) file into an unknown
+            # size, and then into an OSError on the first read.
+            size = entry.get("size")
+            if size is None:
+                size = entry.get("filesize")
             members[f"{container}/{key}"] = {
                 "name": f"{container}/{key}",
                 "type": "file",
-                "size": entry.get("size") or entry.get("filesize"),
+                "size": size,
                 "checksum": digest if is_md5 else None,
                 "md5": digest if is_md5 else None,
-                "checksum_type": algorithm.upper() or None,
+                "checksum_type": algorithm.upper() if digest else None,
                 # The version DOI is an immutable token for this exact byte
                 # sequence — the load-bearing part of the ZIP integrity argument.
                 # Named `archive_version`, not `version_id`: DVC reads the latter
@@ -259,9 +285,10 @@ class ZenodoFileSystem(ArchiveFileSystem):
         path = f"{container}/{member}"
         if path in members:
             return members[path]
+        available = sorted(self.relpath(container, key) for key in members)
         raise ArchiveNotFoundError(
             f"{member!r} is not in Zenodo record {container}. It holds: "
-            f"{', '.join(sorted(k.split('/', 1)[-1] for k in members)) or '(no files)'}"
+            f"{', '.join(available) or '(no files)'}"
         )
 
     def _list_root(self) -> list[dict]:
@@ -284,7 +311,7 @@ class ZenodoFileSystem(ArchiveFileSystem):
         container, member = self.split_path(path)
         if not member:
             return None
-        keys = [p.split("/", 1)[-1] for p in self._members(container)]
+        keys = [self.relpath(container, p) for p in self._members(container)]
         # longest ZIP key that prefixes this path
         for key in sorted(keys, key=len, reverse=True):
             if not key.lower().endswith(".zip"):

@@ -34,7 +34,7 @@ import logging
 import re
 from html.parser import HTMLParser
 from typing import Any, ClassVar
-from urllib.parse import unquote, urljoin
+from urllib.parse import quote, unquote, urljoin
 
 from archivefs.base import ArchiveFileSystem
 from archivefs.errors import ArchiveNotFoundError, NotSupportedError
@@ -183,7 +183,22 @@ class SupplementaryView(GEOView):
         except ArchiveNotFoundError:
             logger.debug("%s has no filelist.txt; sizes resolve lazily", accession)
             return
-        for name, entry in parse_filelist(response.text).items():
+        entries = parse_filelist(response.text)
+        # A `File` row is attributed to the preceding `Archive` row, because that
+        # is what GEO's format means — but the format cannot distinguish a genuine
+        # top-level file listed after an archive block. The directory index can:
+        # anything the index also shows is top-level, so promote it back out.
+        for archive in [e for e in entries.values() if e.get("contains")]:
+            promoted = [
+                member
+                for member in archive["contains"]
+                if f"{accession}/{member['name']}" in members
+            ]
+            for member in promoted:
+                archive["contains"].remove(member)
+                entries.setdefault(member["name"], member)
+
+        for name, entry in entries.items():
             info = members.get(f"{accession}/{name}")
             if info is None:
                 continue
@@ -318,7 +333,9 @@ class GEOFileSystem(ArchiveFileSystem):
                 "none — GEO does not publish per-file checksums; supply a .chiro "
                 "manifest for download-free verification"
             ),
-            "url": urljoin(directory, name),
+            # quote: a "#" in a filename would otherwise truncate the URL at
+            # what urljoin reads as a fragment.
+            "url": urljoin(directory, quote(name)),
             "geo": {
                 "accession": accession,
                 "view": self.view_name,

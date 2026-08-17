@@ -218,3 +218,16 @@ def test_nested_zip_is_a_leaf(tmp_path):
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         safe_extract(zf, tmp_path / "out")
     assert (tmp_path / "out/inner.zip").read_bytes() == inner
+
+
+def test_names_that_normalise_to_one_key_are_refused(tmp_path):
+    """Keeping the last silently understates the archive and extracts one file."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as zf:
+        zf.writestr(zipfile.ZipInfo("a/b.txt"), b"one")
+        zf.writestr(zipfile.ZipInfo("./a/b.txt"), b"two")
+    with zipfile.ZipFile(io.BytesIO(buffer.getvalue())) as zf, pytest.raises(
+        UnsafeArchiveMemberError
+    ) as exc:
+        inspect_zip(zf)
+    assert "duplicates" in str(exc.value)

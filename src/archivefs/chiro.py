@@ -111,15 +111,25 @@ def load_manifest(
     re-enter the listing and recurse forever.
     """
     chirograph = _chirograph()
-    if info is not None:
-        payload = fs._fetch_range(info, 0, fs._size_of(info))
-    elif "://" in path or path.startswith("/"):
-        import fsspec
+    try:
+        if info is not None:
+            payload = fs._fetch_range(info, 0, fs._size_of(info))
+        elif "://" in path or path.startswith("/"):
+            import fsspec
 
-        with fsspec.open(path, "rb") as handle:
-            payload = handle.read()
-    else:
-        payload = fs.cat_file(path)
+            with fsspec.open(path, "rb") as handle:
+                payload = handle.read()
+        else:
+            payload = fs.cat_file(path)
+    except FileNotFoundError as exc:
+        # Deliberately *not* re-raised as a FileNotFoundError: fsspec's walk()
+        # swallows those, so an unfetchable manifest would surface as an empty
+        # directory — a listing that silently loses every file in the deposit.
+        raise ManifestError(
+            f"{path} is named as this deposit's manifest but could not be "
+            f"fetched ({exc}). Fix or remove the `chiro` setting, or pass "
+            f"chiro=False to fall back to the archive's own listing."
+        ) from exc
     try:
         return chirograph.loads(payload)
     except Exception as exc:  # chirograph raises its own SchemaError family
@@ -195,13 +205,13 @@ def apply_manifest(
     """
     if manifest is None:
         manifest = load_manifest(fs, manifest_path)
-    by_source = {path.split("/", 1)[-1]: path for path in native}
+    by_source = {fs.relpath(container, path): path for path in native}
     members: dict[str, dict] = {}
     drift = DriftReport(
         manifest_path=manifest_path,
         provenance_type=getattr(manifest, "provenance_type", None),
     )
-    accounted: set[str] = {manifest_path.split("/", 1)[-1]}
+    accounted: set[str] = {fs.relpath(container, manifest_path)}
 
     for entry in manifest.files:
         source = entry.source

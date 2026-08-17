@@ -120,8 +120,23 @@ class EGAAuth:
         self._expires_at = 0.0
         self._lock = threading.Lock()
 
-    def token(self, *, force: bool = False) -> str:
+    @property
+    def current_token(self) -> str | None:
+        """The token as it stands, without fetching one."""
+        return self._token
+
+    def token(self, *, force: bool = False, stale: str | None = None) -> str:
+        """The current token, fetching or refreshing only when it is really needed.
+
+        ``stale`` is the token whose rejection prompted the caller to ask for a
+        refresh. If someone else has already replaced it, this returns the
+        replacement instead of fetching again — otherwise every worker thread that
+        hits the hour boundary POSTs its own token request, serialised behind this
+        lock, and the last one waits for all the others.
+        """
         with self._lock:
+            if force and stale is not None and self._token not in (None, stale):
+                return self._token
             fresh_enough = (
                 self._token is not None
                 and time.time() < self._expires_at - TOKEN_REFRESH_MARGIN
@@ -275,6 +290,16 @@ class EGAFileSystem(ArchiveFileSystem):
         #: EGAF accession -> info, for dataset-less addressing
         self._file_cache: dict[str, dict] = {}
 
+    def invalidate_cache(self, path: str | None = None) -> None:
+        """Also drop the dataset-less per-file cache, which the base cannot see."""
+        super().invalidate_cache(path)
+        if path is None:
+            self._file_cache.clear()
+            return
+        container, member = self._split(self._strip_protocol(path))
+        for accession in (container, member.split("/")[0]):
+            self._file_cache.pop(accession, None)
+
     # ------------------------------------------------------------------- auth
 
     def _auth_headers(self) -> dict:
@@ -282,8 +307,9 @@ class EGAFileSystem(ArchiveFileSystem):
 
     def _refresh_credentials(self) -> bool:
         # EGA tokens live an hour; a multi-hundred-GB dataset import does not fit
-        # in one, so this path is routine rather than exceptional.
-        self.auth.token(force=True)
+        # in one, so this path is routine rather than exceptional. Pass the token
+        # that was just rejected so concurrent readers refresh once between them.
+        self.auth.token(force=True, stale=self.auth.current_token)
         return True
 
     def _auth_remediation(self, status: int, url: str) -> str:
@@ -345,9 +371,13 @@ class EGAFileSystem(ArchiveFileSystem):
 
     def _info_from_metadata(self, path: str, dataset: str | None, meta: dict) -> dict:
         encrypted_size = meta.get("fileSize")
+        # A size below the header length cannot be an encrypted object — EGA
+        # answers 200-with-empty-fields for objects an account cannot see, which
+        # would otherwise give size -16, and then a read that quietly returns b"".
         plain_size = (
             encrypted_size - ENCRYPTION_HEADER_BYTES
             if isinstance(encrypted_size, int)
+            and encrypted_size >= ENCRYPTION_HEADER_BYTES
             else None
         )
         checksum = meta.get("plainChecksum") or meta.get("unencryptedChecksum")
@@ -478,15 +508,33 @@ class EGAFileSystem(ArchiveFileSystem):
         A ``.dvc`` file written while ``layout="accession"`` must still resolve if
         someone later configures ``layout="display"``; the accession is the
         identity, the layout is presentation.
+
+        **Ambiguity is refused, not resolved.** Display names repeat across EGA
+        accessions, and returning the first match would hand back a *different*
+        file's bytes under the requested name — with that file's own md5 alongside,
+        so a checksum check would pass. Better to make the user name the accession.
         """
         wanted = member.split("/")[0]
+        matches: dict[str, dict] = {}
         for member_path, info in members.items():
             ega = info.get("ega", {})
-            if wanted in (ega.get("file_id"), ega.get("display_name")):
-                return info
-            if member_path.endswith(f"/{member}"):
-                return info
-        return None
+            if wanted in (ega.get("file_id"), ega.get("display_name")) or (
+                member_path.endswith(f"/{member}")
+            ):
+                matches[member_path] = info
+        if not matches:
+            return None
+        if len(matches) > 1:
+            accessions = sorted(
+                info.get("ega", {}).get("file_id") or path for info in matches.values()
+            )
+            raise ArchiveNotFoundError(
+                f"{member!r} is ambiguous in this dataset: {len(matches)} files "
+                f"share that name ({', '.join(accessions)}). EGA display names are "
+                f"not unique. Address it by EGAF accession, or use "
+                f"layout='nested' so every member has a distinct path."
+            )
+        return next(iter(matches.values()))
 
     # --------------------------------------------------------------- transfer
 

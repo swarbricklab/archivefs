@@ -21,8 +21,8 @@ backend:
 2. **No secret enters the committed artifact.** Non-secret identifiers
    (``username``, a path to a key file) may legitimately live in a committed
    ``.dvc``; secrets may not. Each :class:`Credential` says which it is, and
-   :meth:`CredentialResolver.warn_if_committed` exists so a backend can say so
-   out loud rather than hoping.
+   :meth:`CredentialResolver.committed_secrets` exists so a caller can check a
+   committed config rather than hoping.
 3. **A failure names every place that was searched**, in order — the error
    message doubles as the documentation of the chain.
 """

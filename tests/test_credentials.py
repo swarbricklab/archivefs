@@ -162,3 +162,12 @@ def test_describe_never_leaks_the_value():
     assert "sekrit" not in description
     assert "token from" in description
     assert "$A_USER" in description
+
+
+def test_the_documented_api_exists():
+    """The module docstring named a method that did not exist."""
+    assert hasattr(CredentialResolver, "committed_secrets")
+    import archivefs.credentials as module
+
+    assert "committed_secrets" in module.__doc__
+    assert "warn_if_committed" not in module.__doc__

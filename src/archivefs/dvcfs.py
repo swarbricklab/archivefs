@@ -160,9 +160,16 @@ DVC_PROTOCOLS: dict[str, str] = {
     "geo": "archivefs.dvcfs.GEODVCFileSystem",
 }
 
-#: Config keys DVC must accept for our remotes, beyond its common ones. These are
-#: the *non-secret* options; secrets are resolved from the environment at pull
-#: time and deliberately have no place in a DVC config file.
+#: Config keys DVC must accept for our remotes, beyond its common ones, and the
+#: type to coerce each to. **The type matters:** a DVC config file is INI, so every
+#: value arrives as a string — register `extract_zips` as a bare object and
+#: `extract_zips = false` reaches the filesystem as the string "false", which is
+#: truthy, so ZIPs get presented as directories against the user's explicit
+#: instruction. DVC's own booleans go through its `Bool`, and so must ours.
+#:
+#: These are the *non-secret* options; secrets are resolved from the environment at
+#: pull time and deliberately have no place in a DVC config file.
+_BOOL_KEYS = frozenset({"extract_zips"})
 _EXTRA_CONFIG_KEYS: dict[str, tuple[str, ...]] = {
     "ega": ("username", "password", "credentials_file", "layout", "chiro", "api_url"),
     "zenodo": ("token", "extract_zips", "api_url", "chiro"),
@@ -187,7 +194,10 @@ def register() -> list[str]:
             ),
         }
         config_schema.REMOTE_SCHEMAS[protocol] = {
-            **dict.fromkeys(_EXTRA_CONFIG_KEYS.get(protocol, ()), object),
+            **{
+                key: (config_schema.Bool if key in _BOOL_KEYS else object)
+                for key in _EXTRA_CONFIG_KEYS.get(protocol, ())
+            },
             **config_schema.REMOTE_COMMON,
         }
 

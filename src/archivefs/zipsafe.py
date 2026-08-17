@@ -201,6 +201,15 @@ def inspect_zip(
                 f"{limits.max_ratio:.0f}:1 limit."
             )
         warnings.extend(check_member_portability(info.filename))
+        if name in members:
+            # "a/b.txt", "./a/b.txt" and "a\\b.txt" all normalise to one key.
+            # Silently keeping the last would understate the archive and extract
+            # one file where the archive declares two.
+            raise UnsafeArchiveMemberError(
+                f"{info.filename} (duplicates {members[name].filename!r} after "
+                f"normalisation)",
+                target,
+            )
         members[name] = info
 
     if total > limits.max_total_uncompressed:

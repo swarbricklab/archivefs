@@ -122,7 +122,11 @@ def cmd_info(args: argparse.Namespace) -> int:
 
 def cmd_ls(args: argparse.Namespace) -> int:
     fs, path = _filesystem(args.url, args.option)
-    entries = fs.ls(path, detail=True)
+    if args.recursive:
+        # ls() is children-only, as fsspec requires; find() is the recursive one.
+        entries = [fs.info(p) for p in fs.find(path)]
+    else:
+        entries = fs.ls(path, detail=True)
     if args.json:
         print(json.dumps(entries, indent=2, default=str))
         return 0
@@ -277,6 +281,12 @@ def build_parser() -> argparse.ArgumentParser:
     ls = sub.add_parser("ls", help="list a record's files")
     ls.add_argument("url")
     ls.add_argument("-l", "--long", action="store_true", help="show size and checksum")
+    ls.add_argument(
+        "-R",
+        "--recursive",
+        action="store_true",
+        help="list every file, not just this level's children",
+    )
     ls.add_argument("--json", action="store_true")
     add_common(ls)
     ls.set_defaults(func=cmd_ls)
