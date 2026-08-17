@@ -47,6 +47,8 @@ from archivefs.credentials import Credential, CredentialResolver
 from archivefs.errors import (
     ArchiveNotFoundError,
     AuthenticationError,
+    ManifestError,
+    MissingExtraError,
     NotSupportedError,
 )
 
@@ -96,6 +98,7 @@ class ArchiveFileSystem(AbstractFileSystem):
         max_retries: int = 5,
         request_timeout: int = 300,
         transfer_timeout: int = 1800,
+        chiro: str | bool = "auto",
         **kwargs: Any,
     ) -> None:
         # Anything a subclass declared as a credential is consumed here rather
@@ -107,6 +110,7 @@ class ArchiveFileSystem(AbstractFileSystem):
         self.max_retries = max_retries
         self.request_timeout = request_timeout
         self.transfer_timeout = transfer_timeout
+        self.chiro = chiro
         if block_size:
             self.blocksize = block_size
         self.creds = CredentialResolver(
@@ -114,6 +118,12 @@ class ArchiveFileSystem(AbstractFileSystem):
         )
         self.session = self._make_session()
         self._member_cache: dict[str, dict[str, dict]] = {}
+        #: container -> manifest path actually used (or None)
+        self._manifest_used: dict[str, str | None] = {}
+        #: container -> DriftReport, when a manifest was applied
+        self._drift: dict[str, Any] = {}
+        #: container -> parsed manifest, so verification never re-fetches it
+        self._manifests: dict[str, Any] = {}
 
     # ------------------------------------------------------------------ set-up
 
@@ -261,15 +271,109 @@ class ArchiveFileSystem(AbstractFileSystem):
 
     def _members(self, container: str) -> dict[str, dict]:
         if container not in self._member_cache:
-            self._member_cache[container] = self._load_members(container)
+            native = self._load_members(container)
+            self._member_cache[container] = self._resolve_with_manifest(
+                container, native
+            )
         return self._member_cache[container]
 
     def invalidate_cache(self, path: str | None = None) -> None:
         if path is None:
             self._member_cache.clear()
+            self._manifest_used.clear()
+            self._drift.clear()
+            self._manifests.clear()
             return
         container, _ = self._split(self._strip_protocol(path))
         self._member_cache.pop(container, None)
+        self._manifest_used.pop(container, None)
+        self._drift.pop(container, None)
+        self._manifests.pop(container, None)
+
+    # ------------------------------------------------------------ .chiro layer
+
+    def _resolve_with_manifest(
+        self, container: str, native: dict[str, dict]
+    ) -> dict[str, dict]:
+        """Let a ``.chiro`` manifest *be* the listing, when there is one.
+
+        ``docs/design.md``'s central abstraction: the manifest is the front door
+        for every backend, and the backend is reduced to a byte-fetcher. Falls back
+        to the native listing when there is no manifest, when manifests are turned
+        off, or when the ``chirograph`` package is not installed — the last of those
+        with a warning, because working with weaker guarantees beats refusing to
+        work, but a silent downgrade would be dishonest.
+        """
+        from archivefs import chiro as chiro_mod
+
+        self._manifest_used[container] = None
+        if self.chiro is False or self.chiro is None:
+            return native
+
+        explicit = (
+            self.chiro
+            if isinstance(self.chiro, str) and self.chiro != "auto"
+            else None
+        )
+        if explicit is None:
+            names = [path.split("/", 1)[-1] for path in native]
+            discovered = chiro_mod.discover_manifest(names)
+            if discovered is None:
+                return native
+            manifest_path = f"{container}/{discovered}"
+        else:
+            manifest_path = explicit
+
+        if not chiro_mod.have_chirograph():
+            message = (
+                f"{manifest_path} is a Chirograph manifest, which would give "
+                f"download-free checksums for {container}, but the 'chirograph' "
+                f"package is not installed — falling back to the archive's native "
+                f"listing. Install it with: pip install 'archivefs[chiro]'"
+            )
+            if explicit is not None:
+                # The user asked for this manifest by name; refusing is right.
+                raise MissingExtraError("chiro", "chirograph", f"reading {explicit}")
+            logger.warning("%s", message)
+            return native
+
+        manifest = chiro_mod.load_manifest(
+            self, manifest_path, native.get(manifest_path)
+        )
+        members, drift = chiro_mod.apply_manifest(
+            self, container, native, manifest_path, manifest
+        )
+        self._manifest_used[container] = manifest_path
+        self._manifests[container] = manifest
+        self._drift[container] = drift
+        return members
+
+    def manifest_path_for(self, container: str) -> str | None:
+        """Which manifest (if any) is being used for ``container``."""
+        container = self._strip_protocol(container)
+        self._members(container)
+        return self._manifest_used.get(container)
+
+    def manifest_for(self, container: str) -> Any:
+        """The parsed manifest in use for ``container``, or ``None``.
+
+        Cached from the listing pass, so verification does not re-fetch (and does
+        not have to re-resolve a path that the manifest itself removed from the
+        listing).
+        """
+        container = self._strip_protocol(container)
+        self._members(container)
+        return self._manifests.get(container)
+
+    def drift(self, container: str) -> Any:
+        """Drift between a deposit and its manifest, or ``None`` without one.
+
+        Exposed because "this deposit no longer matches the manifest it was
+        published with" is a finding a reviewer wants, not an internal detail.
+        """
+        container = self._strip_protocol(container)
+        self._members(container)
+        return self._drift.get(container)
 
     def _resolve(self, path: str) -> dict:
         path = self._strip_protocol(path)
@@ -373,6 +477,14 @@ class ArchiveFileSystem(AbstractFileSystem):
         return self._fetch_checked(info, start, end)
 
     def _fetch_checked(self, info: dict, start: int, end: int) -> bytes:
+        if info.get("missing_upstream"):
+            manifest = (info.get("chiro") or {}).get("manifest")
+            raise ManifestError(
+                f"{info['name']} is promised by {manifest} but its bytes are not "
+                f"in the deposit any more. The manifest and the archive have "
+                f"diverged — check the record upstream; do not substitute another "
+                f"file for it."
+            )
         want = end - start
         url = self._data_url(info)
         last_error = "no attempt made"

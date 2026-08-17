@@ -30,3 +30,8 @@ dependencies:
       # which would drag the whole environment backwards, and archivefs speaks
       # EGA's REST API directly instead. See docs/decisions.md D2.
       - -e .
+      # Chirograph is an *optional* accelerator (download-free checksums, drift
+      # detection, workspace layout). It is not on PyPI yet, so this assumes a
+      # sibling checkout; replace with `chirograph>=0.1` once it is published.
+      # archivefs works without it — tests cover the not-installed path.
+      - -e ../chirograph
