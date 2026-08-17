@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+src/archivefs/_version.py
+
+# local, never committed: credentials and scratch download dirs
+.dvc/config.local
+egacheck/
+*.credentials.json

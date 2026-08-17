@@ -1,0 +1,92 @@
+[
+  {
+    "fileId": "EGAF00007243782",
+    "datasetId": [
+      "EGAD00001003338",
+      "EGAD00001009826"
+    ],
+    "indexFileId": "",
+    "displayFileName": "HG00096.GRCh38DH__1097r__10.10000-10100__21.5000000-5050000.bam.bai",
+    "displayFilePath": "prod/ega-box-74/EGAR00003441475",
+    "fileName": "prod/ega-box-74/EGAR00003441475/HG00096.GRCh38DH__1097r__10.10000-10100__21.5000000-5050000.bam.bai.1664408722194.cip",
+    "fileSize": 29568,
+    "plainChecksum": "7d6347593fb4ad59cb62cec9c7f97a7a",
+    "plainChecksumType": "MD5",
+    "fileStatus": "available"
+  },
+  {
+    "fileId": "EGAF00007243783",
+    "datasetId": [
+      "EGAD00001003338",
+      "EGAD00001009826"
+    ],
+    "indexFileId": "",
+    "displayFileName": "HG00096.GRCh38DH__1097r__10.10000-10100__21.5000000-5050000.cram.crai",
+    "displayFilePath": "prod/ega-box-74/EGAR00003441507",
+    "fileName": "prod/ega-box-74/EGAR00003441507/HG00096.GRCh38DH__1097r__10.10000-10100__21.5000000-5050000.cram.crai.1664408722194.cip",
+    "fileSize": 83,
+    "plainChecksum": "c43fcb885eba78b62efb4bf5d1cc51bf",
+    "plainChecksumType": "MD5",
+    "fileStatus": "available"
+  },
+  {
+    "fileId": "EGAF00007243773",
+    "datasetId": [
+      "EGAD00001003338",
+      "EGAD00001009826"
+    ],
+    "indexFileId": "EGAF00007243782",
+    "displayFileName": "HG00096.GRCh38DH__1097r__10.10000-10100__21.5000000-5050000.bam",
+    "displayFilePath": "prod/ega-box-74/EGAR00003441475",
+    "fileName": "prod/ega-box-74/EGAR00003441475/HG00096.GRCh38DH__1097r__10.10000-10100__21.5000000-5050000.bam.1664408722194.cip",
+    "fileSize": 194837,
+    "plainChecksum": "ed365c71461eac21a64d2c29e7216e50",
+    "plainChecksumType": "MD5",
+    "fileStatus": "available"
+  },
+  {
+    "fileId": "EGAF00007243774",
+    "datasetId": [
+      "EGAD00001003338",
+      "EGAD00001009826"
+    ],
+    "indexFileId": "EGAF00007243783",
+    "displayFileName": "HG00096.GRCh38DH__1097r__10.10000-10100__21.5000000-5050000.cram",
+    "displayFilePath": "prod/ega-box-74/EGAR00003441507",
+    "fileName": "prod/ega-box-74/EGAR00003441507/HG00096.GRCh38DH__1097r__10.10000-10100__21.5000000-5050000.cram.1664408722194.cip",
+    "fileSize": 135144,
+    "plainChecksum": "687996620a153a8dc451ab71701bb290",
+    "plainChecksumType": "MD5",
+    "fileStatus": "available"
+  },
+  {
+    "fileId": "EGAF00007243775",
+    "datasetId": [
+      "EGAD00001003338",
+      "EGAD00001009826"
+    ],
+    "indexFileId": "EGAF00007243776",
+    "displayFileName": "HG00408.novoBreak__256r__4.100100-10100100__7.200100-9000100.vcf.gz",
+    "displayFilePath": "prod/ega-box-74/EGAZ00001823451",
+    "fileName": "prod/ega-box-74/EGAZ00001823451/HG00408.novoBreak__256r__4.100100-10100100__7.200100-9000100.vcf.gz.1664408722194.cip",
+    "fileSize": 23033,
+    "plainChecksum": "51cfb69bf3b9416ff425381a58c18a2b",
+    "plainChecksumType": "MD5",
+    "fileStatus": "available"
+  },
+  {
+    "fileId": "EGAF00007243776",
+    "datasetId": [
+      "EGAD00001003338",
+      "EGAD00001009826"
+    ],
+    "indexFileId": "",
+    "displayFileName": "HG00408.novoBreak__256r__4.100100-10100100__7.200100-9000100.vcf.gz.tbi",
+    "displayFilePath": "prod/ega-box-74/EGAZ00001823451",
+    "fileName": "prod/ega-box-74/EGAZ00001823451/HG00408.novoBreak__256r__4.100100-10100100__7.200100-9000100.vcf.gz.tbi.1664408722194.cip",
+    "fileSize": 1985,
+    "plainChecksum": "245fd6f73095ce4c80202d5815c84528",
+    "plainChecksumType": "MD5",
+    "fileStatus": "available"
+  }
+]

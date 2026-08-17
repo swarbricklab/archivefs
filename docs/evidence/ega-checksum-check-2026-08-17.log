@@ -1,0 +1,26 @@
+# Output of scripts/ega_checksum_check.py, run 2026-08-17 against the live EGA API v2
+# (public test account, dataset EGAD00001006673 / file EGAF00004854093).
+
+credential source: public EGA test account (user ega-test-data@ebi.ac.uk)
+metadata:
+  fileId = 'EGAF00004854093'
+  displayFileName = 'HG00099.unmapped.ILLUMINA.bwa.GBR.low_coverage.20130415.bam'
+  fileName = 'EGAR00002497307/CINECA/HG00099.unmapped.ILLUMINA.bwa.GBR.low_coverage.20130415.bam.cip'
+  fileSize = 105203923
+  plainChecksum = '7626e4caa33ef4ba1a3b3fe42c2d011c'
+  plainChecksumType = 'MD5'
+  fileStatus = 'available'
+  encrypted checksum advertised: None
+plain size from Content-Range: 105203907
+metadata fileSize - 16       : 105203907
+  agree: True
+fetching 13 slice(s) with 4 connection(s)
+simulating interruption: deleting materialised.bin.from-50331648-len-8388608 and refetching
+materialised 105203907 bytes in 95.6s -> md5 7626e4caa33ef4ba1a3b3fe42c2d011c
+
+VERDICT
+  md5(materialised) == metadata plainChecksum
+  -> design.md branch 1 (happy path): the metadata checksum IS a
+     checksum of the bytes the user ends up with, so download-free
+     info() can advertise it and --no-download manifests are honest.
+  size(materialised) == fileSize - 16: True

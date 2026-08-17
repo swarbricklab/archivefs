@@ -1,0 +1,95 @@
+[build-system]
+requires = ["setuptools>=64", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "archivefs"
+description = "Read-only fsspec filesystems for scientific data archives (EGA, Zenodo, GEO)."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Swarbrick Lab" }]
+keywords = ["fsspec", "dvc", "reproducibility", "ega", "zenodo", "geo", "provenance"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: Bio-Informatics",
+  "Topic :: System :: Filesystems",
+]
+dynamic = ["version"]
+
+# Base install: the shared core plus the backends that need nothing exotic
+# (Zenodo, GEO-supplementary). Deliberately thin — see docs/design.md
+# "Packaging: one package, per-backend extras".
+dependencies = [
+  "fsspec>=2023.9.0",
+  "requests>=2.28",
+]
+
+[project.optional-dependencies]
+# There is deliberately no [ega] extra: EGA is reachable with `requests` alone,
+# and pyega3 — the obvious candidate — pins `requests==2.26.0` exactly, so
+# depending on it would hold every other backend hostage. docs/decisions.md D2.
+#
+# dbGaP is DEFERRED (docs/plan.md step 4). The extra exists so the failure mode
+# is "install the extra", not "unknown protocol"; it pulls no SRA Toolkit
+# binaries (those are checked for at runtime).
+dbgap = []
+# Chirograph manifests are an optional accelerator, never a requirement.
+chiro = ["chirograph>=0.1"]
+# The DVC adaptor: archivefs works with plain fsspec without it.
+dvc = ["dvc>=3.0"]
+all = ["archivefs[dbgap,chiro,dvc]"]
+dev = [
+  "archivefs[all]",
+  "pytest>=7",
+  "pytest-cov",
+  "responses",
+  "ruff",
+]
+
+[project.urls]
+Homepage = "https://github.com/Swarbricklab/archivefs"
+Source = "https://github.com/Swarbricklab/archivefs"
+
+[project.scripts]
+archivefs = "archivefs.cli:main"
+
+# Protocol registration. fsspec discovers these lazily: the protocol is known
+# from the entry point, and the class is only imported on first use — so an
+# uninstalled extra surfaces as our own "install the extra" error rather than a
+# bare ImportError. See archivefs/registry.py.
+[project.entry-points."fsspec.specs"]
+ega = "archivefs.backends.ega:EGAFileSystem"
+zenodo = "archivefs.backends.zenodo:ZenodoFileSystem"
+geo = "archivefs.backends.geo:GEOFileSystem"
+dbgap = "archivefs.backends.dbgap:DbGaPFileSystem"
+
+[tool.setuptools_scm]
+version_scheme = "post-release"
+local_scheme = "no-local-version"
+fallback_version = "0.0.0"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+  "network: test hits a real remote archive (deselect with -m 'not network')",
+  "credentials: test needs real archive credentials (EGA/dbGaP)",
+]
+
+[tool.ruff]
+line-length = 88
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "RUF"]
+ignore = ["B028"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501"]

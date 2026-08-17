@@ -1,0 +1,32 @@
+## archivefs development environment
+##
+## Create/update with:
+##   conda env update -n archivefs -f environment.yaml
+##
+## Runtime deps here mirror pyproject.toml; conda is the source of truth for the
+## *interpreter* and heavy transitive deps, pyproject for what pip users get.
+## archivefs itself is installed into this env with `pip install -e .` (see
+## the pip block below).
+name: archivefs
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.12
+  # --- runtime (base install) ---
+  - fsspec>=2023.9.0
+  - requests>=2.28
+  - aiohttp>=3.9          # fsspec HTTPFileSystem async backend
+  # --- dev / test ---
+  - pytest>=7
+  - pytest-cov
+  - responses             # requests HTTP mocking
+  - ruff
+  # --- integration testing against the real consumer ---
+  - dvc>=3.0
+  - pip
+  - pip:
+      # NB: pyega3 is deliberately absent. It pins `requests==2.26.0` exactly,
+      # which would drag the whole environment backwards, and archivefs speaks
+      # EGA's REST API directly instead. See docs/decisions.md D2.
+      - -e .
