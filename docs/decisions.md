@@ -322,7 +322,7 @@ not adopt one, deliberately. `zipfile` already handles the parsing tail
 the candidates each cover a different axis (`stream-unzip` for non-seekable
 streaming, `libarchive-c` for formats beyond ZIP) and **none of them do the
 write-side containment check**, which is the part that actually matters here. So the
-checks are ours, in one 250-line module with tests, rather than a dependency plus
+checks are ours, in one ~270-line module with tests, rather than a dependency plus
 the same checks anyway. Revisit if we meet a real archive `zipfile` cannot open.
 
 ---
@@ -355,7 +355,7 @@ the same checks anyway. Revisit if we meet a real archive `zipfile` cannot open.
 * **The EGA re-encryption timestamp** (embedded in the archive's own `.cip` storage
   name) is used as EGA's weak version token. It is the only thing EGA exposes that
   changes when an object is replaced.
-* **Test doubles are hand-rolled** (`tests/fake_http.py`, ~180 lines) rather than a
+* **Test doubles are hand-rolled** (`tests/fake_http.py`, under 200 lines) rather than a
   recording library, because the interesting cases cannot be recorded: a 401
   mid-transfer, a short body on a 206, an unaligned range returning garbage. Bodies
   are trimmed copies of *real* API replies (`tests/data/`), so field names and

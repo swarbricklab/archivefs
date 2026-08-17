@@ -76,13 +76,17 @@ clean case and an auth-complex case (design.md §"Build order"):
       three backends including controlled-access EGA.
 - [x] A CLI for the questions that otherwise need Python: `archivefs info | ls |
       stat | get | check | verify | dvc`
-- [ ] Candidate backend: **BioImage Archive (`bia://`)** — still needs its
-      storage/access model verified. Notes and a cheaper framing in
-      [`ideas.md`](ideas.md) #7.
+- [x] Candidate backend: **BioImage Archive (`bia://`)** — **storage/access model
+      verified** against the live services:
+      [`evidence/bia-access-model-2026-08-17.md`](evidence/bia-access-model-2026-08-17.md).
+      Verdict: the easiest remaining backend, and its two tiers land on the view
+      registry GEO already introduced. Deliberately **not built** — it is a
+      candidate, not committed ([`ideas.md`](ideas.md) #7).
 
 ## Deferred / candidate
 
-- [ ] BioImage Archive backend (spatial imaging tier)
+- [ ] BioImage Archive backend (spatial imaging tier) — access model verified, build
+      not started
 - [x] ZIP edge-case library evaluation — **evaluated, none adopted**, with reasons
       ([D9](decisions.md)): the candidates do not cover the write-side containment
       check, which is the part that matters.

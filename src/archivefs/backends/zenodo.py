@@ -202,6 +202,19 @@ class ZenodoFileSystem(ArchiveFileSystem):
                 "entries", []
             )
         provenance = self._record_provenance(record, requested=container)
+        if provenance["resolved_from_concept"]:
+            # Worth saying out loud: a concept DOI means "latest", so a committed
+            # .dvc pins the *bytes* (by md5) but does not record which version they
+            # came from. Naming the version DOI instead makes that explicit.
+            logger.warning(
+                "%s is a concept identifier; resolved to version %s (%s). The "
+                "checksum pins the bytes, but nothing records the version — use "
+                "%s if you want the version in the URL.",
+                container,
+                provenance["record_id"],
+                provenance["doi"],
+                provenance["doi"],
+            )
         members: dict[str, dict] = {}
         for entry in files:
             key = entry.get("key") or entry.get("filename")

@@ -92,15 +92,29 @@ extras worth having: fail loudly when a sheet names something the dataset does n
 contain (silent partial imports are how people lose samples), and record the sheet's
 own md5 in the import so "which subset was this?" stays answerable.
 
-### 7. `bia://` — BioImage Archive
-The design lists it as a candidate pending verification of the storage model. Quick
-things I did not get to: BIA publishes an S3 bucket for open data, so it is plausibly
-reachable via plain `s3://` — in which case the useful deliverable is *accession
-resolution* (BIA accession → bucket/prefix) rather than a transfer backend, which
-would be a genuinely small piece of work. Verify: is there per-object checksum
-exposure, and is the bucket listable anonymously? If both are yes, this is the
-cheapest new backend on the list, and the imminent Visium/Xenium deposit is the
-motivating case.
+### 7. `bia://` — BioImage Archive · **access model now verified**
+The design gated this on "verify storage/access model first". Done, against the live
+services: [`evidence/bia-access-model-2026-08-17.md`](evidence/bia-access-model-2026-08-17.md).
+
+Summary: it is the **easiest remaining backend**. One anonymous BioStudies API call
+(`/api/v1/files/{accession}`) returns a full recursive listing with exact sizes *and*
+per-file experimental metadata — better than GEO, which needs HTML parsing plus a
+`HEAD` per file. Payload is range-readable HTTPS over FIRE, sharded by the
+accession's last three digits exactly like GEO's `GSE176nnn`.
+
+Two things worth knowing before building it:
+
+* **No checksums on submitted files** — same gap as GEO, same fix (a sidecar
+  `.chiro` in our own deposits, which is the case that matters since BIA is a
+  repository we deposit *into*).
+* **The "just use `s3://`" hypothesis is wrong.** There *is* an anonymously listable
+  Embassy S3 bucket, and its ETags really are plain md5s — but it holds *derived*
+  data (thumbnails, OME-NGFF conversions) keyed by uuid, not the submitted files.
+  So accession→path resolution is the actual work.
+
+Those two tiers are precisely the **view registry** built for GEO's SRA seam:
+`view="submitted"` and `view="ngff"`, one class each. The imminent Visium/Xenium
+deposit is the motivating case.
 
 ### 8. Tar transparency for GEO, cautiously
 GEO's convention is one `GSE…_RAW.tar` containing per-sample archives, and

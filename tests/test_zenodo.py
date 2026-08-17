@@ -381,3 +381,17 @@ def test_zip_bomb_is_refused_before_listing(fake_zenodo):
     )
     with pytest.raises(ZipBombError):
         fs.ls(f"{RECID}/archive.zip")
+
+
+def test_concept_identifier_warns_that_the_version_is_not_recorded(fs, caplog):
+    """A concept DOI means "latest", so the URL alone does not pin a version."""
+    with caplog.at_level("WARNING"):
+        fs.ls(CONCEPT_DOI)
+    assert "concept identifier" in caplog.text
+    assert DOI in caplog.text  # tells you which URL to use instead
+
+
+def test_a_version_identifier_does_not_warn(fs, caplog):
+    with caplog.at_level("WARNING"):
+        fs.ls(DOI)
+    assert "concept identifier" not in caplog.text

@@ -77,6 +77,8 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# `from tests.fake_http import …` should not depend on how pytest was invoked.
+pythonpath = ["."]
 addopts = "-ra --strict-markers"
 markers = [
   "network: test hits a real remote archive (deselect with -m 'not network')",
