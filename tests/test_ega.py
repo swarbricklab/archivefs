@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 
 import pytest
+from tests.fake_http import FakeRequestsModule, FakeResponse, parse_range, ranged
 
 from archivefs.backends import ega as ega_mod
 from archivefs.backends.ega import EGAFileSystem
@@ -24,7 +25,6 @@ from archivefs.errors import (
     CredentialsNotFoundError,
     NotSupportedError,
 )
-from tests.fake_http import FakeRequestsModule, FakeResponse, parse_range, ranged
 
 DATA = Path(__file__).parent / "data"
 DATASET = "EGAD00001009826"
@@ -426,7 +426,7 @@ def test_live_bytes_match_advertised_md5(live_fs):
     info = live_fs.info(path)
     data = live_fs.cat_file(path)
     assert len(data) == info["size"]
-    assert hashlib.md5(data).hexdigest() == info["md5"]  # noqa: S324
+    assert hashlib.md5(data).hexdigest() == info["md5"]
 
 
 @pytest.mark.network

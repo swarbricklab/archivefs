@@ -373,7 +373,9 @@ class EGAFileSystem(AbstractFileSystem):
                 )
             except requests.RequestException as exc:
                 if attempt > self.max_retries:
-                    raise OSError(f"EGA request failed after {attempt} tries: {exc}")
+                    raise OSError(
+                        f"EGA request failed after {attempt} tries: {exc}"
+                    ) from exc
                 self._backoff(attempt, reason=str(exc))
                 continue
 

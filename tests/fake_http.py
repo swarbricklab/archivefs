@@ -134,7 +134,7 @@ class FakeRequestsModule:
         self.handler = handler
         self.sessions: list[FakeSession] = []
 
-    def Session(self) -> FakeSession:  # noqa: N802 - mirrors requests' name
+    def Session(self) -> FakeSession:
         session = FakeSession(self.handler)
         self.sessions.append(session)
         return session

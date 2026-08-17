@@ -60,7 +60,10 @@ PROTOCOLS: dict[str, Backend] = {
         # a base dependency. The [ega] extra only adds pyega3 for the optional
         # delegated transfer path. See docs/decisions.md D2.
         extra=None,
-        summary="European Genome-phenome Archive (controlled access; needs credentials)",
+        summary=(
+            "European Genome-phenome Archive "
+            "(controlled access; needs credentials)"
+        ),
         requires=("requests",),
     ),
     "zenodo": Backend(
