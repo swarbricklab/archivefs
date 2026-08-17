@@ -253,3 +253,49 @@ def test_boolean_config_values_are_coerced_not_passed_as_strings():
         {"url": "zenodo://1486184", "extract_zips": "true"}
     )
     assert validated["extract_zips"] is True
+
+
+def test_the_module_imports_without_dvc_installed(tmp_path):
+    """The default install has no DVC, and `archivefs info` must still say so.
+
+    Building a wrapper class needs dvc_objects, so the classes are built on first
+    attribute access rather than at import — otherwise importing this module (which
+    `archivefs info` does, to report DVC's absence) raises ImportError.
+    """
+    import os
+    import subprocess
+    import sys
+
+    code = (
+        "import sys, importlib\n"
+        # hide DVC from the import system entirely
+        "for name in list(sys.modules):\n"
+        "    if name.split('.')[0] in ('dvc', 'dvc_objects'):\n"
+        "        del sys.modules[name]\n"
+        "class Block:\n"
+        "    def find_spec(self, name, path=None, target=None):\n"
+        "        if name.split('.')[0] in ('dvc', 'dvc_objects'):\n"
+        "            raise ImportError('blocked')\n"
+        "        return None\n"
+        "sys.meta_path.insert(0, Block())\n"
+        "import archivefs.dvcfs as d\n"
+        "print('imported', sorted(d.DVC_PROTOCOLS))\n"
+        "print('wrappers advertised', 'ZenodoDVCFileSystem' in dir(d))\n"
+    )
+    env = {**os.environ, "ARCHIVEFS_NO_DVC_HOOK": "1"}
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "imported ['ega', 'geo', 'zenodo']" in result.stdout
+    assert "wrappers advertised True" in result.stdout
+
+
+def test_unknown_attributes_still_raise_attribute_error():
+    with pytest.raises(AttributeError):
+        dvcfs.NoSuchFileSystem  # noqa: B018

@@ -39,9 +39,8 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "DVC_PROTOCOLS",
-    "EGADVCFileSystem",
-    "GEODVCFileSystem",
-    "ZenodoDVCFileSystem",
+    # The three wrapper classes are built lazily by __getattr__ below, so they are
+    # reachable as attributes but are deliberately not module-level names.
     "disable",
     "enable",
     "register",
@@ -142,15 +141,32 @@ def _make_dvc_class(name: str, protocol: str, fsspec_class_path: str) -> type:
     )
 
 
-EGADVCFileSystem = _make_dvc_class(
-    "EGADVCFileSystem", "ega", "archivefs.backends.ega.EGAFileSystem"
-)
-ZenodoDVCFileSystem = _make_dvc_class(
-    "ZenodoDVCFileSystem", "zenodo", "archivefs.backends.zenodo.ZenodoFileSystem"
-)
-GEODVCFileSystem = _make_dvc_class(
-    "GEODVCFileSystem", "geo", "archivefs.backends.geo.GEOFileSystem"
-)
+#: wrapper class name -> (protocol, the fsspec class it wraps). The classes are
+#: built on first *attribute access*, not at import, because building one needs
+#: ``dvc_objects`` — and this module must be importable without DVC installed, or
+#: ``archivefs info`` cannot even report that DVC is absent. DVC resolves our
+#: wrappers by string path (``archivefs.dvcfs.ZenodoDVCFileSystem``) and so goes
+#: through ``getattr`` on the module, which is exactly what ``__getattr__`` serves.
+_WRAPPERS: dict[str, tuple[str, str]] = {
+    "EGADVCFileSystem": ("ega", "archivefs.backends.ega.EGAFileSystem"),
+    "ZenodoDVCFileSystem": ("zenodo", "archivefs.backends.zenodo.ZenodoFileSystem"),
+    "GEODVCFileSystem": ("geo", "archivefs.backends.geo.GEOFileSystem"),
+}
+_built: dict[str, type] = {}
+
+
+def __getattr__(name: str) -> Any:  # PEP 562
+    if name not in _WRAPPERS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    if name not in _built:
+        protocol, fsspec_class_path = _WRAPPERS[name]
+        _built[name] = _make_dvc_class(name, protocol, fsspec_class_path)
+    return _built[name]
+
+
+def __dir__() -> list[str]:
+    return sorted({*globals(), *_WRAPPERS})
+
 
 #: protocol -> our DVC wrapper's import path. dbGaP is absent on purpose: it is
 #: deferred, and registering it with DVC would advertise a backend that refuses.
@@ -263,7 +279,10 @@ def status(probe: bool = True) -> dict:
     from pathlib import Path
 
     report: dict[str, Any] = {
-        "dvc_installed": importlib.util.find_spec("dvc") is not None,
+        # find_spec, not an import: this must answer "no DVC here" without
+        # importing anything of DVC's.
+        "dvc_installed": importlib.util.find_spec("dvc_objects") is not None
+        and importlib.util.find_spec("dvc") is not None,
         "hook_path": None,
         "hook_installed": False,
         "registered": [],

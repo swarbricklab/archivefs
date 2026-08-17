@@ -109,7 +109,10 @@ def cmd_info(args: argparse.Namespace) -> int:
         print(f"  ? dvc             could not check: {exc}")
         return 0
     if not dvc["dvc_installed"]:
-        print("  – dvc             not installed")
+        print(
+            "  – dvc             not installed (archivefs works with plain fsspec "
+            "regardless)"
+        )
     elif dvc["hook_installed"]:
         print(f"  ✓ dvc             registered for {', '.join(dvc['protocols'])}")
     else:
