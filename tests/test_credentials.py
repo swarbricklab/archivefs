@@ -171,3 +171,34 @@ def test_the_documented_api_exists():
 
     assert "committed_secrets" in module.__doc__
     assert "warn_if_committed" not in module.__doc__
+
+
+def test_several_missing_credentials_are_grouped_not_run_together():
+    """One numbered chain per credential.
+
+    A single run of ten numbered lines covering two different secrets reads as one
+    chain, which is exactly what the message is trying to document.
+    """
+    r = resolver(
+        credentials=[
+            Credential(name="username", env=("A_USER",), secret=False, help="your email"),
+            Credential(name="password", env=("A_PASS",), secret=True, help="your password"),
+        ]
+    )
+    with pytest.raises(CredentialsNotFoundError) as exc:
+        r.require("username", "password")
+    message = str(exc.value)
+    assert "username:" in message and "password:" in message
+    assert "(your email)" in message and "(your password)" in message
+    # each chain numbered from 1, so neither looks like a continuation of the other
+    assert message.count("1. storage_options") == 2
+    # and the structured form is available to a caller that wants to render it
+    assert set(exc.value.sections) == {"username", "password"}
+
+
+def test_a_single_missing_credential_is_still_a_flat_list():
+    r = resolver()
+    with pytest.raises(CredentialsNotFoundError) as exc:
+        r.resolve("token")
+    assert exc.value.sections is None
+    assert "1. storage_options" in str(exc.value)

@@ -165,10 +165,12 @@ class CredentialResolver:
 
         resolved = Resolved(name, value, source, searched)
         if value is None and credential.required:
-            message_parts = searched
-            if credential.help:
-                message_parts = [*searched, f"note: {credential.help}"]
-            raise CredentialsNotFoundError(self.archive, name, message_parts)
+            raise CredentialsNotFoundError(
+                self.archive,
+                name,
+                searched,
+                hints={name: credential.help} if credential.help else None,
+            )
         self._cache[name] = resolved
         return resolved
 
@@ -190,23 +192,28 @@ class CredentialResolver:
         them fix it, and only then mention the password. One error, one fix.
         """
         values: dict[str, str] = {}
-        missing: list[str] = []
-        searched: list[str] = []
+        sections: dict[str, list[str]] = {}
+        hints: dict[str, str] = {}
         for name in names:
             try:
                 resolved = self.resolve(name)
             except CredentialsNotFoundError as exc:
-                missing.append(name)
-                searched.extend(exc.searched)
-                continue
-            if resolved.value is None:
-                missing.append(name)
-                searched.extend(resolved.searched)
+                sections[name] = exc.searched
             else:
-                values[name] = resolved.value
-        if missing:
+                if resolved.value is None:
+                    sections[name] = resolved.searched
+                else:
+                    values[name] = resolved.value
+            help_text = self.credentials[name].help
+            if name in sections and help_text:
+                hints[name] = help_text
+        if sections:
             raise CredentialsNotFoundError(
-                self.archive, " and ".join(missing), searched
+                self.archive,
+                " and ".join(sections),
+                [place for places in sections.values() for place in places],
+                sections=sections,
+                hints=hints,
             )
         return values
 

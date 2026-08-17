@@ -75,13 +75,37 @@ class CredentialsNotFoundError(ArchiveFSError):
     the message doubles as documentation of the resolution chain.
     """
 
-    def __init__(self, archive: str, secret: str, searched: list[str]) -> None:
+    def __init__(
+        self,
+        archive: str,
+        secret: str,
+        searched: list[str],
+        sections: dict[str, list[str]] | None = None,
+        hints: dict[str, str] | None = None,
+    ) -> None:
         self.archive = archive
         self.secret = secret
         self.searched = list(searched)
-        places = "\n".join(f"    {i + 1}. {p}" for i, p in enumerate(searched))
+        self.sections = sections
+        # Grouped when several credentials are missing at once: one numbered
+        # chain each, because a single run of ten numbered lines covering two
+        # different secrets reads as one chain that it is not.
+        if sections:
+            blocks = []
+            for name, places in sections.items():
+                listed = "\n".join(f"      {i + 1}. {p}" for i, p in enumerate(places))
+                blocks.append(f"    {name}:\n{listed}")
+                hint = (hints or {}).get(name)
+                if hint:
+                    blocks.append(f"      ({hint})")
+            body = "\n".join(blocks)
+        else:
+            body = "\n".join(f"    {i + 1}. {p}" for i, p in enumerate(searched))
+            hint = (hints or {}).get(secret)
+            if hint:
+                body += f"\n    ({hint})"
         super().__init__(
-            f"no {secret} found for {archive}. Looked, in order:\n{places}\n"
+            f"no {secret} found for {archive}. Looked, in order:\n{body}\n"
             f"  Nothing was found, so the request was not attempted.\n"
             f"  Note: secrets must never be written into a committed .dvc file — "
             f"put them in .dvc/config.local (git-ignored) or the environment."
