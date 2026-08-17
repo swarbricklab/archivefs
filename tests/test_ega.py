@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 from tests.fake_http import FakeRequestsModule, FakeResponse, parse_range, ranged
 
-from archivefs.backends import ega as ega_mod
+from archivefs import base as base_mod
 from archivefs.backends.ega import EGAFileSystem
 from archivefs.errors import (
     ArchiveNotFoundError,
@@ -105,7 +105,7 @@ class FakeEGA:
 def fake_ega(monkeypatch):
     server = FakeEGA()
     fake_requests = FakeRequestsModule(server)
-    monkeypatch.setattr(ega_mod, "requests", fake_requests)
+    monkeypatch.setattr(base_mod, "requests", fake_requests)
     monkeypatch.setenv("EGA_USERNAME", "user@example.org")
     monkeypatch.setenv("EGA_PASSWORD", "correct-horse")
     server.requests = fake_requests
@@ -201,7 +201,7 @@ def test_display_layout_disambiguates_collisions(fake_ega, monkeypatch):
     clashing = [dict(f) for f in FILES[:2]]
     for f in clashing:
         f["displayFileName"] = "same.bam"
-    monkeypatch.setattr(ega_mod, "requests", fake_ega.requests)
+    monkeypatch.setattr(base_mod, "requests", fake_ega.requests)
     fake_ega_files = clashing
     server = fake_ega
 
@@ -210,7 +210,7 @@ def test_display_layout_disambiguates_collisions(fake_ega, monkeypatch):
             return FakeResponse(200, json=fake_ega_files)
         return FakeEGA.__call__(server, method, url, headers, kwargs)
 
-    monkeypatch.setattr(ega_mod, "requests", FakeRequestsModule(handler))
+    monkeypatch.setattr(base_mod, "requests", FakeRequestsModule(handler))
     fs = EGAFileSystem(layout="display", skip_instance_cache=True)
     names = fs.ls(DATASET, detail=False)
     assert len(set(names)) == 2, names
@@ -349,7 +349,7 @@ def test_token_refresh_on_401_mid_transfer(fs, fake_ega):
 
 
 def test_short_body_is_retried_not_trusted(fs, fake_ega, monkeypatch):
-    monkeypatch.setattr(ega_mod.time, "sleep", lambda _: None)
+    monkeypatch.setattr(base_mod.time, "sleep", lambda _: None)
     fake_ega.truncate_next_data_call = True
     data = fs.cat_file(f"{DATASET}/{BAM}")
     assert data == payload_for(BAM)  # retried, not silently truncated

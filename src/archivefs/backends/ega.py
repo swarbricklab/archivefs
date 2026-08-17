@@ -1,8 +1,10 @@
 """``ega://`` — the European Genome-phenome Archive.
 
-Built first and deliberately *standalone* (``docs/plan.md`` step 1): everything
-this backend needs lives in this module, so that when Zenodo lands the shared
-base can be factored out of a real diff rather than guessed at up front.
+Built first and standalone (``docs/plan.md`` step 1), then re-seated on
+:class:`~archivefs.base.ArchiveFileSystem` once Zenodo existed, so the base was
+factored from a real diff. What is left here is what the design doc predicted
+would be irreducible: how to list a dataset, how to authenticate, and how to
+fetch bytes.
 
 URL grammar
 -----------
@@ -13,7 +15,7 @@ URL grammar
     ega://EGAD00001006673/EGAF00004908765  # file     -> one member
     ega://EGAF00004908765                  # file, without dataset context
 
-What the archive actually gives us (verified against the live API v2, see
+What the archive actually gives us (verified against the live API v2 — see
 ``scripts/ega_checksum_check.py`` and ``docs/decisions.md``):
 
 * ``GET {api}/metadata/datasets`` -> the authorised dataset list.
@@ -25,40 +27,33 @@ What the archive actually gives us (verified against the live API v2, see
   length. So both halves of a download-free ``info()`` — size and a
   content-correlated checksum — are available without moving payload bytes.
 
-Two behaviours of the live service shape the retrieval loop:
+Three live behaviours shape the retrieval loop, and only the first was
+anticipated by the design:
 
 * the token expires (1 h) well inside a large transfer -> refresh on ``401``;
-* a range request can return ``200``/``206`` with a **short or empty body**
-  (observed on parallel slices of one file) -> every read is length-checked and
-  retried rather than trusted.
+* **a ranged read is only correct when the range start is a multiple of 16**;
+* a ranged read can return success with a short body -> length-check everything.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
 import threading
 import time
-from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
-import requests
-from fsspec.spec import AbstractBufferedFile, AbstractFileSystem
-
-from archivefs.errors import (
-    ArchiveNotFoundError,
-    AuthenticationError,
-    CredentialsNotFoundError,
-    NotSupportedError,
-)
+from archivefs import base
+from archivefs.base import ArchiveFileSystem
+from archivefs.credentials import Credential
+from archivefs.errors import ArchiveNotFoundError, AuthenticationError
 
 logger = logging.getLogger(__name__)
 
 #: Default endpoints. These mirror the server config that ``pyega3`` ships, so
 #: archivefs follows EGA's own client rather than inventing a second source of
-#: truth; all are overridable via ``storage_options`` or a server-config file.
+#: truth; all are overridable via ``storage_options``.
 DEFAULT_API_URL = "https://ega.ebi.ac.uk:8443/v2"
 DEFAULT_AUTH_URL = "https://ega.ebi.ac.uk:8443/ega-openid-connect-server/token"
 DEFAULT_CLIENT_ID = "f20cd2d3-682a-4568-a53e-4262ef54c8f4"
@@ -69,8 +64,6 @@ DEFAULT_CLIENT_SECRET = (
 
 #: EGA's encrypted objects carry a 16-byte header that the plain transfer
 #: strips, so ``fileSize`` overstates the materialised size by exactly this much.
-#: We prefer the ``Content-Range`` total when we have it and use this to predict
-#: the size download-free.
 ENCRYPTION_HEADER_BYTES = 16
 
 #: **A ranged read of ``destinationFormat=plain`` is only correct when the range
@@ -87,8 +80,7 @@ PLAIN_RANGE_ALIGNMENT = 16
 DATASET_RE = re.compile(r"^EGAD\d+$")
 FILE_RE = re.compile(r"^EGAF\d+$")
 
-#: Datasets EGA has retired behind a helpdesk request; listing them fails in a
-#: way worth explaining rather than passing through as an empty directory.
+#: Datasets EGA has retired behind a helpdesk request.
 LEGACY_DATASET_PREFIXES = ("EGAD00000000", "EGAD00010000")
 
 TOKEN_LIFETIME_SECONDS = 3600
@@ -99,8 +91,8 @@ TOKEN_REFRESH_MARGIN = 300
 class EGAAuth:
     """OAuth2 password-grant token holder with refresh.
 
-    Thread-safe: fsspec (and DVC on top of it) will read several members of a
-    dataset concurrently, and they must not all stampede the token endpoint.
+    Thread-safe: fsspec (and DVC on top of it) reads several members of a dataset
+    concurrently, and they must not all stampede the token endpoint.
     """
 
     def __init__(
@@ -109,10 +101,10 @@ class EGAAuth:
         password: str,
         *,
         credential_source: str,
+        session: Any,
         auth_url: str = DEFAULT_AUTH_URL,
         client_id: str = DEFAULT_CLIENT_ID,
         client_secret: str = DEFAULT_CLIENT_SECRET,
-        session: requests.Session | None = None,
     ) -> None:
         self.username = username
         self._password = password
@@ -120,7 +112,7 @@ class EGAAuth:
         self.auth_url = auth_url
         self.client_id = client_id
         self.client_secret = client_secret
-        self.session = session or requests.Session()
+        self.session = session
         self._token: str | None = None
         self._expires_at = 0.0
         self._lock = threading.Lock()
@@ -137,7 +129,7 @@ class EGAAuth:
 
     def _fetch(self) -> str:
         try:
-            r = self.session.post(
+            response = self.session.post(
                 self.auth_url,
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
                 data={
@@ -150,7 +142,7 @@ class EGAAuth:
                 },
                 timeout=60,
             )
-        except requests.RequestException as exc:
+        except base.requests.RequestException as exc:
             raise AuthenticationError(
                 "EGA",
                 f"could not reach the authentication service at {self.auth_url}: {exc}",
@@ -159,18 +151,18 @@ class EGAAuth:
                 source=self.credential_source,
             ) from exc
 
-        if r.status_code in (400, 401, 403):
+        if response.status_code in (400, 401, 403):
             raise AuthenticationError(
                 "EGA",
-                f"authentication rejected ({r.status_code})",
+                f"authentication rejected ({response.status_code})",
                 f"check the password for {self.username!r}. archivefs took it "
                 f"from: {self.credential_source}. If the account is right, EGA "
                 f"passwords expire — reset at https://ega-archive.org/ and "
                 f"update that source (never the committed .dvc file).",
                 source=self.credential_source,
             )
-        r.raise_for_status()
-        payload = r.json()
+        response.raise_for_status()
+        payload = response.json()
         self._token = payload["access_token"]
         self._expires_at = time.time() + int(
             payload.get("expires_in") or TOKEN_LIFETIME_SECONDS
@@ -179,89 +171,21 @@ class EGAAuth:
         return self._token
 
 
-def _resolve_credentials(
-    username: str | None,
-    password: str | None,
-    credentials_file: str | os.PathLike | None,
-) -> tuple[str, str, str]:
-    """Find a username/password pair, and say where it came from.
-
-    Precedence (``docs/design.md`` "Credential management"): explicit
-    ``storage_options`` — which is what ``.dvc/config.local`` becomes — then the
-    environment, then an on-disk credentials file. A committed ``.dvc`` file may
-    legitimately carry ``username``; it must never carry the password, so the
-    password is allowed to come from a *later* link in the chain than the
-    username.
-    """
-    searched: list[str] = []
-    source_bits: list[str] = []
-
-    if username:
-        source_bits.append("username from storage_options (.dvc/config.local)")
-    searched.append("storage_options['username'] (from .dvc/config.local)")
-
-    if not username:
-        username = os.environ.get("EGA_USERNAME")
-        if username:
-            source_bits.append("username from $EGA_USERNAME")
-    searched.append("$EGA_USERNAME")
-
-    if password:
-        source_bits.append("password from storage_options")
-    searched.append("storage_options['password'] — discouraged, prefer the env")
-
-    if not password:
-        password = os.environ.get("EGA_PASSWORD")
-        if password:
-            source_bits.append("password from $EGA_PASSWORD")
-    searched.append("$EGA_PASSWORD")
-
-    if not (username and password):
-        candidates = [Path(credentials_file)] if credentials_file else []
-        candidates += [
-            Path("~/.pyega3/credentials.json").expanduser(),
-            Path("~/.config/archivefs/ega.json").expanduser(),
-        ]
-        for candidate in candidates:
-            searched.append(str(candidate))
-            if not candidate.exists():
-                continue
-            try:
-                cfg = json.loads(candidate.read_text())
-            except ValueError as exc:
-                raise AuthenticationError(
-                    "EGA",
-                    f"{candidate} is not valid JSON ({exc})",
-                    'expected a pyega3-style file: {"username": ..., "password": ...}',
-                    source=str(candidate),
-                ) from exc
-            username = username or cfg.get("username")
-            password = password or cfg.get("password")
-            if username and password:
-                source_bits.append(f"{candidate}")
-                break
-
-    if not (username and password):
-        missing = "username and password" if not username else "password"
-        raise CredentialsNotFoundError("EGA", missing, searched)
-
-    return username, password, "; ".join(source_bits)
-
-
-class EGAFileSystem(AbstractFileSystem):
+class EGAFileSystem(ArchiveFileSystem):
     """Read-only fsspec filesystem over EGA datasets and files.
 
     Parameters
     ----------
     username, password:
-        Usually only ``username`` is configured (in ``.dvc/config.local``); the
-        password comes from ``$EGA_PASSWORD``. Passing ``password`` here works
-        but is discouraged — on shared HPC it tends to end up in a file.
+        Usually only ``username`` is configured (in ``.dvc/config.local``, or
+        legitimately even in the committed ``.dvc`` — it is not a secret); the
+        password comes from ``$EGA_PASSWORD``. Passing ``password`` here works but
+        is discouraged: on shared HPC it tends to end up in a file.
     credentials_file:
-        pyega3-style JSON, used only if the earlier links in the chain miss.
+        pyega3-style JSON, consulted only if the earlier links in the chain miss.
     layout:
-        How dataset members are named, which is what they will be called in a
-        DVC workspace:
+        How dataset members are named, which is what they will be called in a DVC
+        workspace:
 
         ``"accession"`` (default)
             ``EGAD.../EGAF...`` — exactly the URL grammar in ``docs/design.md``.
@@ -269,28 +193,43 @@ class EGAFileSystem(AbstractFileSystem):
             ``EGAD.../<displayFileName>``; collisions get their accession
             appended, so the mapping stays injective.
         ``"nested"``
-            ``EGAD.../EGAF.../<displayFileName>`` — pyega3's own layout:
-            friendly names, collision-proof.
+            ``EGAD.../EGAF.../<displayFileName>`` — pyega3's own layout: friendly
+            names, collision-proof.
     selection:
         Restrict a dataset's listing to these members (accessions or display
-        names), i.e. the *selection-driven virtual ``ls()``* from the design
-        doc. A sample sheet becomes a subset import whose ``.dvc`` file
-        documents the subset it took.
+        names): the *selection-driven virtual ``ls()``* of the design doc. A
+        sample sheet becomes a subset import whose ``.dvc`` file documents the
+        subset it took.
     include_index_files:
         Keep ``.bai``/``.crai``/``.tbi`` members. Default ``True``.
     """
 
     protocol = "ega"
-    root_marker = ""
-    sep = "/"
-    #: Written into ``.dvc`` files, so bump only with a migration in mind.
-    version_aware = False
-    cachable = False
+    archive_name = "EGA"
+    range_alignment = PLAIN_RANGE_ALIGNMENT
+    credentials: ClassVar[list[Credential]] = [
+        Credential(
+            name="username",
+            env=("EGA_USERNAME",),
+            files=("~/.pyega3/credentials.json", "~/.config/archivefs/ega.json"),
+            secret=False,
+            help="your EGA account email address",
+        ),
+        Credential(
+            name="password",
+            env=("EGA_PASSWORD",),
+            files=("~/.pyega3/credentials.json", "~/.config/archivefs/ega.json"),
+            secret=True,
+            help=(
+                "EGA account password. On shared HPC use a per-user environment "
+                "variable from your own profile, never a shared file — that keeps "
+                "access traceable and revocable per person."
+            ),
+        ),
+    ]
 
     def __init__(
         self,
-        username: str | None = None,
-        password: str | None = None,
         credentials_file: str | os.PathLike | None = None,
         api_url: str = DEFAULT_API_URL,
         auth_url: str = DEFAULT_AUTH_URL,
@@ -299,135 +238,90 @@ class EGAFileSystem(AbstractFileSystem):
         layout: str = "accession",
         selection: list[str] | None = None,
         include_index_files: bool = True,
-        block_size: int | None = None,
-        max_retries: int = 5,
         **kwargs: Any,
     ) -> None:
-        super().__init__(**kwargs)
         if layout not in ("accession", "display", "nested"):
             raise ValueError(
                 f"layout must be 'accession', 'display' or 'nested', got {layout!r}"
             )
+        super().__init__(**kwargs)
         self.api_url = api_url.rstrip("/")
         self.layout = layout
         self.selection = set(selection) if selection else None
         self.include_index_files = include_index_files
-        self.max_retries = max_retries
-        if block_size:
-            self.blocksize = block_size
 
-        username, password, source = _resolve_credentials(
-            username, password, credentials_file
-        )
-        self.session = requests.Session()
+        if credentials_file:
+            # An explicit file outranks the defaults but not storage_options/env.
+            for credential in self.creds.credentials.values():
+                self.creds.credentials[credential.name] = type(credential)(
+                    **{
+                        **credential.__dict__,
+                        "files": (str(credentials_file), *credential.files),
+                    }
+                )
+        resolved = self.creds.require("username", "password")
         self.auth = EGAAuth(
-            username,
-            password,
-            credential_source=source,
+            resolved["username"],
+            resolved["password"],
+            credential_source=self.creds.describe(),
+            session=self.session,
             auth_url=auth_url,
             client_id=client_id,
             client_secret=client_secret,
-            session=self.session,
         )
-        #: dataset accession -> {member path: info dict}
-        self._dataset_cache: dict[str, dict[str, dict]] = {}
-        #: EGAF accession -> info dict, for dataset-less addressing
+        #: EGAF accession -> info, for dataset-less addressing
         self._file_cache: dict[str, dict] = {}
 
-    # ------------------------------------------------------------------ paths
+    # ------------------------------------------------------------------- auth
 
-    @classmethod
-    def _strip_protocol(cls, path: str) -> str:
-        path = super()._strip_protocol(path)
-        return path.lstrip("/").rstrip("/")
+    def _auth_headers(self) -> dict:
+        return {"Authorization": f"Bearer {self.auth.token()}"}
 
-    @staticmethod
-    def _get_kwargs_from_urls(path: str) -> dict:
-        return {}
+    def _refresh_credentials(self) -> bool:
+        # EGA tokens live an hour; a multi-hundred-GB dataset import does not fit
+        # in one, so this path is routine rather than exceptional.
+        self.auth.token(force=True)
+        return True
 
-    # ------------------------------------------------------------- http layer
-
-    def _request(
-        self,
-        method: str,
-        url: str,
-        *,
-        headers: dict | None = None,
-        stream: bool = False,
-        timeout: int = 300,
-        _retry_on_auth: bool = True,
-    ) -> requests.Response:
-        """One EGA request, with token refresh on 401 and bounded retries.
-
-        The 401 path is not hypothetical: EGA tokens live an hour and a
-        multi-hundred-GB dataset import does not fit in one.
-        """
-        attempt = 0
-        while True:
-            attempt += 1
-            all_headers = {"Authorization": f"Bearer {self.auth.token()}"}
-            all_headers.update(headers or {})
-            try:
-                response = self.session.request(
-                    method, url, headers=all_headers, stream=stream, timeout=timeout
-                )
-            except requests.RequestException as exc:
-                if attempt > self.max_retries:
-                    raise OSError(
-                        f"EGA request failed after {attempt} tries: {exc}"
-                    ) from exc
-                self._backoff(attempt, reason=str(exc))
-                continue
-
-            if response.status_code == 401 and _retry_on_auth:
-                logger.debug("EGA returned 401; refreshing token and retrying")
-                self.auth.token(force=True)
-                _retry_on_auth = False
-                continue
-            if response.status_code == 403:
-                raise AuthenticationError(
-                    "EGA",
-                    f"403 Forbidden for {url}",
-                    "the account authenticated but is not authorised for this "
-                    "dataset/file. Check your DAC approvals at "
-                    "https://ega-archive.org/my-datasets — approval is per-dataset "
-                    "and can be revoked or expire.",
-                    source=self.auth.credential_source,
-                )
-            if response.status_code == 404:
-                raise ArchiveNotFoundError(f"EGA has no such resource: {url}")
-            if response.status_code in (429, 500, 502, 503, 504):
-                if attempt > self.max_retries:
-                    response.raise_for_status()
-                self._backoff(attempt, reason=f"HTTP {response.status_code}")
-                continue
-            response.raise_for_status()
-            return response
-
-    @staticmethod
-    def _backoff(attempt: int, reason: str) -> None:
-        delay = min(60.0, 0.6 * 2 ** (attempt - 1))
-        logger.debug("EGA retry %d in %.1fs (%s)", attempt, delay, reason)
-        time.sleep(delay)
-
-    def _get_json(self, path: str) -> Any:
-        response = self._request(
-            "GET",
-            f"{self.api_url}/metadata{path}",
-            headers={"Accept": "application/json"},
-            timeout=120,
+    def _auth_remediation(self, status: int, url: str) -> str:
+        if status == 403:
+            return (
+                "the account authenticated but is not authorised for this "
+                "dataset/file. Check your DAC approvals at "
+                "https://ega-archive.org/my-datasets — approval is per-dataset and "
+                "can expire or be revoked."
+            )
+        return (
+            f"EGA rejected the credentials archivefs resolved from "
+            f"{self.creds.describe()}. Check $EGA_PASSWORD is current."
         )
-        return response.json()
 
     # --------------------------------------------------------------- metadata
 
+    def _split(self, path: str) -> tuple[str, str]:
+        head, _, tail = path.partition("/")
+        return head, tail
+
+    def _get_metadata(self, path: str) -> Any:
+        return self._get_json(f"{self.api_url}/metadata{path}")
+
     def authorized_datasets(self) -> list[str]:
-        reply = self._get_json("/datasets") or []
-        out = []
-        for entry in reply:
-            # API v1 returns bare accession strings, v2 returns objects.
-            out.append(entry if isinstance(entry, str) else entry["datasetId"])
-        return sorted(out)
+        reply = self._get_metadata("/datasets") or []
+        # API v1 returns bare accession strings, v2 returns objects.
+        return sorted(e if isinstance(e, str) else e["datasetId"] for e in reply)
+
+    def _container_info(self, container: str) -> dict:
+        # A bare EGAF is a *file*, not a container: EGAF accessions are globally
+        # unique, so ega://EGAF... needs no dataset context.
+        if FILE_RE.match(container):
+            return self._load_file(container)
+        return {"name": container, "type": "directory", "size": 0}
+
+    def _list_root(self) -> list[dict]:
+        return [
+            {"name": ds, "type": "directory", "size": 0}
+            for ds in self.authorized_datasets()
+        ]
 
     def _member_path(self, dataset: str, meta: dict, taken: set[str]) -> str:
         accession = meta["fileId"]
@@ -457,6 +351,7 @@ class EGAFileSystem(AbstractFileSystem):
         checksum_type = (
             meta.get("plainChecksumType") or meta.get("checksumType") or "MD5"
         )
+        is_md5 = checksum_type.upper() == "MD5"
         info: dict[str, Any] = {
             "name": path,
             "type": "file",
@@ -464,8 +359,8 @@ class EGAFileSystem(AbstractFileSystem):
             # Verified: md5(decrypted bytes) == plainChecksum, so this checksum
             # describes the bytes the user ends up with, download-free.
             # See docs/decisions.md D1.
-            "checksum": checksum if checksum_type.upper() == "MD5" else None,
-            "md5": checksum if checksum_type.upper() == "MD5" else None,
+            "checksum": checksum if is_md5 else None,
+            "md5": checksum if is_md5 else None,
             "checksum_type": checksum_type,
             "ega": {
                 "file_id": meta.get("fileId"),
@@ -480,36 +375,40 @@ class EGAFileSystem(AbstractFileSystem):
         # EGA has no version token of its own (design.md: "Weak/implicit"). The
         # closest honest thing is the archive's own storage name, which embeds a
         # re-encryption timestamp and changes if the object is replaced.
-        encrypted_name = meta.get("fileName") or ""
-        stamp = re.search(r"\.(\d{10,})\.cip$", encrypted_name)
+        stamp = re.search(r"\.(\d{10,})\.cip$", meta.get("fileName") or "")
         if stamp:
             info["version_id"] = stamp.group(1)
         return info
 
-    def _load_dataset(self, dataset: str) -> dict[str, dict]:
-        if dataset in self._dataset_cache:
-            return self._dataset_cache[dataset]
-        if dataset.startswith(LEGACY_DATASET_PREFIXES):
+    def _load_members(self, container: str) -> dict[str, dict]:
+        if FILE_RE.match(container):
+            info = self._load_file(container)
+            return {container: info}
+        if not DATASET_RE.match(container):
+            raise ArchiveNotFoundError(
+                f"{container!r} is not an EGA accession. Expected "
+                f"ega://EGAD<digits>[/member] or ega://EGAF<digits>."
+            )
+        if container.startswith(LEGACY_DATASET_PREFIXES):
             authorized = self.authorized_datasets()
-            if dataset not in authorized:
+            if container not in authorized:
                 raise ArchiveNotFoundError(
-                    f"{dataset} is not available: it is either unknown to this "
+                    f"{container} is not available: it is either unknown to this "
                     f"account or one of EGA's legacy datasets, which the current "
                     f"API does not serve (contact helpdesk@ega-archive.org for "
                     f"those). Datasets this account is authorised for: "
                     f"{', '.join(authorized) or '(none)'}"
                 )
         try:
-            reply = self._get_json(f"/datasets/{dataset}/files") or []
+            reply = self._get_metadata(f"/datasets/{container}/files") or []
         except ArchiveNotFoundError:
-            authorized = self.authorized_datasets()
             raise ArchiveNotFoundError(
-                f"dataset {dataset} not found. Datasets this account is "
-                f"authorised for: {', '.join(authorized) or '(none)'}"
+                f"dataset {container} not found. Datasets this account is "
+                f"authorised for: {', '.join(self.authorized_datasets()) or '(none)'}"
             ) from None
         if not reply:
             raise ArchiveNotFoundError(
-                f"dataset {dataset} returned no files. Either it is empty or the "
+                f"dataset {container} returned no files. Either it is empty or the "
                 f"account is not authorised for it; authorised datasets: "
                 f"{', '.join(self.authorized_datasets()) or '(none)'}"
             )
@@ -517,21 +416,20 @@ class EGAFileSystem(AbstractFileSystem):
         members: dict[str, dict] = {}
         taken: set[str] = set()
         for meta in reply:
-            path = self._member_path(dataset, meta, taken)
-            info = self._info_from_metadata(path, dataset, meta)
+            path = self._member_path(container, meta, taken)
+            info = self._info_from_metadata(path, container, meta)
             members[path] = info
             self._file_cache[meta["fileId"]] = info
-        self._dataset_cache[dataset] = members
-        return members
+        return self._selected(members)
 
     def _load_file(self, file_id: str) -> dict:
         if file_id in self._file_cache:
             return self._file_cache[file_id]
-        meta = self._get_json(f"/files/{file_id}")
+        meta = self._get_metadata(f"/files/{file_id}")
         if not meta or not meta.get("fileId"):
             raise ArchiveNotFoundError(
                 f"no metadata for {file_id}. EGA answers 200-with-empty-fields when "
-                f"the account lacks access, so this most likely means you are not "
+                f"an account lacks access, so this most likely means you are not "
                 f"authorised for it (check https://ega-archive.org/my-datasets)."
             )
         datasets = meta.get("datasetId") or []
@@ -540,41 +438,9 @@ class EGAFileSystem(AbstractFileSystem):
         self._file_cache[file_id] = info
         return info
 
-    def _resolve(self, path: str) -> dict:
-        """Map any accepted path form onto a member info dict."""
-        path = self._strip_protocol(path)
-        head, _, tail = path.partition("/")
-
-        if FILE_RE.match(head) and not tail:
-            return self._load_file(head)
-
-        if not DATASET_RE.match(head):
-            raise ArchiveNotFoundError(
-                f"{path!r} is not an EGA path. Expected ega://EGAD<digits>[/member] "
-                f"or ega://EGAF<digits>."
-            )
-        members = self._load_dataset(head)
-        if not tail:
-            return {"name": head, "type": "directory", "size": 0}
-        if path in members:
-            return members[path]
-        # An intermediate directory, e.g. EGAD.../EGAF... under the nested
-        # layout. Checked before the fuzzy match below, or the accession would
-        # resolve to the file it contains and `isdir` would lie.
-        if any(p.startswith(f"{path}/") for p in members):
-            return {"name": path, "type": "directory", "size": 0}
-        # Accept any of the three layouts, whichever the URL used, so a .dvc
-        # file written under one layout still resolves under another.
-        wanted = tail.split("/")[0]
-        for member_path, info in members.items():
-            ega = info.get("ega", {})
-            if wanted in (ega.get("file_id"), ega.get("display_name")):
-                return info
-            if member_path.endswith(f"/{tail}"):
-                return info
-        raise ArchiveNotFoundError(f"{tail!r} is not a member of {head}")
-
     def _selected(self, members: dict[str, dict]) -> dict[str, dict]:
+        if self.selection is None and self.include_index_files:
+            return members
         out = {}
         for path, info in members.items():
             ega = info.get("ega", {})
@@ -592,83 +458,29 @@ class EGAFileSystem(AbstractFileSystem):
             out[path] = info
         if self.selection is not None and not out and members:
             raise ArchiveNotFoundError(
-                f"selection matched none of the {len(members)} members. "
-                f"Selections are matched against EGAF accessions and display "
-                f"names; the first few available are: "
-                f"{', '.join(sorted(members)[:3])}"
+                f"selection matched none of the {len(members)} members. Selections "
+                f"are matched against EGAF accessions and display names; the first "
+                f"few available are: {', '.join(sorted(members)[:3])}"
             )
         return out
 
-    # ----------------------------------------------------- fsspec read surface
+    def _match_member(
+        self, members: dict[str, dict], path: str, member: str
+    ) -> dict | None:
+        """Accept any layout's spelling, so a ``.dvc`` stays resolvable.
 
-    def ls(self, path: str = "", detail: bool = True, **kwargs: Any) -> list:
-        path = self._strip_protocol(path)
-        if not path:
-            entries = [
-                {"name": ds, "type": "directory", "size": 0}
-                for ds in self.authorized_datasets()
-            ]
-            return entries if detail else [e["name"] for e in entries]
-
-        head, _, tail = path.partition("/")
-        if FILE_RE.match(head) and not tail:
-            info = self._load_file(head)
-            return [info] if detail else [info["name"]]
-
-        members = self._selected(self._load_dataset(head))
-        if tail:
-            # Listing inside a dataset: either a nested-layout accession
-            # directory, or a single member.
-            prefix = f"{path}/"
-            nested = [i for p, i in members.items() if p.startswith(prefix)]
-            if nested:
-                return nested if detail else [i["name"] for i in nested]
-            info = self._resolve(path)
-            return [info] if detail else [info["name"]]
-
-        out = list(members.values())
-        return out if detail else [i["name"] for i in out]
-
-    def info(self, path: str, **kwargs: Any) -> dict:
-        return self._resolve(path)
-
-    def exists(self, path: str, **kwargs: Any) -> bool:
-        try:
-            self._resolve(path)
-        except (ArchiveNotFoundError, AuthenticationError):
-            return False
-        return True
-
-    def isdir(self, path: str) -> bool:
-        try:
-            return self._resolve(path).get("type") == "directory"
-        except ArchiveNotFoundError:
-            return False
-
-    def isfile(self, path: str) -> bool:
-        try:
-            return self._resolve(path).get("type") == "file"
-        except ArchiveNotFoundError:
-            return False
-
-    def checksum(self, path: str) -> str | None:
-        """MD5 of the *decrypted* bytes, straight from metadata.
-
-        Overridden because ``AbstractFileSystem.checksum`` hashes
-        ``info()``+mtime, which for us would throw away a real content checksum
-        in favour of a meaningless one.
+        A ``.dvc`` file written while ``layout="accession"`` must still resolve if
+        someone later configures ``layout="display"``; the accession is the
+        identity, the layout is presentation.
         """
-        return self._resolve(path).get("md5")
-
-    def created(self, path: str) -> None:
+        wanted = member.split("/")[0]
+        for member_path, info in members.items():
+            ega = info.get("ega", {})
+            if wanted in (ega.get("file_id"), ega.get("display_name")):
+                return info
+            if member_path.endswith(f"/{member}"):
+                return info
         return None
-
-    def modified(self, path: str) -> None:
-        return None
-
-    def ukey(self, path: str) -> str:
-        info = self._resolve(path)
-        return info.get("md5") or f"{info.get('name')}:{info.get('size')}"
 
     # --------------------------------------------------------------- transfer
 
@@ -695,143 +507,8 @@ class EGAFileSystem(AbstractFileSystem):
             )
         return int(total)
 
-    def _fetch_range(self, info: dict, start: int, end: int) -> bytes:
-        """Fetch ``[start, end)`` of the decrypted bytes.
-
-        Two safeguards, both from observed live behaviour:
-
-        * the request start is aligned down to :data:`PLAIN_RANGE_ALIGNMENT` and
-          the surplus trimmed locally, because EGA silently returns *wrong bytes*
-          for an unaligned start;
-        * the body length is checked, because a ranged request can come back
-          successful but short, and a truncated read would corrupt data with no
-          error anywhere.
-        """
-        if end <= start:
-            return b""
-        aligned = start - (start % PLAIN_RANGE_ALIGNMENT)
-        trim = start - aligned
-        if trim:
-            return self._fetch_aligned(info, aligned, end)[trim:]
-        return self._fetch_aligned(info, aligned, end)
-
-    def _fetch_aligned(self, info: dict, start: int, end: int) -> bytes:
-        assert start % PLAIN_RANGE_ALIGNMENT == 0
-        want = end - start
-        url = self._data_url(info)
-        last_error = "no attempt made"
-        for attempt in range(1, self.max_retries + 1):
-            response = self._request(
-                "GET",
-                url,
-                headers={"Range": f"bytes={start}-{end - 1}"},
-                stream=True,
-                timeout=1800,
-            )
-            try:
-                chunks = []
-                got = 0
-                for chunk in response.iter_content(1024 * 1024):
-                    chunks.append(chunk)
-                    got += len(chunk)
-            except requests.RequestException as exc:
-                last_error = f"transfer failed: {exc}"
-            else:
-                if got == want:
-                    return b"".join(chunks)
-                last_error = f"asked for {want} bytes, got {got}"
-            finally:
-                response.close()
-            logger.warning(
-                "EGA short read on %s bytes=%d-%d (%s); retry %d/%d",
-                info["name"],
-                start,
-                end - 1,
-                last_error,
-                attempt,
-                self.max_retries,
-            )
-            self._backoff(attempt, reason=last_error)
-        raise OSError(
-            f"EGA would not serve bytes {start}-{end - 1} of {info['name']} "
-            f"({last_error}) after {self.max_retries} attempts. This is usually "
-            f"transient server-side; retry, and reduce concurrency if it persists."
-        )
-
-    def cat_file(
-        self, path: str, start: int | None = None, end: int | None = None, **kwargs: Any
-    ) -> bytes:
-        info = self._resolve(path)
-        if info.get("type") == "directory":
-            raise IsADirectoryError(path)
+    def _size_of(self, info: dict) -> int:
         size = info.get("size")
         if size is None:
-            size = self.plain_size(path)
-        begin = 0 if start is None else (start if start >= 0 else max(0, size + start))
-        finish = size if end is None else min(size, end if end >= 0 else size + end)
-        return self._fetch_range(info, begin, finish)
-
-    def _open(
-        self,
-        path: str,
-        mode: str = "rb",
-        block_size: int | None = None,
-        autocommit: bool = True,
-        cache_options: dict | None = None,
-        **kwargs: Any,
-    ) -> EGAFile:
-        if "r" not in mode:
-            raise NotSupportedError(
-                "EGA is read-only through archivefs; deposit is a separate, "
-                "human-supervised process (see the deposition SOP)."
-            )
-        info = self._resolve(path)
-        if info.get("type") == "directory":
-            raise IsADirectoryError(path)
-        return EGAFile(
-            self,
-            info,
-            mode=mode,
-            block_size=block_size or self.blocksize,
-            cache_options=cache_options,
-            **kwargs,
-        )
-
-    # -------------------------------------------------------------- read-only
-
-    def _unsupported(self, *args: Any, **kwargs: Any) -> None:
-        raise NotSupportedError(
-            "archivefs filesystems are read-only: EGA does not accept writes "
-            "through this path, and pretending otherwise would silently lose data."
-        )
-
-    mkdir = _unsupported
-    makedirs = _unsupported
-    rm = _unsupported
-    rm_file = _unsupported
-    _rm = _unsupported
-    rmdir = _unsupported
-    touch = _unsupported
-    mv = _unsupported
-    copy = _unsupported
-    pipe_file = _unsupported
-
-
-class EGAFile(AbstractBufferedFile):
-    """A readable file over EGA's ranged plain-format endpoint."""
-
-    def __init__(self, fs: EGAFileSystem, info: dict, **kwargs: Any) -> None:
-        self._info = info
-        size = info.get("size")
-        if size is None:
-            size = fs.plain_size(info["name"])
-        super().__init__(fs, info["name"], size=size, **kwargs)
-
-    def _fetch_range(self, start: int, end: int) -> bytes:
-        return self.fs._fetch_range(self._info, start, min(end, self.size))
-
-    def _upload_chunk(self, final: bool = False) -> None:
-        raise NotSupportedError("EGA files are read-only")
-
-    def _initiate_upload(self) -> None:
-        raise NotSupportedError("EGA files are read-only")
+            return self.plain_size(info["name"])
+        return size

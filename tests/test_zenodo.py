@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 from tests.fake_http import FakeRequestsModule, FakeResponse, ranged
 
-from archivefs.backends import zenodo as zenodo_mod
+from archivefs import base as base_mod
 from archivefs.backends.zenodo import ZenodoFileSystem
 from archivefs.errors import (
     ArchiveNotFoundError,
@@ -111,7 +111,7 @@ class FakeZenodo:
 @pytest.fixture
 def fake_zenodo(monkeypatch):
     server = FakeZenodo()
-    monkeypatch.setattr(zenodo_mod, "requests", FakeRequestsModule(server))
+    monkeypatch.setattr(base_mod, "requests", FakeRequestsModule(server))
     monkeypatch.delenv("ZENODO_TOKEN", raising=False)
     return server
 
