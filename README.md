@@ -21,7 +21,7 @@ dbgap://<phs_id>/<SRR_accession>       # deferred, registered, refuses clearly
 ## What it does today
 
 ```console
-$ archivefs ls -l zenodo://1486184
+$ archivefs ls -l zenodo://1486184        # -R to recurse
        853 B  49f6a914ea33912471512ac9228c6923  1486184/github-mark.zip
 
 $ dvc import-url --no-download zenodo://1486184/github-mark.zip logo.zip
@@ -107,16 +107,21 @@ question resolved.
 | `geo://` | working | ⚠️ none published — a `.chiro` sidecar fixes it | index-based listing; SRA seam drawn, not built |
 | `dbgap://` | deferred | — | registered so the error explains itself |
 
-Verified end to end: `dvc list-url`, `dvc import-url --no-download` (single file and
-directory), and `dvc pull` for all three, including a controlled-access EGA pull with
-credentials only in the environment. Live tests are opt-in
-(`ARCHIVEFS_TEST_{EGA,ZENODO,GEO,DVC}=1`); the default test run is offline.
+Verified end to end against the live archives: `dvc list-url`, `dvc import-url
+--no-download` (single file and directory), `dvc update`, `dvc pull`, and ZIP
+transparency through a DVC remote — including a controlled-access EGA pull whose
+`.dvc` file contains neither username nor password. Plain `fsspec.open()` works with
+no adaptor at all, so pandas/Dask/Intake reach the same data by the same path.
+
+Live tests are opt-in (`ARCHIVEFS_TEST_{EGA,ZENODO,GEO,DVC}=1`); the default `pytest`
+run is entirely offline.
 
 **Read next:**
 
-- **Decisions and deviations:** [`docs/decisions.md`](docs/decisions.md) — including
-  the resolved EGA checksum question and two undocumented archive behaviours worth
-  knowing about.
+- **Decisions and deviations:** [`docs/decisions.md`](docs/decisions.md) — twelve
+  entries, including the resolved EGA checksum question, two undocumented archive
+  behaviours worth knowing about, and the ten silent bugs an adversarial review of
+  the finished code turned up.
 - **Ideas and extensions:** [`docs/ideas.md`](docs/ideas.md)
 - **Architecture:** [`docs/design.md`](docs/design.md) · **checklist:**
   [`docs/plan.md`](docs/plan.md)

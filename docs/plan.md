@@ -76,6 +76,12 @@ clean case and an auth-complex case (design.md §"Build order"):
       three backends including controlled-access EGA.
 - [x] A CLI for the questions that otherwise need Python: `archivefs info | ls |
       stat | get | check | verify | dvc`
+- [x] Adversarial review of the finished code, and the DVC path driven by hand.
+      Between them they found ten silent correctness bugs the green test suite
+      agreed with — including `ls()` returning descendants rather than children,
+      which made fsspec's basename-keyed `walk` drop files from a directory pull.
+      All fixed with regression tests; written up as
+      [`decisions.md` D10–D11](decisions.md).
 - [x] Candidate backend: **BioImage Archive (`bia://`)** — **storage/access model
       verified** against the live services:
       [`evidence/bia-access-model-2026-08-17.md`](evidence/bia-access-model-2026-08-17.md).
