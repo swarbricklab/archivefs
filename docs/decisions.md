@@ -316,6 +316,18 @@ extraction, and Windows-portability complaints returned as *warnings* — an arc
 that cannot be extracted on Windows is still perfectly extractable here, and
 refusing it would be overreach.
 
+**One consequence worth stating plainly**, because it looks like a regression and is
+not: over a *transparent* ZIP, `dvc import-url --no-download` is **not**
+download-free. It cannot be — a member's md5 is only knowable by decompressing it.
+What DVC records is a `.dir` manifest of real per-member md5s (verified: the
+`--no-download` run produced the identical `.dir` hash to the downloading run, and
+that object contains real content hashes, not nulls), so it obtains them by reading
+the bytes. Nothing is dishonest, and the design's asymmetric contract is exactly
+this: the **container** md5 is download-free and strong (Zenodo publishes it),
+member-level integrity is CRC32 from the central directory plus the workspace md5
+computed at extraction. If you want a genuinely download-free pin, import the ZIP
+opaquely (`extract_zips` off) and the dep carries Zenodo's own md5.
+
 **On the "identify and evaluate a robust ZIP library" open item:** I looked and did
 not adopt one, deliberately. `zipfile` already handles the parsing tail
 (encodings, ZIP64, CRC) and is the only implementation guaranteed present;

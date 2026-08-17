@@ -483,3 +483,19 @@ def test_chiro_off_as_a_string_is_not_a_manifest_path(fake_zenodo):
     # "false" must not be treated as the name of a manifest to fetch
     assert fs.ls(RECID, detail=False)
     assert fs.manifest_path_for(RECID) is None
+
+
+def test_container_md5_is_download_free_but_member_md5_cannot_be(zfs, fake_zenodo):
+    """The asymmetric integrity contract, stated as a test.
+
+    A member's md5 is only knowable by decompressing it, so it is *not* published
+    download-free — but the container's is, and immutability of the version DOI is
+    what makes verifying the container enough to trust the members.
+    """
+    container = zfs.info(f"{RECID}/archive.zip")
+    assert container["zenodo"]["container_md5"] == hashlib.md5(ZIP_BYTES).hexdigest()  # noqa: S324
+    member = zfs.info(f"{RECID}/archive.zip/README.md")
+    assert member["md5"] is None
+    assert member["crc32"] is not None  # from the central directory
+    # listing the interior read only the central directory, not the payload
+    assert fake_zenodo.bytes_served < len(ZIP_BYTES) / 4

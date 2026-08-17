@@ -374,6 +374,34 @@ class ZenodoFileSystem(ArchiveFileSystem):
         """
         return f"zip://{member}::zenodo://{self._strip_protocol(path)}"
 
+    def _container_as_directory(self, zip_path: str) -> dict:
+        """A transparent ZIP, presented as the directory it stands in for.
+
+        Its ``md5`` moves into the ``zenodo`` block as ``container_md5``: a
+        directory has no content hash of its own, and leaving the archive's md5 in
+        the ``md5`` field would offer a consumer a checksum for something it is not
+        going to write. The container md5 is still the strong, download-free half
+        of the integrity contract — it just is not this entry's checksum.
+        """
+        container = self._member(*self.split_path(zip_path))
+        return {
+            **container,
+            "type": "directory",
+            "md5": None,
+            "checksum": None,
+            "checksum_type": None,
+            "zenodo": {
+                **container["zenodo"],
+                "container": container["name"],
+                "container_md5": container["md5"],
+                "integrity": (
+                    "container MD5 (Zenodo, strong, download-free); per-member md5s "
+                    "are computed from the extracted bytes, since a member's hash "
+                    "cannot be known without decompressing it"
+                ),
+            },
+        }
+
     def _zip_info(self, zip_path: str, interior: str) -> dict:
         view = self.zip_view(zip_path)
         try:
@@ -435,8 +463,7 @@ class ZenodoFileSystem(ArchiveFileSystem):
         if inside:
             zip_path, interior = inside
             if not interior:
-                container = self._member(*self.split_path(zip_path))
-                return {**container, "type": "directory"}
+                return self._container_as_directory(zip_path)
             return self._zip_info(zip_path, interior)
         return super().info(path, **kwargs)
 
