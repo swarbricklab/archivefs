@@ -38,7 +38,14 @@ $ dvc pull logo.zip.dvc                    # bytes on demand, verified by DVC
 ```
 
 The same works for `ega://` with credentials resolved from the environment at pull
-time, and for `geo://` anonymously.
+time, and for `geo://` and `bia://` anonymously. For imaging, BIA's own OME-Zarr
+conversions carry real MD5s, so that tier is download-free too:
+
+```console
+$ dvc remote add bia bia://S-BIAD599 && dvc remote modify bia view derived
+$ dvc import-url --no-download remote://bia/<image-uuid>/<image>-thumbnail-128-128.png t.png
+                                           # md5 recorded without fetching bytes
+```
 
 ## Why
 

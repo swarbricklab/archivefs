@@ -74,14 +74,22 @@ DEFAULT_API_URL = "https://www.ebi.ac.uk/biostudies/api/v1"
 #: The Embassy S3 bucket holding BIA's own conversions. Anonymous, no signing.
 DEFAULT_S3_URL = "https://uk1s3.embassy.ebi.ac.uk/bia-integrator-data"
 
-#: BioStudies accessions: S-BIAD (BioImages), S-BSST (generic), and friends.
-ACCESSION_RE = re.compile(r"^[A-Z]-[A-Z]{4}\d+$", re.I)
+#: BioStudies accessions come in more shapes than S-BIAD: S-BSST, S-EPMC, and
+#: ArrayExpress-style E-MTAB-1234 are all real, public studies. This only has to
+#: catch obvious garbage — ``/studies/{acc}/info`` is the authoritative existence
+#: check — so it stays deliberately loose. Case-sensitive on purpose: the API 404s
+#: on ``s-biad599``, and accepting it here only buys a misleading "no such study".
+ACCESSION_RE = re.compile(r"^[A-Z]-[A-Z]{4,}[-\d][-\w]*$")
 
 #: Rows per page. The server caps ``length`` at exactly 1000 and answers an
 #: over-large request with an **empty list and ``recordsFiltered: 0``** rather than
 #: an error or a clamp — measured: 1000 returns 1000 rows, 2000 returns nothing. So
 #: "ask for everything" is not a strategy, and this must never be raised.
 PAGE_SIZE = 1000
+#: Ceiling on pages for one *file listing*. A study with more than this many files
+#: does not exist today (the largest seen is 8237); it bounds a server that ignores
+#: `start`, which would otherwise page forever.
+MAX_LISTING_PAGES = 500
 #: Ceiling on pages for one S3 listing. A converted study runs to tens of thousands
 #: of objects — S-BIAD599's is over 60,000 — so listings are delimited to one level
 #: and this only ever bites on a pathological prefix or a looping server.
@@ -175,17 +183,32 @@ class SubmittedView(BIAView):
         fetched = 0
         duplicates = 0
         skipped_directories = 0
+        nameless = 0
         expected = 0
         start = 0
 
-        while True:
-            page, expected = self._page(accession, start, PAGE_SIZE)
+        for page_number in range(MAX_LISTING_PAGES + 1):
+            if page_number == MAX_LISTING_PAGES:
+                raise ArchiveNotFoundError(
+                    f"listing {accession} did not terminate within "
+                    f"{MAX_LISTING_PAGES} pages of {PAGE_SIZE} rows. Refusing to "
+                    f"keep paging a listing that will not end."
+                )
+            page, advertised = self._page(accession, start, PAGE_SIZE)
+            if not expected:
+                # Pin the total from the first response that offers one. Taking it
+                # from *every* page lets a final empty page (recordsFiltered: 0)
+                # quietly disarm the completeness check below.
+                expected = advertised or int(
+                    self.fs.study_info(accession).get("files") or 0
+                )
             if not page:
                 break
             fetched += len(page)
             for entry in page:
                 path = entry.get("path") or entry.get("Name")
                 if not path:
+                    nameless += 1
                     continue
                 if is_true(entry.get("isDirectory")):
                     skipped_directories += 1
@@ -209,14 +232,16 @@ class SubmittedView(BIAView):
                 f"listing is incomplete — retry, and report the accession upstream "
                 f"if it persists."
             )
-        if duplicates or skipped_directories:
+        if duplicates or skipped_directories or nameless:
             logger.info(
-                "%s: %d file(s), after collapsing %d duplicate path(s) and skipping "
-                "%d directory entr(y/ies) in the study record",
+                "%s: %d file(s), after collapsing %d duplicate path(s), skipping %d "
+                "directory entr(y/ies) and %d row(s) with no path, in the study "
+                "record",
                 accession,
                 len(rows),
                 duplicates,
                 skipped_directories,
+                nameless,
             )
         if not rows:
             raise ArchiveNotFoundError(
@@ -360,13 +385,23 @@ class DerivedView(BIAView):
         return sorted(entries, key=lambda entry: entry["name"])
 
     def info(self, path: str) -> dict:
-        """One object, or the directory it turns out to be. One request."""
+        """One object, or the directory it turns out to be. One request.
+
+        The directory test is ``path in directories``, **not** "the listing returned
+        anything": S3 answers a *partial-name* prefix with the siblings that begin
+        with it, so ``…/0177`` looks populated when only ``…/01776a3a-…/`` exists.
+        Getting this wrong makes ``exists``/``isdir`` return confident nonsense that
+        disagrees with ``ls`` — and it matters in practice, because OME-Zarr chunk
+        directories are named ``0,1,10,100,…``, so a *missing* chunk ``1`` would
+        resolve as a directory whenever ``10`` exists. zarr expects a
+        FileNotFoundError there and treats it as the fill value; a directory gets it
+        an IsADirectoryError instead.
+        """
         directories, objects = self._list(path, delimiter="/")
         for entry in objects:
             if entry["name"] == path:
                 return entry
-        if directories or objects:
-            # Keys exist *under* this prefix, so it is a directory.
+        if path in directories:
             return {"name": path, "type": "directory", "size": 0}
         raise ArchiveNotFoundError(
             f"{path} is not in BIA's derived-data bucket. Converted data is keyed "
@@ -428,7 +463,10 @@ class BIAFileSystem(ArchiveFileSystem):
         #: derived-view listings, keyed by directory path. The lazy view does not
         #: go through _members(), so it does not inherit that cache — and a
         #: study-level listing costs ~11s, which find()/walk()/DVC would otherwise
-        #: pay again on every visit.
+        #: pay again on every visit. Guarded by the base's member lock, for the same
+        #: reason it has one: DVC runs one filesystem across a thread pool. (The
+        #: worst a race could do here is duplicate a request, but the asymmetry
+        #: would be a trap for the next person.)
         self._derived_listings: dict[str, list[dict]] = {}
 
     # --------------------------------------------------------------- metadata
@@ -521,10 +559,26 @@ class BIAFileSystem(ArchiveFileSystem):
             return super().ls(path, detail=detail, **kwargs)
         path = self._strip_protocol(path)
         self._check_accession(path.split("/")[0])
-        if path not in self._derived_listings:
-            self._derived_listings[path] = self.view.children(path)
-        entries = self._derived_listings[path]
-        return entries if detail else [entry["name"] for entry in entries]
+        with self._member_lock:
+            if path not in self._derived_listings:
+                try:
+                    self._derived_listings[path] = self.view.children(path)
+                except ArchiveNotFoundError:
+                    # fsspec requires ls() of a *file* to return that one entry.
+                    # The base does it ("a file lists as itself") and this override
+                    # must too, or find()/walk()/du()/get(recursive=True) raise on
+                    # every derived file path — and those are exactly the calls
+                    # DVC's directory pull makes. walk() cannot rescue it either,
+                    # since on_error defaults to "raise" here and
+                    # ArchiveNotFoundError is a FileNotFoundError.
+                    info = self.info(path)
+                    if info.get("type") == "file":
+                        return [info] if detail else [info["name"]]
+                    raise
+            entries = self._derived_listings[path]
+        # A copy: the base hands back a fresh list every call, and a caller that
+        # mutates what it got should not be editing our cache.
+        return list(entries) if detail else [entry["name"] for entry in entries]
 
     def info(self, path: str, **kwargs: Any) -> dict:
         if self.view_name != "derived" or not self._strip_protocol(path):

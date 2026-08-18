@@ -264,3 +264,24 @@ def test_bia_derived_import_is_genuinely_download_free(repo):
     payload = (root / "thumb.png").read_bytes()
     assert hashlib.md5(payload).hexdigest() == BIA_THUMB_MD5  # noqa: S324
     assert payload[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+BIA_CSV = "bia://S-BIAD605/ccrcc/clinical_data.csv"
+BIA_CSV_MD5 = "6ae3d055bae6270cf1c02f66f8edb6dc"
+
+
+def test_bia_submitted_import_hashes_what_it_downloads(repo):
+    """The submitted tier publishes no checksum, so DVC hashes the bytes it fetched.
+
+    That is the honest GEO-shaped behaviour, and the .dvc still pins the content —
+    it just cannot pin it *before* the download. (The derived tier can; see above.)
+    """
+    root, run = repo
+    result = run("import-url", BIA_CSV, "clinical.csv")
+    assert result.returncode == 0, result.stderr
+    spec = yaml.safe_load((root / "clinical.csv.dvc").read_text())
+    assert spec["deps"][0]["path"] == BIA_CSV
+    assert spec["deps"][0]["md5"] == BIA_CSV_MD5
+    payload = (root / "clinical.csv").read_bytes()
+    assert hashlib.md5(payload).hexdigest() == BIA_CSV_MD5  # noqa: S324
+    assert payload.startswith(b"ICAIRD number,Gender,Response")

@@ -24,11 +24,9 @@ from archivefs.errors import ArchiveNotFoundError, NotSupportedError
 DATA = Path(__file__).parent / "data"
 INFO = json.loads((DATA / "bia_S-BIAD599_info.json").read_text())
 FILES_PAGE = json.loads((DATA / "bia_S-BIAD599_files.json").read_text())
+#: kept as a shape reference for the hand-built listings below
 S3_STUDY_LEVEL = (DATA / "bia_s3_study_level.xml").read_bytes()
 S3_IMAGE_LEVEL = (DATA / "bia_s3_image_level.xml").read_bytes()
-S3_IMAGE_PREFIX = (
-    "S-BIAD599/01776a3a-16a5-4c48-a104-fefcc83cc2ee/"
-)
 ACC = "S-BIAD599"
 FIRE = "https://ftp.ebi.ac.uk/biostudies/fire/S-BIAD/599/S-BIAD599/Files"
 
@@ -79,33 +77,79 @@ def _listing(prefix: str, *, prefixes=(), contents=(), truncated=False, token=""
     return "".join(body).encode()
 
 
-#: the image directories the study-level fixture advertises, plus page two's
-STUDY_IMAGE_PREFIXES = [
-    prefix.rstrip("/")
-    for prefix in __import__("re")
-    .findall(r"<Prefix>([^<]+/)</Prefix>", (DATA / "bia_s3_study_level.xml").read_text())
-    if prefix.count("/") == 2
-] + ["S-BIAD599/ffffffff-0000-0000-0000-000000000000"]
+#: The derived bucket, as a flat list of objects — which is what S3 is. The fake
+#: computes CommonPrefixes/Contents from these the way ListObjectsV2 does, so the
+#: tests exercise real prefix semantics (including the partial-name case) rather
+#: than a special case per URL.
+IMAGE = "01776a3a-16a5-4c48-a104-fefcc83cc2ee"
+ZARR = f"{ACC}/{IMAGE}/{IMAGE}.zarr"
+S3_OBJECTS: dict[str, int] = {
+    f"{ACC}/{IMAGE}/{IMAGE}-thumbnail-128-128.png": 12234,
+    f"{ZARR}/.zattrs": 33,
+    f"{ZARR}/.zgroup": 23,
+    f"{ZARR}/OME/.zattrs": 1782,
+    f"{ZARR}/0/.zarray": 327,
+    # chunk names are 0,1,10,… — the shape that makes a partial-name prefix
+    # look like a directory
+    f"{ZARR}/0/0/0/0/1": 4096,
+    f"{ZARR}/0/0/0/0/10": 4096,
+    f"{ZARR}/0/0/0/0/12": 4096,
+    # other images in the study, one object each
+    **{
+        f"{ACC}/{uuid}/{uuid}-thumbnail-128-128.png": 1000
+        for uuid in [f"{i:08x}-0000-0000-0000-000000000000" for i in range(1, 19)]
+    },
+    # the object that only appears on page two of a truncated study listing
+    f"{ACC}/ffffffff-0000-0000-0000-000000000000/thumb.png": 1000,
+}
+#: how many entries the fake serves per page, to force the truncated path
+S3_FAKE_PAGE = 12
+
+
+def s3_etag(key: str) -> str:
+    return hashlib.md5(key.encode()).hexdigest()  # noqa: S324
 
 
 def s3_body(key: str) -> bytes:
-    """A body whose length matches the Size the listing fixtures advertise."""
-    sizes = {
-        f"{S3_IMAGE_PREFIX}01776a3a-16a5-4c48-a104-fefcc83cc2ee"
-        "-thumbnail-128-128.png": 12234
-    }
-    return (key.encode() * 400)[: sizes.get(key, 19)]
+    """A body whose length matches the Size the fake's listing advertises."""
+    size = S3_OBJECTS.get(key, 19)
+    return (key.encode() * (size // max(len(key), 1) + 1))[:size]
 
 
-#: page two of the truncated study-level listing
-STUDY_PAGE_TWO = _listing(
-    "S-BIAD599/", prefixes=["S-BIAD599/ffffffff-0000-0000-0000-000000000000/"]
-)
-EMPTY_LISTING = _listing("S-BIAD599/nothing/")
+def s3_list(prefix: str, token: str) -> bytes:
+    """ListObjectsV2 with delimiter=/, computed from S3_OBJECTS like S3 would."""
+    directories: list[str] = []
+    contents: list[tuple[str, str, str]] = []
+    for key in sorted(S3_OBJECTS):
+        if not key.startswith(prefix):
+            continue
+        rest = key[len(prefix) :]
+        head, sep, _ = rest.partition("/")
+        if sep:
+            child = f"{prefix}{head}/"
+            if child not in directories:
+                directories.append(child)
+        else:
+            contents.append((key, s3_etag(key), str(S3_OBJECTS[key])))
+    entries = [("dir", d) for d in directories] + [("key", c) for c in contents]
+    offset = int(token) if token.isdigit() else 0
+    page = entries[offset : offset + S3_FAKE_PAGE]
+    truncated = offset + S3_FAKE_PAGE < len(entries)
+    return _listing(
+        prefix,
+        prefixes=[value for kind, value in page if kind == "dir"],
+        contents=[value for kind, value in page if kind == "key"],
+        truncated=truncated,
+        token=str(offset + S3_FAKE_PAGE) if truncated else "",
+    )
+
+
+#: nothing under this prefix at all — a study BIA has not converted
+EMPTY_LISTING = _listing(f"{ACC}/nothing/")
 #: a server that keeps handing back the same continuation token
 TRUNCATED_LOOP = _listing(
-    "S-BIAD599/",
-    contents=[("S-BIAD599/loop.bin", "0" * 32, "1")],
+    f"{ACC}/",
+    contents=[(f"{ACC}/loop.bin", "0" * 32, "1")],
     truncated=True,
     token="always-the-same",
 )
@@ -168,7 +212,6 @@ class FakeBIA:
         return FakeResponse(404, b"not found")
 
     def _s3_listing(self, url: str):
-        """A delimited ListObjectsV2, including the second page of a truncated one."""
         from urllib.parse import parse_qs, unquote, urlparse
 
         query = parse_qs(urlparse(url).query)
@@ -177,27 +220,7 @@ class FakeBIA:
         self.s3_listings.append((prefix, token))
         if self.repeat_token_forever:
             return FakeResponse(200, TRUNCATED_LOOP)
-        if prefix == "S-BIAD599/":
-            # the real study-level listing is truncated; serve page two on the token
-            if token:
-                return FakeResponse(200, STUDY_PAGE_TWO)
-            return FakeResponse(200, S3_STUDY_LEVEL)
-        if prefix.startswith(S3_IMAGE_PREFIX):
-            return FakeResponse(200, S3_IMAGE_LEVEL)
-        if prefix.startswith(f"{ACC}/") and not prefix.endswith("/"):
-            # S3 semantics: a prefix that is not a whole key still matches the keys
-            # (and common prefixes) beginning with it — which is how info() decides
-            # a path is a directory.
-            children = [
-                child
-                for child in STUDY_IMAGE_PREFIXES
-                if child.startswith(prefix)
-            ]
-            if children:
-                return FakeResponse(
-                    200, _listing(prefix, prefixes=[f"{child}/" for child in children])
-                )
-        return FakeResponse(200, EMPTY_LISTING)
+        return FakeResponse(200, s3_list(prefix, token))
 
 
 @pytest.fixture
@@ -612,3 +635,170 @@ def test_manifests_do_not_apply_to_the_derived_view(fake_bia):
     assert fs.manifest_path_for(ACC) is None
     assert fs.manifest_for(ACC) is None
     assert fs.drift(ACC) is None
+
+
+# ---------------------------------------------- the derived view's sharp edges
+
+
+def test_a_partial_name_prefix_is_not_a_directory(derived):
+    """S3 answers a partial prefix with the *siblings* that begin with it.
+
+    So "…/0177" looked populated when only "…/01776a3a-…/" existed, and
+    exists/isdir returned confident nonsense that disagreed with ls(). It matters
+    for zarr: chunk directories are named 0,1,10,100,…, so a missing chunk "1"
+    would resolve as a directory whenever "10" exists — and zarr needs a
+    FileNotFoundError there to use the fill value.
+    """
+    real = f"{ACC}/01776a3a-16a5-4c48-a104-fefcc83cc2ee"
+    assert derived.isdir(real)
+    partial = f"{ACC}/0177"
+    with pytest.raises(ArchiveNotFoundError):
+        derived.info(partial)
+    assert derived.exists(partial) is False
+    assert derived.isdir(partial) is False
+
+
+def test_ls_of_a_derived_file_returns_that_file(derived):
+    """fsspec's contract, and what find()/walk()/du()/DVC's pull all rely on."""
+    entries = derived.ls(f"{ACC}/01776a3a-16a5-4c48-a104-fefcc83cc2ee")
+    thumbnail = next(e for e in entries if e["type"] == "file")
+    path = thumbnail["name"]
+    assert derived.ls(path, detail=False) == [path]
+    assert derived.find(path) == [path]
+    assert derived.du(path) == thumbnail["size"]
+
+
+def test_ls_of_a_derived_nonexistent_path_still_raises(derived):
+    with pytest.raises(ArchiveNotFoundError):
+        derived.ls(f"{ACC}/definitely-not-here")
+
+
+def test_the_cached_listing_is_not_handed_out_to_be_mutated(derived):
+    first = derived.ls(ACC)
+    first.clear()
+    assert derived.ls(ACC), "a caller emptied our cache"
+
+
+# --------------------------------------------------------------- accessions
+
+
+@pytest.mark.parametrize(
+    "accession",
+    ["S-BIAD599", "S-BSST123", "S-EPMC1234", "E-MTAB-1234"],
+)
+def test_real_biostudies_accession_shapes_are_accepted(fake_bia, accession):
+    """E-MTAB-1234 is a real public BioStudies study; refusing it was wrong."""
+    fake_bia()
+    fs = BIAFileSystem(skip_instance_cache=True)
+    fs._check_accession(accession)  # must not raise
+
+
+@pytest.mark.parametrize("accession", ["not-an-accession", "s-biad599", "", "S-BIA"])
+def test_obvious_garbage_is_still_refused(fake_bia, accession):
+    """Lower case included: the API 404s on it, so accepting it here would only buy
+    a misleading "no such study"."""
+    fake_bia()
+    fs = BIAFileSystem(skip_instance_cache=True)
+    with pytest.raises(ArchiveNotFoundError):
+        fs._check_accession(accession)
+
+
+# ------------------------------------------------------- listing completeness
+
+
+def test_a_final_zero_total_page_cannot_disarm_the_completeness_check(fake_bia, monkeypatch):
+    """`expected` is pinned from the first response; taking it from every page let a
+    trailing recordsFiltered:0 turn a short listing into a silent success."""
+    server = fake_bia(rows=[
+        {"path": f"f{i:04d}.tif", "Size": 1, "type": "file", "isDirectory": "false"}
+        for i in range(1500)
+    ])
+    calls = {"n": 0}
+    original = FakeBIA.__call__
+
+    def handler(method, url, headers, kwargs):
+        if "/files/" in url and "biostudies/api" in url:
+            calls["n"] += 1
+            if calls["n"] == 2:  # the second page claims the study is empty
+                return FakeResponse(
+                    200, json={"data": [], "recordsFiltered": 0, "recordsTotal": 0}
+                )
+        return original(server, method, url, headers, kwargs)
+
+    monkeypatch.setattr(base_mod, "requests", FakeRequestsModule(handler))
+    fs = BIAFileSystem(skip_instance_cache=True)
+    with pytest.raises(ArchiveNotFoundError) as exc:
+        fs.ls(ACC)
+    assert "incomplete" in str(exc.value)
+
+
+def test_rows_with_no_path_are_counted_not_silently_dropped(fake_bia, caplog):
+    fake_bia(rows=[
+        {"path": "a.tif", "Size": 1, "type": "file", "isDirectory": "false"},
+        {"Size": 1, "type": "file", "isDirectory": "false"},  # no path at all
+    ])
+    fs = BIAFileSystem(skip_instance_cache=True)
+    with caplog.at_level("INFO"):
+        assert fs.find(ACC) == [f"{ACC}/a.tif"]
+    assert "with no path" in caplog.text
+
+
+def test_a_listing_that_never_ends_is_refused(fake_bia, monkeypatch):
+    """A server that ignores `start` would otherwise page forever."""
+    server = fake_bia()
+
+    def handler(method, url, headers, kwargs):
+        if "/files/" in url and "biostudies/api" in url:
+            return FakeResponse(
+                200,
+                json={
+                    "data": [
+                        {"path": "same.tif", "Size": 1, "type": "file",
+                         "isDirectory": "false"}
+                    ],
+                    "recordsFiltered": 10**9,
+                    "recordsTotal": 10**9,
+                },
+            )
+        return FakeBIA.__call__(server, method, url, headers, kwargs)
+
+    monkeypatch.setattr(base_mod, "requests", FakeRequestsModule(handler))
+    fs = BIAFileSystem(skip_instance_cache=True)
+    with pytest.raises(ArchiveNotFoundError) as exc:
+        fs.ls(ACC)
+    assert "did not terminate" in str(exc.value)
+
+
+@pytest.mark.network
+def test_live_an_arrayexpress_style_accession_works():
+    """E-MTAB-1234 is a real public BioStudies study, and a third sharding scheme
+    (E-MTAB-/234/E-MTAB-1234). The accession pattern used to refuse it outright."""
+    requires_network()
+    fs = BIAFileSystem(skip_instance_cache=True)
+    info = fs.info("E-MTAB-1234")
+    assert info["bia"]["files"] == 8
+    assert info["bia"]["relpath"] == "E-MTAB-/234/E-MTAB-1234"
+    assert len(fs.find("E-MTAB-1234")) == 8
+
+
+@pytest.mark.network
+def test_live_a_partial_prefix_is_not_a_directory():
+    """S3 answers a partial-name prefix with siblings; treating that as a directory
+    made exists/isdir confidently wrong (and breaks zarr's fill-value path)."""
+    requires_network()
+    fs = BIAFileSystem(view="derived", skip_instance_cache=True)
+    image = fs.ls("S-BIAD599", detail=False)[0]
+    assert fs.isdir(image)
+    partial = image[: len("S-BIAD599/") + 4]
+    assert fs.exists(partial) is False
+    assert fs.isdir(partial) is False
+
+
+@pytest.mark.network
+def test_live_ls_of_a_derived_file_returns_it():
+    requires_network()
+    fs = BIAFileSystem(view="derived", skip_instance_cache=True)
+    image = fs.ls("S-BIAD599", detail=False)[0]
+    entry = next(e for e in fs.ls(image) if e["type"] == "file")
+    assert fs.ls(entry["name"], detail=False) == [entry["name"]]
+    assert fs.find(entry["name"]) == [entry["name"]]
