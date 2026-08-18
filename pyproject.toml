@@ -51,8 +51,8 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Swarbricklab/archivefs"
-Source = "https://github.com/Swarbricklab/archivefs"
+Homepage = "https://github.com/swarbricklab/archivefs"
+Source = "https://github.com/swarbricklab/archivefs"
 
 [project.scripts]
 archivefs = "archivefs.cli:main"

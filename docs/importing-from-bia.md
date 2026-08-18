@@ -16,7 +16,7 @@ before any of the commands below work: the package is installed, and DVC has bee
 told about it.
 
 ```console
-$ git clone git@github.com:Swarbricklab/archivefs.git
+$ git clone git@github.com:swarbricklab/archivefs.git
 $ cd archivefs
 $ conda env update -n archivefs -f environment.yaml   # installs archivefs itself, editable
 $ conda activate archivefs
