@@ -207,18 +207,26 @@ def test_update_refreshes_and_materialises(repo):
     assert hashlib.md5((root / "logo.zip").read_bytes()).hexdigest() == ZENODO_MD5  # noqa: S324
 
 
-def test_zip_transparency_through_a_dvc_remote(repo):
+def test_zip_transparency_through_fs_config(repo):
     """The workspace must hold the extracted tree, not the archive.
 
     This caught a real bug: info() called the ZIP a directory while isdir() —
     which is what DVC's download path asks — called it a file, so the workspace
     got the .zip. Every derived predicate now goes through info().
+
+    Driven through `--fs-config` rather than a named remote: the archive-as-remote
+    pattern is unsupported (decisions.md D15), so the coverage belongs on the path
+    we actually ship.
     """
     root, run = repo
-    assert run("remote", "add", "-q", "zen", "zenodo://1486184").returncode == 0
-    assert run("remote", "modify", "-q", "zen", "extract_zips", "true").returncode == 0
-
-    result = run("import-url", "remote://zen/github-mark.zip", "tree")
+    result = run(
+        "import-url",
+        "--fs-config",
+        "extract_zips=true",
+        "--",
+        "zenodo://1486184/github-mark.zip",
+        "tree",
+    )
     assert result.returncode == 0, result.stderr
     spec = yaml.safe_load((root / "tree.dvc").read_text())
     assert spec["deps"][0]["md5"].endswith(".dir")
@@ -250,10 +258,15 @@ def test_bia_derived_import_is_genuinely_download_free(repo):
     content hash without moving the bytes.
     """
     root, run = repo
-    assert run("remote", "add", "-q", "bia", "bia://S-BIAD599").returncode == 0
-    assert run("remote", "modify", "-q", "bia", "view", "derived").returncode == 0
-
-    result = run("import-url", "--no-download", f"remote://bia/{BIA_THUMB}", "thumb.png")
+    result = run(
+        "import-url",
+        "--no-download",
+        "--fs-config",
+        "view=derived",
+        "--",
+        f"bia://S-BIAD599/{BIA_THUMB}",
+        "thumb.png",
+    )
     assert result.returncode == 0, result.stderr
     assert not (root / "thumb.png").exists()
     spec = yaml.safe_load((root / "thumb.png.dvc").read_text())

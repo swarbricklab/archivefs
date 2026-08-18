@@ -122,10 +122,10 @@ resolved.
 
 Verified end to end against the live archives: `dvc list-url`, `dvc import-url
 --no-download` (single file and directory), `dvc update`, `dvc pull`, and ZIP
-transparency through a DVC remote — including a controlled-access EGA pull whose
-`.dvc` file contains neither username nor password, which DVC would now refuse to
-write in any case. Plain `fsspec.open()` works with
-no adaptor at all, so pandas/Dask/Intake reach the same data by the same path.
+transparency via `--fs-config` — including a controlled-access EGA pull whose `.dvc`
+file contains neither username nor password, which DVC would now refuse to write in
+any case. Plain `fsspec.open()` works with no adaptor at all, so pandas/Dask/Intake
+reach the same data by the same path.
 
 Live tests are opt-in (`ARCHIVEFS_TEST_{EGA,ZENODO,GEO,DVC}=1`); the default `pytest`
 run is entirely offline.
@@ -139,10 +139,10 @@ run is entirely offline.
   how-to, from `conda env update` to a committed `.dvc` file.
 - **Using any archive with DVC:** [`docs/using-with-dvc.md`](docs/using-with-dvc.md) ·
   **credentials:** [`docs/credentials.md`](docs/credentials.md)
-- **Decisions and deviations:** [`docs/decisions.md`](docs/decisions.md) — fourteen
+- **Decisions and deviations:** [`docs/decisions.md`](docs/decisions.md) — sixteen
   entries, including the resolved EGA checksum question, several undocumented archive
-  behaviours worth knowing about, and the silent bugs an adversarial review of the
-  finished code turned up.
+  behaviours worth knowing about, the credential routes closed off in D16, and the
+  silent bugs an adversarial review of the finished code turned up.
 - **Ideas and extensions:** [`docs/ideas.md`](docs/ideas.md)
 - **Architecture:** [`docs/design.md`](docs/design.md) · **checklist:**
   [`docs/plan.md`](docs/plan.md)

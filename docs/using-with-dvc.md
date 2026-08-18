@@ -93,7 +93,7 @@ $ archivefs stat geo://GSE176078/GSE176078_RAW.tar | grep '"md5"'
 Some backends need a setting — which BIA view, which EGA layout, a manifest to use.
 Two ways, and they differ in what ends up in the committed file.
 
-**`--fs-config` (preferred).** The accession stays in the `.dvc` file:
+Pass them with `--fs-config`, which keeps the accession in the `.dvc` file:
 
 ```console
 $ dvc import-url --no-download --fs-config view=derived -- \
@@ -110,22 +110,27 @@ deps:
 Note the `--`. `--fs-config` takes any number of `name=value` pairs, so without it DVC
 swallows the URL and fails with *"not enough values to unpack"*.
 
-**A named remote**, when you are importing many files from one record:
+`fs_config` is committed, so it holds settings, never secrets — and it is no longer
+possible to put a secret there: DVC rejects `--fs-config password=…` outright. See
+[`credentials.md`](credentials.md).
 
-```console
-$ dvc remote add bia bia://S-BIAD599
-$ dvc remote modify bia view derived
-$ dvc import-url --no-download "remote://bia/$U/$U-thumbnail-128-128.png" thumb.png
-```
+### Using an archive as a DVC remote is not supported
 
-The trade-off: the committed `.dvc` then records `path: remote://bia/…`, moving the
-accession into `.dvc/config`. Still reproducible — that file is committed too — but a
-reader of the `.dvc` file alone can no longer see which study the data came from.
+`dvc remote add bia bia://S-BIAD599` will appear to work, and `import-url` through
+`remote://bia/…` will even pull. Don't. It is unsupported and will stay that way:
 
-> **`fs_config` is committed. Never put a secret in it.** `view`, `layout`, `api_url`,
-> `chiro` are fine. A `password` or `token` passed this way is written into a file you
-> are about to `git commit`. Secrets belong in `.dvc/config.local` or the environment —
-> see [`credentials.md`](credentials.md).
+* **Push cannot be made to work.** Depositing into an archive is not a file upload —
+  it is accession reservation, metadata registration and a curation workflow, and it
+  differs completely between EGA, Zenodo, GEO and BIA. A remote that silently
+  supports half of DVC's contract is worse than one that does not exist.
+* **It hides the accession.** The committed `.dvc` records `path: remote://bia/…`,
+  moving the accession into `.dvc/config`. Still reproducible, but a reader of the
+  `.dvc` file alone can no longer see which study the data came from — which is the
+  entire point of importing this way.
+
+`dvc import-url` with `--fs-config` is the supported pattern, and it covers every
+storage option a remote could have carried. Rationale in
+[`decisions.md`](decisions.md) D15.
 
 ## Importing a whole record
 

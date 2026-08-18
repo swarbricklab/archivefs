@@ -163,25 +163,16 @@ point of the exercise. (`dvc pull` may print *"No remote provided and no default
 remote set"* — harmless: that refers to your own DVC cache remote, which an
 `import-url` stage doesn't need.)
 
-If you are importing many files from one study, a DVC remote saves the repetition:
+Repeating `--fs-config view=derived` for each file is mildly tedious, and you may be
+tempted by `dvc remote add bia bia://S-BIAD599`. Don't — an archive as a DVC remote
+is unsupported: push cannot be made to work across archives, and it moves the
+accession out of the `.dvc` file. [`using-with-dvc.md`](using-with-dvc.md) has the
+full reasoning.
 
-```console
-$ dvc remote add bia bia://S-BIAD599
-$ dvc remote modify bia view derived
-$ dvc import-url --no-download "remote://bia/$U/$U-thumbnail-128-128.png" thumb.png
-```
-
-The trade-off is that the committed `.dvc` file then records
-`path: remote://bia/…` — the accession moves into `.dvc/config`. Still reproducible,
-since that file is committed too, but a reader of the `.dvc` file alone can no
-longer see which study the data came from. Prefer `--fs-config` unless the
-repetition is genuinely painful.
-
-**Never put a secret in `--fs-config`.** It is written into the `.dvc` file, which is
-committed. Options like `view`, `api_url` and `layout` belong there; a `password` or
-`token` does not — those go in `.dvc/config.local` (gitignored) or the environment,
-and are resolved at pull time. It does not arise for BIA, which has no secrets, but
-the same flag works for `ega://`.
+`fs_config` is committed, so it carries settings and not secrets — and DVC now
+refuses `--fs-config password=…` outright, so that is not a rule to remember. It
+does not arise for BIA, which has no credentials at all, but the same flag works for
+`ega://`. See [`credentials.md`](credentials.md).
 
 ### The submitted tier — works, but read this first
 

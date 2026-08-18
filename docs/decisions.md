@@ -370,13 +370,13 @@ with no error anywhere.
 is built from. A comment in the base says why, because the tempting "optimisation"
 is to call `_resolve` and skip a layer. Regression tests at both levels: fsspec
 (`isdir`/`isfile`/`exists` must agree with `info()["type"]`) and end-to-end (a DVC
-remote with `extract_zips` must leave an extracted *tree* in the workspace).
+import with `extract_zips` must leave an extracted *tree* in the workspace).
 
-**Verified after the fix:**
+**Verified after the fix** (originally through a named remote; re-verified and the
+test rewritten on the supported `--fs-config` path when D15 dropped that pattern):
 
 ```
-$ dvc remote add zen zenodo://1486184 && dvc remote modify zen extract_zips true
-$ dvc import-url remote://zen/github-mark.zip tree/
+$ dvc import-url --fs-config extract_zips=true -- zenodo://1486184/github-mark.zip tree
 $ find tree -type f
 tree/md5sum
 tree/github-mark.svg
@@ -682,6 +682,48 @@ provenance, not bandwidth. The guide says so in those words.
 * Live tests are opt-in per archive: `ARCHIVEFS_TEST_EGA=1`,
   `ARCHIVEFS_TEST_ZENODO=1`, `ARCHIVEFS_TEST_GEO=1`, `ARCHIVEFS_TEST_DVC=1`. The
   default `pytest` run is entirely offline.
+
+---
+
+## D15 — the archive-as-a-DVC-remote pattern is dropped, though it works
+
+**What happened.** While writing the BIA guide I found that
+`dvc remote add bia bia://S-BIAD599` + `dvc import-url remote://bia/<path>` works,
+and documented it as a way to avoid repeating a long URL prefix. That was a
+discovery, not a design goal — the intended pattern was always plain
+`dvc import-url bia://<accession>/<path>`.
+
+**Why it is now refused in the docs.** Two reasons, in order of weight:
+
+1. **Push cannot be abstracted.** A DVC remote is a read/write contract. Depositing
+   into a scientific archive is not a file upload: it is accession reservation,
+   metadata registration, and a curation workflow that differs completely between
+   EGA, Zenodo, GEO and BIA. We could make `pull` work everywhere and `push`
+   nowhere. A remote that silently honours half of DVC's contract is worse than one
+   that does not exist, because the half that fails does so after the user has
+   organised their project around it.
+2. **It hides the accession.** With a remote, the committed `.dvc` records
+   `path: remote://bia/…` and the accession moves into `.dvc/config`. Still
+   reproducible — that file is committed too — but a reader of the `.dvc` file alone
+   can no longer see which study the data came from. That is the exact property the
+   whole project exists to provide.
+
+**Cost of dropping it: none.** `--fs-config key=value` carries every storage option a
+remote could have configured (verified live with `view=derived` on BIA and
+`extract_zips=true` on Zenodo), and keeps the accession in the artifact. The only
+thing lost is brevity when importing many files from one record.
+
+**What was done rather than just deleting the recipes.** `dvc remote add` with an
+archive URL still *works*; deleting the documentation would leave a reader to
+rediscover it and hit the push wall alone. So `using-with-dvc.md` states plainly that
+it is unsupported and why. The two live integration tests that drove DVC through a
+named remote (`zip transparency`, `bia derived import`) were rewritten to use
+`--fs-config`, so the regression coverage sits on the path we ship rather than the
+one we discourage.
+
+**Changing my mind** would mean deciding that pull-only remotes are worth shipping —
+at which point the honest form is a distinct, clearly read-only concept, not DVC's
+remote.
 
 ---
 
