@@ -42,8 +42,8 @@ time, and for `geo://` and `bia://` anonymously. For imaging, BIA's own OME-Zarr
 conversions carry real MD5s, so that tier is download-free too:
 
 ```console
-$ dvc remote add bia bia://S-BIAD599 && dvc remote modify bia view derived
-$ dvc import-url --no-download remote://bia/<image-uuid>/<image>-thumbnail-128-128.png t.png
+$ dvc import-url --no-download --fs-config view=derived -- \
+    bia://S-BIAD599/<image-uuid>/<image>-thumbnail-128-128.png t.png
                                            # md5 recorded without fetching bytes
 ```
 

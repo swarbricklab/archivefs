@@ -167,6 +167,21 @@ since both are "DVC needs one small seam for third-party filesystems".
 Until then the sidecar manifest (`-o chiro=…`) is the real answer, and the one the
 BIA guide recommends.
 
+### 17. Lint committed `.dvc` files for secrets in `fs_config`
+`CredentialResolver.committed_secrets` was written so "no secret in the committed
+artifact" could be a *check* rather than a promise — and then nothing ever called it.
+`dvc import-url --fs-config password=… -- ega://…` writes the password straight into
+the `.dvc` file, and archivefs cannot refuse it at the filesystem layer, because
+`fs_config` and `.dvc/config.local` arrive as the same `storage_options` dict. The
+distinction only exists in the file DVC wrote.
+
+So the check belongs one level up, reading `.dvc` files rather than options:
+`archivefs check-config [<path>…]` walks `*.dvc` (plus `.dvc/config`), pulls
+`deps[].fs_config`, and reports any key the resolver declares `secret=True`. A dozen
+lines given `committed_secrets` already exists, useful as a pre-commit hook, and it
+turns the invariant back into something enforced. Pairs with idea #10
+(`archivefs doctor`) — same "tell me what is wrong with my setup" shape.
+
 ## Speculative, but I would enjoy being wrong about the value
 
 ### 11. A verification-report artifact for papers

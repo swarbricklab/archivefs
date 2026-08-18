@@ -130,21 +130,27 @@ Those MD5s come from the bucket's ETags. Nothing was downloaded to produce them.
 
 ## 4. Import into your project with DVC
 
+BIA needs **no credentials at all**, for either view. The URL is an accession, the
+accession is public, and nothing below reads a secret.
+
 ### The derived (OME-Zarr) tier — genuinely download-free
 
-Set the view once, on a DVC remote, and address files through it:
+The derived view is a storage option, not a different address space, so pass it with
+`--fs-config`. Note the `--`: `--fs-config` takes any number of `name=value` pairs,
+so without it DVC swallows the URL as another pair and fails with *"not enough
+values to unpack"*.
 
 ```console
-$ dvc remote add bia bia://S-BIAD599
-$ dvc remote modify bia view derived
-
 $ U=01776a3a-16a5-4c48-a104-fefcc83cc2ee
-$ dvc import-url --no-download "remote://bia/$U/$U-thumbnail-128-128.png" thumb.png
+$ dvc import-url --no-download --fs-config view=derived -- \
+    "bia://S-BIAD599/$U/$U-thumbnail-128-128.png" thumb.png
 $ cat thumb.png.dvc
 deps:
 - md5: a84906a7545b1d47386e7d72ee807c41     # from the ETag; no bytes transferred
   size: 12234
-  path: remote://bia/01776a3a-…/01776a3a-…-thumbnail-128-128.png
+  path: bia://S-BIAD599/01776a3a-…/01776a3a-…-thumbnail-128-128.png
+  fs_config:
+    view: derived
 outs:
 - path: thumb.png
 
@@ -152,9 +158,30 @@ $ dvc pull thumb.png.dvc                     # fetch when you actually need it
 ```
 
 Commit the `.dvc` file. Anyone who clones your repo and runs `dvc pull` gets the
-same bytes, verified. (`dvc pull` may print *"No remote provided and no default
+same bytes, verified — and the accession is right there in the `path`, which is the
+point of the exercise. (`dvc pull` may print *"No remote provided and no default
 remote set"* — harmless: that refers to your own DVC cache remote, which an
 `import-url` stage doesn't need.)
+
+If you are importing many files from one study, a DVC remote saves the repetition:
+
+```console
+$ dvc remote add bia bia://S-BIAD599
+$ dvc remote modify bia view derived
+$ dvc import-url --no-download "remote://bia/$U/$U-thumbnail-128-128.png" thumb.png
+```
+
+The trade-off is that the committed `.dvc` file then records
+`path: remote://bia/…` — the accession moves into `.dvc/config`. Still reproducible,
+since that file is committed too, but a reader of the `.dvc` file alone can no
+longer see which study the data came from. Prefer `--fs-config` unless the
+repetition is genuinely painful.
+
+**Never put a secret in `--fs-config`.** It is written into the `.dvc` file, which is
+committed. Options like `view`, `api_url` and `layout` belong there; a `password` or
+`token` does not — those go in `.dvc/config.local` (gitignored) or the environment,
+and are resolved at pull time. It does not arise for BIA, which has no secrets, but
+the same flag works for `ega://`.
 
 ### The submitted tier — works, but read this first
 
