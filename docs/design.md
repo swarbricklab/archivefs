@@ -102,10 +102,11 @@ Modelled on how DVC packages its own remotes (`dvc[s3]`, `dvc[ssh]`, `dvc[all]`)
 ### Shared core (extract from the first two backends, not up front)
 - `AbstractFileSystem` base: dataset→`ls()`, download-free `info()` from a
   metadata call, the `--no-download` manifest contract.
-- `CredentialResolver`: precedence chain
-  **`storage_options` (from `.dvc/config.local`) → env var → on-disk cache**;
-  the invariant that **no secret ever enters the committed artifact**; a uniform
-  "auth failed — here is the specific remediation" error contract.
+- `CredentialResolver`: chain **env var → private on-disk file**, and nothing
+  else — an option-supplied credential is refused (decisions.md D16), so the
+  invariant that **no secret ever enters the committed artifact** is enforced
+  rather than asked for; a uniform "auth failed — here is the specific
+  remediation" error contract.
 
 ## Per-repository summary
 

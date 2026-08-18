@@ -167,20 +167,26 @@ since both are "DVC needs one small seam for third-party filesystems".
 Until then the sidecar manifest (`-o chiro=…`) is the real answer, and the one the
 BIA guide recommends.
 
-### 17. Lint committed `.dvc` files for secrets in `fs_config`
-`CredentialResolver.committed_secrets` was written so "no secret in the committed
-artifact" could be a *check* rather than a promise — and then nothing ever called it.
-`dvc import-url --fs-config password=… -- ega://…` writes the password straight into
-the `.dvc` file, and archivefs cannot refuse it at the filesystem layer, because
-`fs_config` and `.dvc/config.local` arrive as the same `storage_options` dict. The
-distinction only exists in the file DVC wrote.
+### 17. Audit *history* for secrets that were committed before the policy landed
+This idea originally proposed linting new commits, because
+`dvc import-url --fs-config password=… -- ega://…` wrote the password straight into
+the `.dvc` file and archivefs could not refuse it: `fs_config` and
+`.dvc/config.local` arrived as the same `storage_options` dict, so the distinction
+only existed in the file DVC wrote.
 
-So the check belongs one level up, reading `.dvc` files rather than options:
-`archivefs check-config [<path>…]` walks `*.dvc` (plus `.dvc/config`), pulls
-`deps[].fs_config`, and reports any key the resolver declares `secret=True`. A dozen
-lines given `committed_secrets` already exists, useful as a pre-commit hook, and it
-turns the invariant back into something enforced. Pairs with idea #10
-(`archivefs doctor`) — same "tell me what is wrong with my setup" shape.
+That premise is gone. Credential keys are absent from the schema `dvcfs.register()`
+hands DVC, so `--fs-config password=…` and `dvc remote modify … password …` now fail
+in DVC's own validator, and the resolver refuses an option-supplied credential
+outright (decisions.md D16). A new commit cannot contain one.
+
+What remains is the past: repositories configured before the policy, and secrets
+already in git history, where the fix is to **rotate** rather than to edit. So
+`archivefs check-config [<path>…]` is still worth building, but scoped to auditing —
+walk `*.dvc` and `.dvc/config` across `git log`, pull `deps[].fs_config`, report any
+key the resolver declares `secret=True`, and say "rotate this" rather than "remove
+this". `CredentialResolver.committed_secrets` remains for exactly that caller. Pairs
+with idea #10 (`archivefs doctor`) — same "tell me what is wrong with my setup"
+shape.
 
 ## Speculative, but I would enjoy being wrong about the value
 

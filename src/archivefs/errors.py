@@ -20,6 +20,7 @@ __all__ = [
     "ArchiveFSError",
     "ArchiveNotFoundError",
     "AuthenticationError",
+    "CredentialSourceError",
     "CredentialsNotFoundError",
     "ManifestError",
     "MissingExtraError",
@@ -107,9 +108,20 @@ class CredentialsNotFoundError(ArchiveFSError):
         super().__init__(
             f"no {secret} found for {archive}. Looked, in order:\n{body}\n"
             f"  Nothing was found, so the request was not attempted.\n"
-            f"  Note: secrets must never be written into a committed .dvc file — "
-            f"put them in .dvc/config.local (git-ignored) or the environment."
+            f"  Note: those are the only places archivefs looks. Credentials cannot "
+            f"be passed as options or written into DVC config — see "
+            f"docs/credentials.md."
         )
+
+
+class CredentialSourceError(ArchiveFSError):
+    """A credential was offered from a source archivefs refuses to read.
+
+    Distinct from :class:`CredentialsNotFoundError`: the value *was* supplied, and
+    we are declining it. Two cases — a credential passed as a storage option (the
+    route that ends up in a committed ``.dvc`` file), and an on-disk credentials
+    file that other users can read.
+    """
 
 
 class AuthenticationError(ArchiveFSError, PermissionError):

@@ -185,12 +185,25 @@ DVC_PROTOCOLS: dict[str, str] = {
 #: truthy, so ZIPs get presented as directories against the user's explicit
 #: instruction. DVC's own booleans go through its `Bool`, and so must ours.
 #:
-#: These are the *non-secret* options; secrets are resolved from the environment at
-#: pull time and deliberately have no place in a DVC config file.
+#: These are the *non-secret* options, and the omissions are load-bearing. DVC
+#: validates remote config and `--fs-config` against exactly this table, so a key
+#: that is absent here is refused by DVC itself:
+#:
+#:     $ dvc remote modify ega password hunter2
+#:     ERROR: configuration error - config file error:
+#:            extra keys not allowed @ data['remote']['ega']['password']
+#:
+#: That is why `username`, `password` and `token` are not listed. It is not a
+#: convention we ask users to respect — with them absent, the anti-pattern is a
+#: config parse error, and one that fires before any archivefs code runs. Adding
+#: any of them back would make it possible to commit a credential again:
+#: `--fs-config password=…` is written verbatim into the `.dvc` file's
+#: `deps[].fs_config`. `credentials_file` stays because it is a *path* — the ssh
+#: `IdentityFile` analogue, and the supported way to select an account per repo.
 _BOOL_KEYS = frozenset({"extract_zips"})
 _EXTRA_CONFIG_KEYS: dict[str, tuple[str, ...]] = {
-    "ega": ("username", "password", "credentials_file", "layout", "chiro", "api_url"),
-    "zenodo": ("token", "extract_zips", "api_url", "chiro"),
+    "ega": ("credentials_file", "layout", "chiro", "api_url"),
+    "zenodo": ("extract_zips", "api_url", "chiro"),
     "geo": ("view", "base_url", "chiro"),
     "bia": ("view", "api_url", "s3_url", "chiro"),
 }

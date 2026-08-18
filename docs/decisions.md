@@ -644,11 +644,12 @@ provenance, not bandwidth. The guide says so in those words.
   different per archive is worse than no root.
 * **Errors carry remediation, and it is tested.** `CredentialsNotFoundError` lists
   every place it looked in precedence order, so the message documents the chain; a
-  test asserts the "never in a committed .dvc" line is in it. `require()` reports
-  *all* missing credentials at once rather than one per attempt.
+  test asserts the chain advertises no route the policy has closed (D16).
+  `require()` reports *all* missing credentials at once rather than one per attempt.
 * **Missing credentials are reported for the whole set**, and a `Credential`
-  declares whether it is a secret, so `committed_secrets()` can turn the "no secret
-  in the committed artifact" rule into a check rather than a promise.
+  declares whether it is a secret. Since D16 that declaration drives refusal at the
+  door rather than a post-hoc check; `committed_secrets()` survives for auditing
+  history written before the policy.
 * **GEO views are a registry, not a branch.** A test adds a fourth view from
   outside the module to prove the SRA seam is real: implementing raw-reads-via-SRA
   later means writing one class, not editing the backend.
@@ -681,3 +682,71 @@ provenance, not bandwidth. The guide says so in those words.
 * Live tests are opt-in per archive: `ARCHIVEFS_TEST_EGA=1`,
   `ARCHIVEFS_TEST_ZENODO=1`, `ARCHIVEFS_TEST_GEO=1`, `ARCHIVEFS_TEST_DVC=1`. The
   default `pytest` run is entirely offline.
+
+---
+
+## D16 — 🩹 credentials come from the environment or a private file, and nowhere else
+
+**What the design said.** The precedence chain was
+`storage_options` (i.e. `.dvc/config.local`) → environment → on-disk file, with the
+invariant "no secret enters the committed artifact" documented, tested for in the
+error message, and backed by `committed_secrets()` — which nothing called.
+
+**What was actually true.** The invariant was a request, not a rule. Measured:
+
+```console
+$ dvc import-url --no-exec --fs-config password=hunter2 -- ega://EGAD…/EGAF… b.bam
+$ cat b.bam.dvc
+deps:
+- path: ega://EGAD00001006673/EGAF00004908765
+  fs_config:
+    password: hunter2          # in the file you are about to commit
+```
+
+`dvc remote modify ega password …` did the same thing into `.dvc/config`. archivefs
+could not distinguish the two at the filesystem layer either, because `fs_config`
+and `.dvc/config.local` arrive as the same `storage_options` dict.
+
+**What changed.** Credential keys were removed from `_EXTRA_CONFIG_KEYS` in
+`dvcfs.py`, and `CredentialResolver` refuses an option-supplied credential in its
+constructor. The chain is now **environment variable → private on-disk JSON file**.
+Verified against the real CLI:
+
+| attempt | result |
+|---|---|
+| `dvc remote modify e password …` | `extra keys not allowed @ data['remote']['e']['password']` |
+| `dvc remote modify --local e password …` | same |
+| `dvc remote modify e username …` | same |
+| `dvc import-url --fs-config password=…` | `extra keys not allowed @ data['password']` |
+| `archivefs ls -o password=…` | `CredentialSourceError`, naming `$EGA_PASSWORD` and the two files |
+| `layout`, `credentials_file` | still accepted |
+
+**The three that are load-bearing:**
+
+* **DVC does the enforcing for the first four.** It validates remote config and
+  `--fs-config` against the schema we register, so an absent key is a config *parse*
+  error, raised before any archivefs code runs. That is why this is a fix rather
+  than a convention: there is no code path in which we are trusted to behave.
+* **`username` went too, though it is not a secret.** A credential set assembled
+  half from a committed option and half from the environment is the configuration
+  nobody can debug. Both halves now come from one place.
+* **`.dvc/config.local` is refused as well**, even though git ignores it. It is
+  still a real file on a shared filesystem with default permissions.
+
+**Two things kept deliberately.** `credentials_file` (EGA) and `ngc` (dbGaP) remain
+settable, because they are *paths*. This is ssh's distinction exactly: there is no
+`ssh -o Password=`, there is `IdentityFile`. A path in a committed config says which
+account is expected without saying anything secret, and it is what makes two
+projects with two EGA accounts possible now that `username` cannot be configured.
+
+**File modes are checked too.** A credentials file readable by group or other is
+refused with `chmod 600 <path>`, as ssh does with a private key. Refused rather than
+warned: a warning in a PBS job log is invisible at the moment it matters. The known
+cost is that **pyega3 may have left `~/.pyega3/credentials.json` at 0644**, so an
+existing setup needs one `chmod` on upgrade. That was judged acceptable against a
+credential silently readable by everyone in the project group.
+
+**Changing my mind** is a one-line edit per key in `_EXTRA_CONFIG_KEYS` plus deleting
+`_refuse_option_credentials`, so nothing here is hard to walk back — but doing so
+re-opens `--fs-config password=…` writing plaintext into a committed file, which is
+the thing that motivated it.

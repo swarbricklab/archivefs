@@ -28,9 +28,14 @@ Every command that takes a URL also takes `-o KEY=VALUE`.
 ## Storage options (`-o KEY=VALUE`)
 
 The same options work three ways: `-o key=value` on the CLI,
-`fsspec.filesystem("bia", key=value)` in Python, and `dvc remote modify` /
-`--fs-config key=value` under DVC. `-o` is repeatable. Only the exact strings `true`
-and `false` are converted to booleans; everything else stays a string.
+`fsspec.filesystem("bia", key=value)` in Python, and `--fs-config key=value` under
+DVC. `-o` is repeatable. Only the exact strings `true` and `false` are converted to
+booleans; everything else stays a string.
+
+**Credentials are not storage options.** `username`, `password` and `token` are
+absent from the tables below on purpose — they come from the environment or a
+private file, and every other route is refused. See
+[`credentials.md`](credentials.md).
 
 **Every backend:**
 
@@ -44,12 +49,10 @@ and `false` are converted to booleans; everything else stays a string.
 |---|---|---|---|
 | `bia` | `view` | `submitted` (default), `derived` | depositor's files, or BIA's OME-Zarr conversions |
 | | `api_url`, `s3_url` | URL | override the BioStudies API / Embassy S3 endpoint |
-| `ega` | `username`, `password` | string | credentials — **see [`credentials.md`](credentials.md) before putting these anywhere** |
-| | `credentials_file` | path | JSON file to read them from |
+| `ega` | `credentials_file` | path | JSON file to read username + password from — a *path*, so it may be committed |
 | | `layout` | `accession` (default), `display`, `nested` | how dataset members are named ([`decisions.md`](decisions.md) D7) |
 | | `api_url` | URL | override the EGA API endpoint |
-| `zenodo` | `token` | string | for restricted/embargoed records only |
-| | `extract_zips` | `true`, `false` (default) | list ZIP contents as directories, read members by range |
+| `zenodo` | `extract_zips` | `true`, `false` (default) | list ZIP contents as directories, read members by range |
 | | `api_url` | URL | override the Zenodo API endpoint |
 | `geo` | `view` | `supplementary` (default), `raw` | `raw` is a deliberate seam and refuses with an explanation |
 | | `base_url` | URL | override the GEO FTP-over-HTTPS root |

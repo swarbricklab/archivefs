@@ -93,10 +93,10 @@ A single package, a shared base, and thin per-backend byte-fetchers:
 
 - **`archivefs.base`** — path grammar, retry/error contract, length-checked and
   alignment-aware ranged reads, download-free `info()`, read-only enforcement.
-- **`archivefs.credentials`** — one precedence chain for every archive:
-  `storage_options` (i.e. `.dvc/config.local`) → environment → on-disk file. A
-  credential declares whether it is a secret, so "no secret in the committed
-  artifact" is a check rather than a promise.
+- **`archivefs.credentials`** — one chain for every archive: environment → a
+  private on-disk file, and nothing else. Passing a credential as an option is
+  refused, and DVC's own validator rejects the keys, so "no secret in the committed
+  artifact" is a config parse error rather than a promise.
 - **`archivefs.chiro`** — `.chiro`-first resolution: when a deposit carries a
   manifest, the manifest *is* the listing and the checksums.
 - **`archivefs.zipsafe`** — zip-slip, symlink, zip-bomb and corruption checks,
@@ -123,7 +123,8 @@ resolved.
 Verified end to end against the live archives: `dvc list-url`, `dvc import-url
 --no-download` (single file and directory), `dvc update`, `dvc pull`, and ZIP
 transparency through a DVC remote — including a controlled-access EGA pull whose
-`.dvc` file contains neither username nor password. Plain `fsspec.open()` works with
+`.dvc` file contains neither username nor password, which DVC would now refuse to
+write in any case. Plain `fsspec.open()` works with
 no adaptor at all, so pandas/Dask/Intake reach the same data by the same path.
 
 Live tests are opt-in (`ARCHIVEFS_TEST_{EGA,ZENODO,GEO,DVC}=1`); the default `pytest`

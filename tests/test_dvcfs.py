@@ -13,6 +13,7 @@ from __future__ import annotations
 import pytest
 
 dvc = pytest.importorskip("dvc")
+voluptuous = pytest.importorskip("voluptuous")
 
 from archivefs import dvcfs  # noqa: E402
 from archivefs.registry import PROTOCOLS  # noqa: E402
@@ -198,9 +199,33 @@ def test_backend_options_are_accepted_by_the_dvc_config_schema():
     from dvc.config_schema import SCHEMA
 
     assert SCHEMA["remote"][str](
-        {"url": "ega://EGAD1", "username": "me@example.org", "layout": "display"}
+        {"url": "ega://EGAD1", "credentials_file": "~/ega.json", "layout": "display"}
     )
     assert SCHEMA["remote"][str]({"url": "geo://GSE1", "view": "supplementary"})
+
+
+@pytest.mark.parametrize(
+    ("url", "key"),
+    [
+        ("ega://EGAD1", "password"),
+        ("ega://EGAD1", "username"),
+        ("zenodo://1486184", "token"),
+    ],
+)
+def test_dvc_itself_refuses_a_credential_in_remote_config(url, key):
+    """The invariant is a config parse error, not a convention.
+
+    These keys are absent from _EXTRA_CONFIG_KEYS on purpose, so DVC's own
+    validator rejects them — which covers `dvc remote modify`, `.dvc/config`,
+    `.dvc/config.local` and `--fs-config` in one go, all before archivefs runs.
+    Putting any of them back would make `--fs-config password=…` writable into
+    the committed .dvc file's deps[].fs_config again.
+    """
+    dvcfs.register()
+    from dvc.config_schema import SCHEMA
+
+    with pytest.raises(voluptuous.MultipleInvalid, match="extra keys not allowed"):
+        SCHEMA["remote"][str]({"url": url, key: "sekrit"})
 
 
 # ------------------------------------------------------------------ the hook

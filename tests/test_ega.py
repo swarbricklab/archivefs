@@ -23,6 +23,7 @@ from archivefs.errors import (
     ArchiveNotFoundError,
     AuthenticationError,
     CredentialsNotFoundError,
+    CredentialSourceError,
     NotSupportedError,
 )
 
@@ -126,23 +127,44 @@ def test_credentials_from_env(fake_ega):
     assert "$EGA_PASSWORD" in fs.auth.credential_source
 
 
-def test_username_from_storage_options_password_from_env(fake_ega, monkeypatch):
-    """The committed .dvc may carry a username; the password must not be in it."""
-    monkeypatch.delenv("EGA_USERNAME")
-    fs = EGAFileSystem(username="from-dvc-config@example.org", skip_instance_cache=True)
-    assert fs.auth.username == "from-dvc-config@example.org"
-    assert "storage_options" in fs.auth.credential_source
-    assert "$EGA_PASSWORD" in fs.auth.credential_source
+@pytest.mark.parametrize("key", ["username", "password"])
+def test_neither_half_of_the_credential_can_be_passed_in(fake_ega, monkeypatch, key):
+    """Not even the username, which is not itself a secret.
+
+    A credential set assembled half from a committed option and half from the
+    environment is the configuration nobody can debug, so both halves come from
+    the same place. Selecting a different account is what credentials_file is for.
+    """
+    with pytest.raises(CredentialSourceError) as exc:
+        EGAFileSystem(**{key: "someone@example.org"}, skip_instance_cache=True)
+    assert f"{key} cannot be passed as an option to EGA" in str(exc.value)
 
 
 def test_credentials_from_file(fake_ega, monkeypatch, tmp_path):
+    """credentials_file is the ssh IdentityFile analogue: a *path*, so it may be
+    configured and committed even though username and password may not. It is what
+    makes per-repo account selection possible under that policy."""
     monkeypatch.delenv("EGA_USERNAME")
     monkeypatch.delenv("EGA_PASSWORD")
     creds = tmp_path / "creds.json"
     creds.write_text(json.dumps({"username": "f@x.org", "password": "correct-horse"}))
+    creds.chmod(0o600)
     fs = EGAFileSystem(credentials_file=str(creds), skip_instance_cache=True)
     assert fs.auth.username == "f@x.org"
     assert str(creds) in fs.auth.credential_source
+
+
+def test_an_exposed_credentials_file_is_refused(fake_ega, monkeypatch, tmp_path):
+    """pyega3 may well have left ~/.pyega3/credentials.json at 0644."""
+    monkeypatch.delenv("EGA_USERNAME")
+    monkeypatch.delenv("EGA_PASSWORD")
+    creds = tmp_path / "creds.json"
+    creds.write_text(json.dumps({"username": "f@x.org", "password": "correct-horse"}))
+    creds.chmod(0o644)
+    with pytest.raises(CredentialSourceError) as exc:
+        EGAFileSystem(credentials_file=str(creds), skip_instance_cache=True)
+    assert f"chmod 600 {creds}" in str(exc.value)
+    assert "correct-horse" not in str(exc.value)
 
 
 def test_missing_credentials_lists_every_place_it_looked(fake_ega, monkeypatch):
@@ -153,8 +175,14 @@ def test_missing_credentials_lists_every_place_it_looked(fake_ega, monkeypatch):
         EGAFileSystem(skip_instance_cache=True)
     message = str(exc.value)
     assert "$EGA_PASSWORD" in message
-    assert ".dvc/config.local" in message
-    assert "never be written into a committed .dvc" in message
+    assert "~/.pyega3/credentials.json" in message.replace(
+        str(Path("~/.pyega3/credentials.json").expanduser()),
+        "~/.pyega3/credentials.json",
+    )
+    # the chain must not advertise a route the policy has closed
+    assert ".dvc/config" not in message
+    assert "storage_options" not in message
+    assert "cannot be passed as options" in message
 
 
 def test_bad_password_is_actionable(fake_ega, monkeypatch):

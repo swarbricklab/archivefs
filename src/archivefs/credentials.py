@@ -12,29 +12,48 @@ GEO          none                           —
 dbGaP        path to an ``.ngc`` **file**    a *path*, and it must exist
 ============ ============================== ==========================
 
-Three invariants come out of that table and are enforced here rather than in each
+Four invariants come out of that table and are enforced here rather than in each
 backend:
 
-1. **Precedence is fixed**: ``storage_options`` (i.e. what ``.dvc/config.local``
-   supplies) → environment variable → on-disk file. Same order everywhere, so a
-   user who learns it once has learned it for all archives.
-2. **No secret enters the committed artifact.** Non-secret identifiers
-   (``username``, a path to a key file) may legitimately live in a committed
-   ``.dvc``; secrets may not. Each :class:`Credential` says which it is, and
-   :meth:`CredentialResolver.committed_secrets` exists so a caller can check a
-   committed config rather than hoping.
-3. **A failure names every place that was searched**, in order — the error
+1. **Precedence is fixed**: environment variable → on-disk JSON file. Same order
+   everywhere, so a user who learns it once has learned it for all archives.
+2. **A credential can only come from those two places.** There is deliberately no
+   third route: passing ``password=`` as a storage option — via ``-o`` on the CLI,
+   ``--fs-config`` under DVC, ``dvc remote modify``, or an fsspec keyword — is
+   *refused*, not merely discouraged. This follows ssh, which has no
+   ``-o Password=``: it has ``IdentityFile``, a **path**. Path-valued credentials
+   (dbGaP's ``ngc``, EGA's ``credentials_file``) are pointers rather than secrets
+   and remain settable, which is what lets two projects use two accounts.
+3. **A credentials file only you can read.** A file that is group- or
+   world-readable is refused, again as ssh does with a private key, because a
+   warning in a pipeline log is invisible at exactly the moment it matters.
+4. **A failure names every place that was searched**, in order — the error
    message doubles as the documentation of the chain.
+
+:meth:`CredentialResolver.committed_secrets` remains for the case the invariants
+cannot reach: a repository configured before this policy, or a secret already in
+git history, where the answer is to rotate rather than to edit.
+
+Invariant 2 is belt *and* braces: :func:`archivefs.dvcfs.register` also omits the
+credential keys from the schema it hands DVC, so ``dvc remote modify ega password
+…`` and ``--fs-config password=…`` fail inside DVC's own config validator with
+*"extra keys not allowed"* before archivefs is reached. The check here catches the
+routes DVC does not police — ``-o`` and the Python API.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from archivefs.errors import ArchiveFSError, CredentialsNotFoundError
+from archivefs.errors import (
+    ArchiveFSError,
+    CredentialsNotFoundError,
+    CredentialSourceError,
+)
 
 __all__ = ["Credential", "CredentialResolver", "Resolved"]
 
@@ -99,6 +118,60 @@ class CredentialResolver:
         }
         self.environ = environ if environ is not None else os.environ
         self._cache: dict[str, Resolved] = {}
+        self._refuse_option_credentials()
+
+    # ------------------------------------------------------------- enforcement
+
+    def _refuse_option_credentials(self) -> None:
+        """Fail if a credential was passed as an option. Invariant 2.
+
+        Raised from ``__init__`` rather than from :meth:`resolve` on purpose: the
+        point is that the value is never read, so the refusal must not depend on
+        anyone getting as far as resolving it.
+        """
+        offered = sorted(
+            name
+            for name, credential in self.credentials.items()
+            if not credential.is_path and name in self.storage_options
+        )
+        if not offered:
+            return
+        names = ", ".join(offered)
+        places = []
+        for name in offered:
+            credential = self.credentials[name]
+            where = [f"${v}" for v in credential.env]
+            where += [str(Path(f).expanduser()) for f in credential.files]
+            places.append(f"    {name}: {', '.join(where) or '(no source declared)'}")
+        listed = "\n".join(places)
+        raise CredentialSourceError(
+            f"{names} cannot be passed as an option to {self.archive}. archivefs "
+            f"reads credentials only from the environment or a file only you can "
+            f"read:\n{listed}\n"
+            f"  This is refused rather than discouraged because the same option "
+            f"reaches DVC as deps[].fs_config, which is written into the .dvc file "
+            f"you commit.\n"
+            f"  To use a specific account, point at its file instead — that is a "
+            f"path, not a secret, and may be committed. See docs/credentials.md."
+        )
+
+    @staticmethod
+    def _check_file_mode(path: Path) -> None:
+        """Refuse a credentials file that anyone else can read. Invariant 3."""
+        try:
+            mode = path.stat().st_mode
+        except OSError:  # unreadable for other reasons; the caller will report it
+            return
+        exposed = stat.S_IMODE(mode) & (stat.S_IRWXG | stat.S_IRWXO)
+        if not exposed:
+            return
+        raise CredentialSourceError(
+            f"{path} is readable by others (mode {stat.S_IMODE(mode):04o}); "
+            f"archivefs will not read a credential out of it.\n"
+            f"  Fix it with:  chmod 600 {path}\n"
+            f"  On a shared filesystem this is the difference between a credential "
+            f"that is traceable to you and one that is not."
+        )
 
     # ------------------------------------------------------------------ lookup
 
@@ -117,15 +190,11 @@ class CredentialResolver:
         value: str | None = None
         source = "not found"
 
-        searched.append(
-            f"storage_options[{credential.name!r}] "
-            + (
-                "(put it in .dvc/config.local — never the committed .dvc)"
-                if credential.secret
-                else "(from .dvc/config or .dvc/config.local)"
-            )
-        )
-        if credential.name in self.storage_options:
+        # A path-valued credential (dbGaP's ngc) is a pointer, not a secret, so it
+        # may still be supplied as an option; _refuse_option_credentials has
+        # already rejected every other kind.
+        if credential.is_path and credential.name in self.storage_options:
+            searched.append(f"the {credential.name} option")
             value = str(self.storage_options[credential.name])
             source = searched[-1]
 
@@ -140,6 +209,7 @@ class CredentialResolver:
             searched.append(str(path))
             if value is not None or not path.exists():
                 continue
+            self._check_file_mode(path)
             try:
                 payload = json.loads(path.read_text())
             except ValueError as exc:
@@ -236,10 +306,12 @@ class CredentialResolver:
     def committed_secrets(self, committed: dict) -> list[str]:
         """Which of ``committed``'s keys are secrets that must not be there.
 
-        Give it the ``storage_options`` block of a *committed* ``.dvc`` file (or
-        ``.dvc/config``, as opposed to ``config.local``) and it names the
-        problems. Cheap to call, and turns an invariant we merely documented into
-        one a backend can enforce.
+        Current archivefs cannot *write* one of these: DVC's validator rejects the
+        keys outright (see the module docstring). This exists for the cases that
+        remain — auditing git history, and repositories configured before the
+        policy landed, where a secret may already be committed and needs rotating.
+        Give it the ``fs_config`` block of a ``.dvc`` file, or a ``.dvc/config``
+        remote section, and it names the problems.
         """
         return sorted(
             name
