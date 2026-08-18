@@ -47,6 +47,10 @@ $ dvc import-url --no-download remote://bia/<image-uuid>/<image>-thumbnail-128-1
                                            # md5 recorded without fetching bytes
 ```
 
+Where an archive publishes *no* checksum (BIA's submitted files, bare GEO),
+`--no-download` still records a correct md5 — but DVC computes it by streaming the
+file, so it is not free. [`docs/decisions.md`](docs/decisions.md) D14.
+
 ## Why
 
 - **Reproducible provenance in one step.** `dvc import-url` someone's archived data
@@ -127,10 +131,13 @@ run is entirely offline.
 
 **Read next:**
 
-- **Decisions and deviations:** [`docs/decisions.md`](docs/decisions.md) — twelve
-  entries, including the resolved EGA checksum question, two undocumented archive
-  behaviours worth knowing about, and the ten silent bugs an adversarial review of
-  the finished code turned up.
+- **Importing from BIA, step by step:**
+  [`docs/importing-from-bia.md`](docs/importing-from-bia.md) — a collaborator-facing
+  how-to, from `conda env update` to a committed `.dvc` file.
+- **Decisions and deviations:** [`docs/decisions.md`](docs/decisions.md) — fourteen
+  entries, including the resolved EGA checksum question, several undocumented archive
+  behaviours worth knowing about, and the silent bugs an adversarial review of the
+  finished code turned up.
 - **Ideas and extensions:** [`docs/ideas.md`](docs/ideas.md)
 - **Architecture:** [`docs/design.md`](docs/design.md) · **checklist:**
   [`docs/plan.md`](docs/plan.md)

@@ -149,6 +149,24 @@ multi-hundred-GB EGA dataset is imported:
   fetcher must respect the 16-byte alignment rule and keep the length checks — the
   short-body behaviour that motivated them was *observed under concurrency*.
 
+### 16. Give DVC an honest way to say "no content hash, but here's an etag"
+[`decisions.md` D14](decisions.md): where the archive publishes no checksum, DVC's
+`--no-download` quietly streams the whole file to compute one. The dep hash it
+records is genuinely correct, so this is a cost bug, not a correctness bug — but for
+BIA-submitted and bare GEO it makes "no download" mean a full transfer, twice.
+
+DVC already has the concept (`Meta.etag`, used by the S3/HTTP filesystems for
+exactly this case: a source fingerprint that detects change without claiming to be
+content). What is missing is a way for a *plugin* filesystem to populate it —
+`Meta.from_info` reads its own field names, so our `info()` can't supply one. Two
+routes: get `etag` recognised from plugin `info()` dicts upstream, or find whether
+setting `PARAM_CHECKSUM = "etag"` on just the checksum-less wrappers already works
+(untested, and it changes what `dvc update` compares). Worth pairing with idea #3,
+since both are "DVC needs one small seam for third-party filesystems".
+
+Until then the sidecar manifest (`-o chiro=…`) is the real answer, and the one the
+BIA guide recommends.
+
 ## Speculative, but I would enjoy being wrong about the value
 
 ### 11. A verification-report artifact for papers

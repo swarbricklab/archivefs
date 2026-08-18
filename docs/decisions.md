@@ -594,6 +594,43 @@ file twice — and the failure is a confident wrong answer rather than an error.
 
 ---
 
+## D14 — 🩹 `--no-download` **downloads**, wherever the archive publishes no checksum
+
+Found while writing [`importing-from-bia.md`](importing-from-bia.md), by timing the
+commands rather than trusting them.
+
+`dvc import-url --no-download bia://…/EF83427BD6_8bit_lynEGFP.tif` records
+`md5: 26c0911fdf86d8a176539f5515eab32f`, which is **correct** — it matches
+`curl … | md5sum` byte for byte. It is correct because DVC streamed all 120 MB to
+compute it: 83 s, no cache written, nothing kept. The path is
+`dvc_data.hashfile.hash._hash_file`: our `info()` has `md5: None`, the filesystem
+exposes no `md5` attribute for DVC to call, so DVC falls through to `file_md5()`,
+which opens the file and reads it.
+
+This is not BIA-specific. It is the behaviour of **every checksum-less tier** —
+`bia://` submitted, `geo://` without a sidecar — and it means the cost model people
+assume from the Zenodo/EGA examples (`--no-download` is metadata-only) is wrong for
+half the backends. Importing all 584 files of `S-BIAD599` "without downloading"
+would move the whole ~60 GB study, then move it again on `dvc pull`.
+
+Not fixed, on purpose. The alternatives are all worse than documenting it:
+
+* Making the DVC wrapper expose `md5()` returning `None` gets DVC to record the
+  *string* `"None"` as the hash — a fake checksum, silently.
+* Synthesising a metadata fingerprint (size + FIRE ETag) and calling it `md5` puts a
+  value in the `md5` field of a committed `.dvc` file that is not the md5 of
+  anything. That is exactly the class of confident wrong answer the rest of this
+  document is about avoiding.
+* A distinct `PARAM_CHECKSUM` per backend would let the checksum-less tiers record
+  an honest `etag:` instead, but DVC's `Meta.from_info` only understands its own
+  field names, so this needs work upstream — [`ideas.md`](ideas.md) #16.
+
+So: the honest answer is that download-free checksums require the archive (or a
+`.chiro` manifest) to publish one, and where neither does, `--no-download` buys you
+provenance, not bandwidth. The guide says so in those words.
+
+---
+
 ## D12 — smaller calls, in one place
 
 * **`checksum()` is overridden** on every backend. `AbstractFileSystem.checksum`
