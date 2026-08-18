@@ -151,6 +151,7 @@ _WRAPPERS: dict[str, tuple[str, str]] = {
     "EGADVCFileSystem": ("ega", "archivefs.backends.ega.EGAFileSystem"),
     "ZenodoDVCFileSystem": ("zenodo", "archivefs.backends.zenodo.ZenodoFileSystem"),
     "GEODVCFileSystem": ("geo", "archivefs.backends.geo.GEOFileSystem"),
+    "BIADVCFileSystem": ("bia", "archivefs.backends.bia.BIAFileSystem"),
 }
 _built: dict[str, type] = {}
 
@@ -174,6 +175,7 @@ DVC_PROTOCOLS: dict[str, str] = {
     "ega": "archivefs.dvcfs.EGADVCFileSystem",
     "zenodo": "archivefs.dvcfs.ZenodoDVCFileSystem",
     "geo": "archivefs.dvcfs.GEODVCFileSystem",
+    "bia": "archivefs.dvcfs.BIADVCFileSystem",
 }
 
 #: Config keys DVC must accept for our remotes, beyond its common ones, and the
@@ -190,6 +192,7 @@ _EXTRA_CONFIG_KEYS: dict[str, tuple[str, ...]] = {
     "ega": ("username", "password", "credentials_file", "layout", "chiro", "api_url"),
     "zenodo": ("token", "extract_zips", "api_url", "chiro"),
     "geo": ("view", "base_url", "chiro"),
+    "bia": ("view", "api_url", "s3_url", "chiro"),
 }
 
 

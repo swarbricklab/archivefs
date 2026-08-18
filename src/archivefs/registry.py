@@ -80,6 +80,16 @@ PROTOCOLS: dict[str, Backend] = {
         summary="GEO supplementary/processed files over public HTTPS (anonymous)",
         requires=("requests",),
     ),
+    "bia": Backend(
+        protocol="bia",
+        class_path="archivefs.backends.bia.BIAFileSystem",
+        extra=None,
+        summary=(
+            "BioImage Archive via BioStudies (open; submitted files + OME-Zarr "
+            "conversions)"
+        ),
+        requires=("requests",),
+    ),
     "dbgap": Backend(
         protocol="dbgap",
         class_path="archivefs.backends.dbgap.DbGaPFileSystem",

@@ -82,17 +82,19 @@ clean case and an auth-complex case (design.md §"Build order"):
       which made fsspec's basename-keyed `walk` drop files from a directory pull.
       All fixed with regression tests; written up as
       [`decisions.md` D10–D11](decisions.md).
-- [x] Candidate backend: **BioImage Archive (`bia://`)** — **storage/access model
-      verified** against the live services:
-      [`evidence/bia-access-model-2026-08-17.md`](evidence/bia-access-model-2026-08-17.md).
-      Verdict: the easiest remaining backend, and its two tiers land on the view
-      registry GEO already introduced. Deliberately **not built** — it is a
-      candidate, not committed ([`ideas.md`](ideas.md) #7).
+- [x] Candidate backend: **BioImage Archive (`bia://`)** — verified *and*
+      **implemented** (asked for after the verification landed). Both tiers sit on
+      the view registry GEO introduced: `submitted` (FIRE, byte-exact, no
+      checksums) and `derived` (OME-Zarr/thumbnails, real MD5 ETags, listed
+      lazily). Access model:
+      [`evidence/bia-access-model-2026-08-17.md`](evidence/bia-access-model-2026-08-17.md)
+      — note that two of its original claims were wrong and are corrected there;
+      the traps and the design are [`decisions.md` D13](decisions.md).
 
 ## Deferred / candidate
 
-- [ ] BioImage Archive backend (spatial imaging tier) — access model verified, build
-      not started
+- [x] BioImage Archive backend (spatial imaging tier) — built, with live tests and
+      a DVC round trip
 - [x] ZIP edge-case library evaluation — **evaluated, none adopted**, with reasons
       ([D9](decisions.md)): the candidates do not cover the write-side containment
       check, which is the part that matters.

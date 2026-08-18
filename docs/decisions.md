@@ -512,6 +512,62 @@ wrong, would anything say so?", because nearly every bug above answered no.
 
 ---
 
+## D13 — `bia://`: five traps, and a verification note that was wrong
+
+The BioImage Archive was a *candidate* in the plan, gated on verifying its access
+model. That verification happened first (`docs/evidence/bia-access-model-2026-08-17.md`),
+the backend was then built from it — and **two of that note's central claims turned
+out to be wrong**, both in the direction of silent data loss. The note is corrected
+in place, with the errors marked rather than quietly edited away, because the way
+they arose is instructive: reading the *first page* of a paginated API and the
+*count* printed beside it makes the API look generous and complete.
+
+What the live service actually does, all measured:
+
+1. **The file listing is paginated, five rows at a time.** The response is
+   DataTables-shaped, and `recordsFiltered: 584` sits next to a five-element `data`
+   array. Reading that as the listing imports five files out of 584 and exits 0.
+2. **Asking for too much returns nothing.** `length` is capped at exactly 1000, and
+   `length=2000` answers `200` with `data: []` and `recordsFiltered: 0` — not an
+   error, not a clamp. `length=-1` "works" on a small study and returns nothing on a
+   large one, which is the same trap in disguise.
+3. **Page by the size you asked for, not the rows you got**, or pages overlap and
+   files appear to vanish. And `recordsFiltered` counts *rows*: S-BIAD1 lists seven
+   paths twice (same file, different `file_position`), so 6784 rows are 6777 files.
+   Completeness is reconciled against rows fetched; duplicates are collapsed and
+   logged.
+4. **The payload path cannot be derived from the accession.** BIA shards FIRE at
+   least two ways — `S-BIAD/599/S-BIAD599` but `S-BIAD/S-BIAD0-99/S-BIAD1` — so a
+   rule inferred from one study 404s on the other. It comes from
+   `/studies/{acc}/info`, which doubles as the existence check, because the files
+   endpoint answers an unknown accession with an empty list.
+5. **`isDirectory` is the string `"false"`**, which is truthy; and 6776 of
+   S-BIAD1's paths live under a directory called `#1_Raw_Images`, which truncates an
+   unquoted URL.
+
+**Two views, on GEO's registry.** `submitted` (default) is the deposit: byte-exact,
+range-readable, **no checksums** — the GEO problem with the GEO answer, a sidecar
+`.chiro`, which for our own deposits we control. `derived` is BIA's own OME-Zarr and
+thumbnail conversions in an anonymously listable Embassy S3 bucket, and it publishes
+**single-part ETags that really are MD5s** (8000/8000 sampled, including 4 MB chunks).
+That makes it the only place in archivefs where a *derived* artefact is verified
+download-free — `dvc import-url --no-download` on a converted thumbnail records a
+real content hash without moving the bytes, and `dvc pull` then matches it.
+
+**The derived view lists lazily**, one delimited S3 request per directory. Flat
+enumeration is not merely slow: one object per Zarr chunk means S-BIAD599's converted
+tree is **over 60,000 objects**, and enumerating it ran past 280 s without finishing,
+while a one-level listing takes ~11 s for 100 images and under a second per image.
+This is also what makes the view useful for what it is *for* — pointing zarr at a
+pyramid and reading the chunks it wants. It works because of D10: everything in the
+base derives from `info()`, so overriding `ls()` and `info()` was enough for
+`exists`/`isdir`/`checksum`/`cat_file`/`open`/`find`/`glob` to follow.
+
+**A repeated S3 continuation token is refused, not silently truncated.** Stopping
+quietly would return a partial directory as though it were complete.
+
+---
+
 ## D12 — smaller calls, in one place
 
 * **`checksum()` is overridden** on every backend. `AbstractFileSystem.checksum`

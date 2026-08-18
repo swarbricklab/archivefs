@@ -227,3 +227,40 @@ def test_zip_transparency_through_a_dvc_remote(repo):
     extracted = sorted(p.name for p in (root / "tree").iterdir())
     assert extracted == ["github-mark.svg", "md5sum"]
     assert not (root / "tree").is_file()
+
+
+BIA_THUMB = (
+    "01776a3a-16a5-4c48-a104-fefcc83cc2ee/"
+    "01776a3a-16a5-4c48-a104-fefcc83cc2ee-thumbnail-128-128.png"
+)
+BIA_THUMB_MD5 = "a84906a7545b1d47386e7d72ee807c41"
+
+
+def test_list_url_bia(repo):
+    _, run = repo
+    result = run("list-url", "bia://S-BIAD599")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == ["20200220-ftp"]
+
+
+def test_bia_derived_import_is_genuinely_download_free(repo):
+    """BIA's converted data publishes single-part S3 ETags, which *are* MD5s.
+
+    So unlike GEO — and unlike BIA's own submitted files — this records a real
+    content hash without moving the bytes.
+    """
+    root, run = repo
+    assert run("remote", "add", "-q", "bia", "bia://S-BIAD599").returncode == 0
+    assert run("remote", "modify", "-q", "bia", "view", "derived").returncode == 0
+
+    result = run("import-url", "--no-download", f"remote://bia/{BIA_THUMB}", "thumb.png")
+    assert result.returncode == 0, result.stderr
+    assert not (root / "thumb.png").exists()
+    spec = yaml.safe_load((root / "thumb.png.dvc").read_text())
+    assert spec["deps"][0]["md5"] == BIA_THUMB_MD5
+    assert spec["deps"][0]["size"] == 12234
+
+    assert run("pull", "thumb.png.dvc").returncode == 0
+    payload = (root / "thumb.png").read_bytes()
+    assert hashlib.md5(payload).hexdigest() == BIA_THUMB_MD5  # noqa: S324
+    assert payload[:8] == b"\x89PNG\r\n\x1a\n"

@@ -15,6 +15,7 @@ ega://EGAD00001006673/EGAF00004908765  # single file
 zenodo://1486184/data.zip              # record id …
 zenodo://10.5281/zenodo.1486184        # … or DOI (concept DOI → latest version)
 geo://GSE176078                        # supplementary / processed files
+bia://S-BIAD599                        # BioImage Archive: imaging depositions
 dbgap://<phs_id>/<SRR_accession>       # deferred, registered, refuses clearly
 ```
 
@@ -52,7 +53,7 @@ time, and for `geo://` anonymously.
 ## Install
 
 ```
-pip install archivefs           # all three backends: Zenodo, GEO, EGA
+pip install archivefs           # all four backends: Zenodo, GEO, EGA, BIA
 pip install archivefs[chiro]    # + read .chiro.json manifests
 pip install archivefs[dvc]      # + the DVC adaptor
 ```
@@ -97,14 +98,15 @@ Credentials are always resolved at **pull time** from the local environment and
 
 ## Status
 
-All three planned backends work against the live archives, with the plan's blocking
-question resolved.
+All four backends work against the live archives, with the plan's blocking question
+resolved.
 
 | backend | state | download-free checksum | notes |
 |---|---|---|---|
 | `zenodo://` | working | ✅ MD5 from record metadata | DOI + concept-DOI addressing; opt-in ZIP transparency |
 | `ega://` | working | ✅ MD5 of the *decrypted* bytes (verified) | OAuth2 + refresh-on-401; 16-byte range alignment |
 | `geo://` | working | ⚠️ none published — a `.chiro` sidecar fixes it | index-based listing; SRA seam drawn, not built |
+| `bia://` | working | ⚠️ none for submitted files · ✅ MD5 for the OME-Zarr tier | two views; the imaging half of a split deposit |
 | `dbgap://` | deferred | — | registered so the error explains itself |
 
 Verified end to end against the live archives: `dvc list-url`, `dvc import-url

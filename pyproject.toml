@@ -65,6 +65,7 @@ archivefs = "archivefs.cli:main"
 ega = "archivefs.backends.ega:EGAFileSystem"
 zenodo = "archivefs.backends.zenodo:ZenodoFileSystem"
 geo = "archivefs.backends.geo:GEOFileSystem"
+bia = "archivefs.backends.bia:BIAFileSystem"
 dbgap = "archivefs.backends.dbgap:DbGaPFileSystem"
 
 [tool.setuptools_scm]

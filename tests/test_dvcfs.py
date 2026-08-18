@@ -292,7 +292,8 @@ def test_the_module_imports_without_dvc_installed(tmp_path):
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    assert "imported ['ega', 'geo', 'zenodo']" in result.stdout
+    # derived from the registry, so adding a backend does not edit this test
+    assert f"imported {sorted(dvcfs.DVC_PROTOCOLS)}" in result.stdout
     assert "wrappers advertised True" in result.stdout
 
 

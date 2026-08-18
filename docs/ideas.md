@@ -92,29 +92,21 @@ extras worth having: fail loudly when a sheet names something the dataset does n
 contain (silent partial imports are how people lose samples), and record the sheet's
 own md5 in the import so "which subset was this?" stays answerable.
 
-### 7. `bia://` — BioImage Archive · **access model now verified**
-The design gated this on "verify storage/access model first". Done, against the live
-services: [`evidence/bia-access-model-2026-08-17.md`](evidence/bia-access-model-2026-08-17.md).
+### 7. `bia://` — BioImage Archive · **built**
+Implemented on 2026-08-18 after the access-model verification
+([`decisions.md` D13](decisions.md)). Both tiers are there: `submitted` (FIRE,
+byte-exact, no checksums) and `derived` (OME-Zarr + thumbnails, real MD5 ETags,
+listed lazily one S3 directory at a time).
 
-Summary: it is the **easiest remaining backend**. One anonymous BioStudies API call
-(`/api/v1/files/{accession}`) returns a full recursive listing with exact sizes *and*
-per-file experimental metadata — better than GEO, which needs HTML parsing plus a
-`HEAD` per file. Payload is range-readable HTTPS over FIRE, sharded by the
-accession's last three digits exactly like GEO's `GSE176nnn`.
+What is *not* done, and is worth doing when the Visium/Xenium deposit lands:
 
-Two things worth knowing before building it:
-
-* **No checksums on submitted files** — same gap as GEO, same fix (a sidecar
-  `.chiro` in our own deposits, which is the case that matters since BIA is a
-  repository we deposit *into*).
-* **The "just use `s3://`" hypothesis is wrong.** There *is* an anonymously listable
-  Embassy S3 bucket, and its ETags really are plain md5s — but it holds *derived*
-  data (thumbnails, OME-NGFF conversions) keyed by uuid, not the submitted files.
-  So accession→path resolution is the actual work.
-
-Those two tiers are precisely the **view registry** built for GEO's SRA seam:
-`view="submitted"` and `view="ngff"`, one class each. The imminent Visium/Xenium
-deposit is the motivating case.
+* **Zarr through the derived view.** `bia://…` with `view="derived"` already reads
+  chunks lazily, so pointing `zarr`/`ome-zarr-py` at it should work — I have not
+  tried it, and the sensible test is opening a real pyramid.
+* **Cross-linking the imaging half to the counts half.** BIA is the imaging tier of
+  a deposit whose matrices live in GEO/Zenodo; idea #14 is the general version.
+* **A study-level `.chiro`** would close the submitted tier's checksum gap the same
+  way it does for GEO, and BIA is a repository we deposit *into*, so we control it.
 
 ### 8. Tar transparency for GEO, cautiously
 GEO's convention is one `GSE…_RAW.tar` containing per-sample archives, and

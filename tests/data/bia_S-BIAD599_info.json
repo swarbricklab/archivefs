@@ -1,0 +1,10 @@
+{
+  "files": 584,
+  "httpLink": "https://ftp.ebi.ac.uk/biostudies/fire/S-BIAD/599/S-BIAD599",
+  "ftpLink": "ftp://ftp.ebi.ac.uk/biostudies/fire/S-BIAD/599/S-BIAD599",
+  "isPublic": true,
+  "relPath": "S-BIAD/599/S-BIAD599",
+  "hasZippedFolders": true,
+  "released": 1670889600000,
+  "modified": 1732185335259
+}
