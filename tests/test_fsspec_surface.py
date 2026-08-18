@@ -72,3 +72,18 @@ def test_uninstalled_protocol_message_names_the_extra():
     with pytest.raises(NotSupportedError) as exc:
         fs_class()
     assert "deferred" in str(exc.value)
+
+
+@pytest.mark.network
+def test_fsspec_open_a_bia_image():
+    """The imaging tier reaches the ecosystem by the same entry-point path."""
+    if os.environ.get("ARCHIVEFS_TEST_BIA", "") != "1":
+        pytest.skip("set ARCHIVEFS_TEST_BIA=1 to hit the BioImage Archive")
+    import fsspec
+
+    url = (
+        "bia://S-BIAD599/20200220-ftp/experimentA/056F63395C/"
+        "056F63395C_8bit_lynEGFP.tif"
+    )
+    with fsspec.open(url, "rb") as handle:
+        assert handle.read(4) in (b"MM\x00*", b"II*\x00")  # TIFF, either endianness
