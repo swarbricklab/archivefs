@@ -570,3 +570,45 @@ def test_live_a_study_with_no_conversions_says_so():
     with pytest.raises(ArchiveNotFoundError) as exc:
         fs.ls("S-BIAD1")
     assert "no converted data" in str(exc.value)
+
+
+def test_derived_listings_are_cached(derived, fake_bia):
+    """A study-level listing costs ~11s live; find()/walk()/DVC revisit directories."""
+    server = fake_bia()
+    fs = BIAFileSystem(view="derived", skip_instance_cache=True)
+    fs.ls(ACC)
+    after_first = len(server.s3_listings)
+    fs.ls(ACC)
+    fs.ls(ACC)
+    assert len(server.s3_listings) == after_first  # served from cache
+
+
+def test_info_uses_the_parent_listing_when_it_has_one(fake_bia):
+    """fsspec walks before it reads, so the parent listing is usually already here."""
+    server = fake_bia()
+    fs = BIAFileSystem(view="derived", skip_instance_cache=True)
+    entries = fs.ls(f"{ACC}/01776a3a-16a5-4c48-a104-fefcc83cc2ee")
+    thumbnail = next(e for e in entries if e["type"] == "file")
+    before = len(server.s3_listings)
+    assert fs.info(thumbnail["name"])["md5"] == thumbnail["md5"]
+    assert len(server.s3_listings) == before  # no extra request
+
+
+def test_invalidate_cache_drops_derived_listings(derived, fake_bia):
+    server = fake_bia()
+    fs = BIAFileSystem(view="derived", skip_instance_cache=True)
+    fs.ls(ACC)
+    before = len(server.s3_listings)
+    fs.invalidate_cache()
+    fs.ls(ACC)
+    assert len(server.s3_listings) > before
+
+
+def test_manifests_do_not_apply_to_the_derived_view(fake_bia):
+    """A .chiro describes a deposit; the derived tier is a conversion of one, and
+    already publishes md5s. Asking used to surface an internal error."""
+    fake_bia()
+    fs = BIAFileSystem(view="derived", skip_instance_cache=True)
+    assert fs.manifest_path_for(ACC) is None
+    assert fs.manifest_for(ACC) is None
+    assert fs.drift(ACC) is None

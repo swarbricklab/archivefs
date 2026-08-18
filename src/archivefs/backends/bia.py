@@ -425,6 +425,11 @@ class BIAFileSystem(ArchiveFileSystem):
         self.view = self.views[view](self)
         #: accession -> study /info payload
         self._studies: dict[str, dict] = {}
+        #: derived-view listings, keyed by directory path. The lazy view does not
+        #: go through _members(), so it does not inherit that cache — and a
+        #: study-level listing costs ~11s, which find()/walk()/DVC would otherwise
+        #: pay again on every visit.
+        self._derived_listings: dict[str, list[dict]] = {}
 
     # --------------------------------------------------------------- metadata
 
@@ -436,13 +441,20 @@ class BIAFileSystem(ArchiveFileSystem):
         return self._studies[accession]
 
     def invalidate_cache(self, path: str | None = None) -> None:
-        """Also drop the study metadata, which carries the payload location."""
+        """Also drop the study metadata and any derived-view listings."""
         super().invalidate_cache(path)
         if path is None:
             self._studies.clear()
+            self._derived_listings.clear()
             return
         container, _ = self._split(self._strip_protocol(path))
         self._studies.pop(container, None)
+        for cached in [
+            key
+            for key in self._derived_listings
+            if key == container or key.startswith(f"{container}/")
+        ]:
+            self._derived_listings.pop(cached, None)
 
     def _check_accession(self, accession: str) -> None:
         if not ACCESSION_RE.match(accession):
@@ -509,7 +521,9 @@ class BIAFileSystem(ArchiveFileSystem):
             return super().ls(path, detail=detail, **kwargs)
         path = self._strip_protocol(path)
         self._check_accession(path.split("/")[0])
-        entries = self.view.children(path)
+        if path not in self._derived_listings:
+            self._derived_listings[path] = self.view.children(path)
+        entries = self._derived_listings[path]
         return entries if detail else [entry["name"] for entry in entries]
 
     def info(self, path: str, **kwargs: Any) -> dict:
@@ -520,6 +534,12 @@ class BIAFileSystem(ArchiveFileSystem):
         self._check_accession(accession)
         if path == accession:
             return self._container_info(accession)
+        # A listing of the parent, if we already have one, answers this without a
+        # request — which is the common case, since fsspec walks before it reads.
+        parent = path.rsplit("/", 1)[0]
+        for entry in self._derived_listings.get(parent, ()):
+            if entry["name"] == path:
+                return entry
         return self.view.info(path)
 
     def _list_root(self) -> list[dict]:
@@ -545,6 +565,26 @@ class BIAFileSystem(ArchiveFileSystem):
                 "relpath": info.get("relPath"),
             },
         }
+
+    # A manifest describes a *deposit*. The derived view is BIA's conversion of
+    # one, keyed by image UUID, and it already publishes md5s — so there is nothing
+    # for the chiro layer to resolve against, and reaching for it would surface the
+    # lazy view's internal "should not be reached" error to anyone who ran
+    # `archivefs check -o view=derived`.
+    def manifest_path_for(self, container: str) -> str | None:
+        if self.view_name == "derived":
+            return None
+        return super().manifest_path_for(container)
+
+    def manifest_for(self, container: str) -> Any:
+        if self.view_name == "derived":
+            return None
+        return super().manifest_for(container)
+
+    def drift(self, container: str) -> Any:
+        if self.view_name == "derived":
+            return None
+        return super().drift(container)
 
     # --------------------------------------------------------------- discovery
 
