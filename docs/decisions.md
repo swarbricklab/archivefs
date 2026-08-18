@@ -566,6 +566,32 @@ base derives from `info()`, so overriding `ls()` and `info()` was enough for
 **A repeated S3 continuation token is refused, not silently truncated.** Stopping
 quietly would return a partial directory as though it were complete.
 
+**What adversarial review then found in the derived view** — two more
+silent-wrong-answer bugs, both verified live, and both worth stating because they
+are the same *shape* as the ones D11 caught:
+
+* **A partial-name prefix was reported as a directory.** S3 answers a prefix that
+  is not a whole key with the *siblings* beginning with it, so `S-BIAD599/0177`
+  looked populated when only `S-BIAD599/01776a3a-…/` existed. `exists`/`isdir`
+  returned confident nonsense while `ls` raised. It bites hardest in the case this
+  view exists for: OME-Zarr chunk directories are named `0,1,10,100,…`, so a
+  *missing* chunk `1` resolved as a directory whenever `10` existed — and zarr needs
+  a `FileNotFoundError` there to fall back to the fill value.
+* **`ls()` of a derived *file* raised**, which breaks `find`/`walk`/`du`/
+  `get(recursive=True)` — precisely the calls DVC's directory pull makes. fsspec
+  requires `ls(file)` to return that one entry; the base does it and the override
+  did not.
+
+Plus: the accession pattern refused real accessions (`E-MTAB-1234` is a public
+BioStudies study, on a *third* sharding scheme); the completeness check took
+`recordsFiltered` from every page, so a trailing `recordsFiltered: 0` could disarm
+it; and the file listing had no page ceiling.
+
+**The recurring lesson, now three for three:** the bug is never in the part the
+archive documents. It is in what the API does when you ask it something slightly
+off-centre — a prefix that is not a key, a page past the end, a study that lists a
+file twice — and the failure is a confident wrong answer rather than an error.
+
 ---
 
 ## D12 — smaller calls, in one place

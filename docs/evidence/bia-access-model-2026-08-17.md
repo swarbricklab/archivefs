@@ -97,6 +97,19 @@ GET https://uk1s3.embassy.ebi.ac.uk/bia-integrator-data?list-type=2&prefix=S-BIA
   Any usable implementation lists lazily, per directory.
 * Not every study is converted: `S-BIAD1` has **no** objects in this bucket.
 
+## 4. Two more, found while reviewing the finished backend
+
+* **A prefix that is not a whole key matches siblings, not children.**
+  `?prefix=S-BIAD599/0177&delimiter=/` returns `CommonPrefixes:
+  S-BIAD599/01776a3a-…/`. So "the listing returned something" is *not* a test for
+  "this is a directory" — the test is whether the path itself comes back as a
+  common prefix. Matters because OME-Zarr chunk directories are named
+  `0,1,10,100,…`.
+* **`E-MTAB-1234` is a real, public BioStudies study** on a third sharding scheme
+  (`relPath: E-MTAB-/234/E-MTAB-1234`), so an accession pattern written for
+  `S-BIAD…` refuses valid input. `/studies/{acc}/info` is the authoritative check;
+  the pattern should only catch obvious garbage.
+
 ## What this means for a backend
 
 **Verdict: tractable, and now implemented** — `src/archivefs/backends/bia.py`, with
