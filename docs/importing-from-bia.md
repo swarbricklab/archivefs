@@ -29,7 +29,7 @@ nothing in this guide needs it.
 
 Then register the protocols with DVC. This is a real step, not a formality: **DVC
 does not discover fsspec filesystems from entry points**, so without it `dvc
-import-url bia://…` fails with "unknown url type" ([`decisions.md`](decisions.md)
+import-url bia://…` fails with `Unsupported URL type` ([`decisions.md`](decisions.md)
 D4).
 
 ```console

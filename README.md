@@ -131,9 +131,13 @@ run is entirely offline.
 
 **Read next:**
 
+- **All the documentation, indexed:** [`docs/README.md`](docs/README.md) — a page per
+  subcommand, the storage-option tables, and the guides below.
 - **Importing from BIA, step by step:**
   [`docs/importing-from-bia.md`](docs/importing-from-bia.md) — a collaborator-facing
   how-to, from `conda env update` to a committed `.dvc` file.
+- **Using any archive with DVC:** [`docs/using-with-dvc.md`](docs/using-with-dvc.md) ·
+  **credentials:** [`docs/credentials.md`](docs/credentials.md)
 - **Decisions and deviations:** [`docs/decisions.md`](docs/decisions.md) — fourteen
   entries, including the resolved EGA checksum question, several undocumented archive
   behaviours worth knowing about, and the silent bugs an adversarial review of the

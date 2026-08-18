@@ -261,7 +261,8 @@ def cmd_dvc(args: argparse.Namespace) -> int:
     if args.action == "enable":
         path = dvcfs.enable()
         print(f"installed {path}")
-        print("dvc will now resolve ega://, zenodo:// and geo:// URLs.")
+        protocols = ", ".join(f"{name}://" for name in sorted(dvcfs.DVC_PROTOCOLS))
+        print(f"dvc will now resolve {protocols} URLs.")
         return 0
     path = dvcfs.disable()
     print(f"removed {path}" if path else "nothing to remove")
