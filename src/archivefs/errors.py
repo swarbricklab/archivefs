@@ -125,10 +125,15 @@ class CredentialSourceError(ArchiveFSError):
 
 
 class AuthenticationError(ArchiveFSError, PermissionError):
-    """The archive rejected the credential we did resolve.
+    """The archive refused access: it rejected our credential, or wanted none.
 
     ``remediation`` is mandatory: an auth failure the user cannot act on is a
     bug in the backend, not in their setup.
+
+    ``used_credentials=False`` for an archive that has no credential mechanism at
+    all (BIA, GEO). A 403 from one of those is the archive declining to serve a
+    record — embargoed, restricted or withdrawn — and saying "rejected the
+    credential" would send the user looking for a login that does not exist.
     """
 
     def __init__(
@@ -138,16 +143,20 @@ class AuthenticationError(ArchiveFSError, PermissionError):
         remediation: str,
         *,
         source: str | None = None,
+        used_credentials: bool = True,
     ) -> None:
         self.archive = archive
         self.reason = reason
         self.remediation = remediation
         self.source = source
+        self.used_credentials = used_credentials
         origin = f" (credential came from: {source})" if source else ""
-        super().__init__(
-            f"{archive} rejected the credential{origin}: {reason}\n"
-            f"  What to do: {remediation}"
+        lead = (
+            f"{archive} rejected the credential{origin}"
+            if used_credentials
+            else f"{archive} refused access"
         )
+        super().__init__(f"{lead}: {reason}\n  What to do: {remediation}")
 
 
 class ArchiveNotFoundError(ArchiveFSError, FileNotFoundError):

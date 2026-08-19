@@ -218,6 +218,22 @@ class ArchiveFileSystem(AbstractFileSystem):
         return False
 
     def _auth_remediation(self, status: int, url: str) -> str:
+        if not type(self).credentials:
+            # Careful about the claim here. *archivefs* sends no credentials to
+            # this archive; that is not the same as the archive having no
+            # authentication. BioStudies, for one, does let a submitter read a
+            # study that is registered but unreleased — archivefs just cannot
+            # carry that access yet. Saying "this archive needs no credentials"
+            # would tell a submitter their own working access is irrelevant.
+            return (
+                f"archivefs reads {self.archive_name} anonymously, so it can only "
+                f"see public records. Most often this means the record is embargoed, "
+                f"not yet released, restricted or withdrawn — check its landing page "
+                f"for a release date. If it is registered but unreleased and *you* "
+                f"have access to it, archivefs cannot use that access yet: "
+                f"authenticated reads for {self.archive_name} are not implemented "
+                f"(docs/ideas.md)."
+            )
         return (
             f"check the credentials for {self.archive_name}. archivefs resolved "
             f"them from: {self.creds.describe()}."
@@ -264,11 +280,14 @@ class ArchiveFileSystem(AbstractFileSystem):
                 may_refresh = False
                 continue
             if status in (401, 403):
+                uses_credentials = bool(type(self).credentials)
+                origin = (self.creds.describe() or None) if uses_credentials else None
                 raise AuthenticationError(
                     self.archive_name,
                     f"HTTP {status} for {url}",
                     self._auth_remediation(status, url),
-                    source=self.creds.describe() or None,
+                    source=origin,
+                    used_credentials=uses_credentials,
                 )
             if status == 404:
                 raise ArchiveNotFoundError(

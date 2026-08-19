@@ -37,6 +37,85 @@ Natural companion to the storage-backend plugin hook ([D4](decisions.md)) — bo
 "DVC needs one small seam for third-party filesystems", and both are better solved
 upstream than worked around here. Pitch them together.
 
+### 0b. Authenticated reads for BioStudies, so a submitter can import their own unreleased study
+**Effort: unknown until the mechanism is confirmed — a day if it is a header. Value:
+high; it is the first thing a depositor tries.**
+
+`bia.py` declares `credentials = []`: archivefs reads BioStudies anonymously, so it can
+only see released studies. But a **registered-but-unreleased** study is exactly what a
+depositor has in hand while writing the paper, and BioStudies does let them read it. So
+the natural first test — "can the person who deposited it import it?" — cannot even be
+attempted. Measured on `S-BIAD3080`:
+
+```console
+$ curl -s -o /dev/null -w '%{http_code}\n' \
+    https://www.ebi.ac.uk/biostudies/api/v1/studies/S-BIAD3080/info
+403                                   # {"errorMessage":"Study not accessible"}
+$ … same endpoint for S-BIAD599 → 200
+```
+
+Note the landing page returns **200** regardless — it is a JS shell that still contains
+`{{releaseDate}}` placeholders — so the browser gives no signal. Only the API does.
+
+**What is not yet established**, and should be before writing code:
+
+* The public host exposes `POST /biostudies/login` (405 for a JSON body, so it exists
+  and wants something else) but not `/auth/login`, `/api/v1/auth/login` or
+  `/api/auth/login` (all 404).
+* Both `?key=<secret>` and an `X-Session-Token:` header return **403** with a bogus
+  value, which distinguishes nothing: unsupported and wrong-value look identical.
+* `ebi-ait/biostudies-client` does login → session id, but its README names neither the
+  endpoint nor the header. Reading its source, or asking biostudies@ebi.ac.uk, settles
+  it in one message.
+
+Two candidate mechanisms, and they want different designs. A **secret-link key** is a
+URL parameter, so it is a *path* not a secret in our terms — but it grants read access,
+so treating it as non-secret would be wrong; it should be a `secret=True` credential
+resolved from env/file like any other (D16). A **session token** obtained from a
+username/password login needs a refresh path, which the EGA backend already models.
+
+Until then the 403 message says so explicitly rather than blaming credentials, which is
+what it used to do — see the note in `base.py::_auth_remediation`.
+
+### 0c. Address records by DOI, not just accession
+**Effort: a day for per-backend prefixes; a week for a real `doi://`. Value: the DOI is
+the identifier papers actually cite.**
+
+`zenodo://` already accepts a DOI (`zenodo://10.5281/zenodo.1486184`), so there is
+precedent. Two quite different shapes:
+
+**(a) Per-backend DOI acceptance.** Teach `bia://` to accept `bia://10.6019/S-BIAD3080`
+by recognising the prefix and taking the suffix as the accession — for BioImage Archive
+DOIs the suffix *is* the accession, verified: `https://doi.org/10.6019/S-BIAD3080`
+302s to `https://www.ebi.ac.uk/biostudies/studies/S-BIAD3080`. Cheap, but it only helps
+someone who already knows the record is in BIA, and if they know that they have the
+accession. Low value on its own.
+
+**(b) A `doi://` protocol that dispatches.** `doi://10.6019/S-BIAD3080` resolves the DOI
+and routes to whichever backend owns it. This is the version worth building: paste the
+DOI from a paper and it works, and the committed `.dvc` records the most durable
+identifier there is rather than a repository-local accession.
+
+Three things to settle first, one of which is a real obstacle:
+
+1. **Resolution is a third network dependency.** `doi.org` being slow or down would fail
+   a `dvc pull` for a reason unrelated to the archive. Wants caching, and the resolved
+   target recorded so a later pull need not re-resolve.
+2. **Registration agencies differ.** `10.6019/S-BIAD3080` has **no DataCite record** —
+   content negotiation shows it is registered with **Crossref** (`publisher: EMBL-EBI`,
+   `type: dataset`), while Zenodo's are DataCite. So "read the repository out of the
+   DOI's metadata" needs at least two agencies, or a fallback that pattern-matches the
+   redirect target. The redirect is the more robust signal and needs no API key.
+3. **What goes in the `.dvc`.** If `doi://…` resolves to `bia://S-BIAD3080`, does `path`
+   keep the DOI (durable, opaque, needs the network to interpret) or the resolved
+   accession (transparent, resolvable offline)? Recording the DOI in `path` and the
+   resolved target in the backend metadata block gives both, but interacts with
+   `dvc update` the way D6's concept-DOI problem does: a *concept* DOI legitimately
+   moves, and "update" then means something the user must have chosen deliberately.
+
+Worth doing (b) and skipping (a): a half-measure that only works when you already know
+the answer is not worth the surface area.
+
 ### 1. Report the EGA range-alignment bug upstream
 **Effort: an hour. Value: high, and not just to us.**
 

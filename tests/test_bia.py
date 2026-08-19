@@ -19,7 +19,11 @@ from tests.fake_http import FakeRequestsModule, FakeResponse, ranged
 
 from archivefs import base as base_mod
 from archivefs.backends.bia import PAGE_SIZE, BIAFileSystem, is_true
-from archivefs.errors import ArchiveNotFoundError, NotSupportedError
+from archivefs.errors import (
+    ArchiveNotFoundError,
+    AuthenticationError,
+    NotSupportedError,
+)
 
 DATA = Path(__file__).parent / "data"
 INFO = json.loads((DATA / "bia_S-BIAD599_info.json").read_text())
@@ -802,3 +806,41 @@ def test_live_ls_of_a_derived_file_returns_it():
     entry = next(e for e in fs.ls(image) if e["type"] == "file")
     assert fs.ls(entry["name"], detail=False) == [entry["name"]]
     assert fs.find(entry["name"]) == [entry["name"]]
+
+
+# ------------------------------------------- an embargoed study is not an auth failure
+
+
+def test_a_403_does_not_blame_credentials_bia_has_none(monkeypatch):
+    """Measured against the live archive: an unreleased study 403s.
+
+    BioStudies answers `403 {"errorMessage":"Study not accessible"}` for a record
+    that is embargoed or not yet released. archivefs used to render that as
+    "BioImage Archive rejected the credential … check the credentials for BioImage
+    Archive", which is unactionable advice for an archive that has no credential
+    mechanism at all — it sends the user looking for a login that does not exist.
+    """
+
+    def server(method, url, headers, kwargs):
+        return FakeResponse(403, json={"errorMessage": "Study not accessible"})
+
+    monkeypatch.setattr(base_mod, "requests", FakeRequestsModule(server))
+    fs = BIAFileSystem(skip_instance_cache=True)
+    with pytest.raises(AuthenticationError) as exc:
+        fs.ls("S-BIAD3080")
+    message = str(exc.value)
+    assert "refused access" in message
+    assert "rejected the credential" not in message
+    assert "check the credentials" not in message
+    # and it names what is actually likely, plus where to look
+    assert "embargoed" in message
+    assert "landing page" in message
+    assert exc.value.used_credentials is False
+    assert exc.value.source is None
+    # It must not claim the *archive* needs no credentials. BioStudies lets a
+    # submitter read their own unreleased study; archivefs is the part that
+    # cannot carry that access. Telling a depositor otherwise would say their
+    # working access is irrelevant.
+    assert "needs no credentials" not in message
+    assert "anonymously" in message
+    assert "not implemented" in message
