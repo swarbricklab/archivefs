@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 
 import pytest
 from tests.fake_http import FakeRequestsModule, FakeResponse, ranged
@@ -585,3 +586,75 @@ def test_verify_without_chirograph_names_the_extra(geo, monkeypatch, tmp_path):
         assert "pip install 'archivefs[chiro]'" in str(exc.value)
     finally:
         monkeypatch.setattr(chiro_mod, "_chirograph", real_import)
+
+
+# --------------------------------------- a manifest committed beside the .dvc (D18)
+
+
+def test_a_local_manifest_is_read_by_relative_name(geo, tmp_path, monkeypatch):
+    """The case that makes the reviewer route work for a checksum-less archive.
+
+    The deposit does **not** contain a manifest here (``manifest=None``), which is
+    the situation for someone else's GEO series: no checksums published, and no way
+    to put your own manifest inside their deposit. Committing it next to the .dvc
+    and naming it relatively is the only portable option. See decisions.md D18.
+    """
+    server = geo(manifest=None)
+    (tmp_path / MANIFEST_NAME).write_bytes(build_manifest(relocate=False))
+    monkeypatch.chdir(tmp_path)
+
+    fs = GEOFileSystem(skip_instance_cache=True, chiro=MANIFEST_NAME)
+    name = "GSE176078_sampleA_matrix.mtx.gz"
+    info = fs.info(f"{GSE}/{name}")
+    assert info["md5"] == md5(BODIES[name])
+    assert "download-free" in info["checksum_source"]
+    # the manifest came off local disk, so the archive served no payload at all
+    assert server.bytes_served == 0
+
+
+def test_a_local_manifest_works_with_a_dot_slash_prefix(geo, tmp_path, monkeypatch):
+    geo(manifest=None)
+    (tmp_path / MANIFEST_NAME).write_bytes(build_manifest(relocate=False))
+    monkeypatch.chdir(tmp_path)
+    fs = GEOFileSystem(skip_instance_cache=True, chiro=f"./{MANIFEST_NAME}")
+    assert fs.info(f"{GSE}/GSE176078_sampleA_matrix.mtx.gz")["md5"]
+
+
+def test_a_home_relative_manifest_is_expanded(geo, tmp_path, monkeypatch):
+    geo(manifest=None)
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / MANIFEST_NAME).write_bytes(build_manifest(relocate=False))
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: home)
+    fs = GEOFileSystem(skip_instance_cache=True, chiro=f"~/{MANIFEST_NAME}")
+    assert fs.info(f"{GSE}/GSE176078_sampleA_matrix.mtx.gz")["md5"]
+
+
+def test_a_manifest_inside_the_deposit_still_wins_over_a_local_file(geo, tmp_path, monkeypatch):
+    """Precedence: a member of the deposit is resolved via its info, not the disk.
+
+    Otherwise a stray local file with a conventional name would silently shadow the
+    manifest the depositor actually published.
+    """
+    server = geo(manifest=build_manifest())
+    # a local decoy with the same name, describing nothing
+    (tmp_path / MANIFEST_NAME).write_bytes(build_manifest([]))
+    monkeypatch.chdir(tmp_path)
+    fs = GEOFileSystem(skip_instance_cache=True, chiro=f"{GSE}/{MANIFEST_NAME}")
+    assert sorted(fs.ls(GSE, detail=False)) == [f"{GSE}/sampleA", f"{GSE}/sampleB"]
+    assert server.bytes_served == len(server.manifest)
+
+
+def test_an_unfindable_manifest_names_every_place_it_looked(geo, tmp_path, monkeypatch):
+    """The old message said only "not a GEO accession", which explains nothing."""
+    geo(manifest=None)
+    monkeypatch.chdir(tmp_path)
+    fs = GEOFileSystem(skip_instance_cache=True, chiro="nosuch.chiro.json")
+    with pytest.raises(ManifestError) as exc:
+        fs.ls(GSE)
+    message = str(exc.value)
+    assert str(tmp_path / "nosuch.chiro.json") in message  # where it actually looked
+    assert "local file" in message
+    assert "inside the archive" in message
+    assert "chiro=False" in message

@@ -883,3 +883,67 @@ says so.
 dependency's source is immutable and re-fetchable, use it as a fallback even for a
 completed import". That is a feature request against DVC, and a natural companion to
 the storage-backend plugin hook (D4) — see [`ideas.md`](ideas.md).
+
+---
+
+## D18 — a `chiro=` manifest may be a file committed in your own repo
+
+**The gap D17 left.** For `geo://` and `bia://` submitted files the archive publishes
+no checksum, so `deps.checksum` — and with it any reviewer's ability to `dvc pull` from
+the archive — can only come from a `.chiro` manifest. But a manifest for *someone
+else's* deposit has to live somewhere, and the deposit is the one place it cannot go.
+
+Before this change, `chiro=` resolved a value that was not a URL or an absolute path as
+a path *inside the archive*, so the obvious thing failed in a way that read like a
+different problem entirely:
+
+```console
+$ dvc import-url --fs-config chiro=GSE176078.chiro.json -- geo://GSE176078/… out
+ERROR: GSE176078.chiro.json is named as this deposit's manifest but could not be
+fetched ('GSE176078.chiro.json' is not a GEO accession…)
+```
+
+That left an absolute path (machine-specific, so useless to anyone you send the repo
+to) or an `http(s)` URL — which works, but means hosting a copy of a file whose natural
+home is the analysis repo, next to the `.dvc` it describes. "Set up somewhere to host
+manifests" is a large answer to a small problem.
+
+**Decision.** `load_manifest` now tries a **local file** before falling back to a path
+inside the archive. Resolution order, first hit wins: the passed-in `info` (a manifest
+that is a member of the deposit being listed) → a URL or absolute path → an existing
+local file, `~` expanded → a path inside the filesystem. So:
+
+```console
+$ cp …/GSE176078.chiro.json .                # committed beside the .dvc
+$ dvc import-url --no-download --fs-config chiro=GSE176078.chiro.json -- \
+    geo://GSE176078/GSE176078_Wu_etal_2021_bulkRNAseq_raw_counts.txt.gz bulk.txt.gz
+$ dvc pull && git add -A && git commit -m "GEO import with committed manifest"
+```
+
+and a reviewer who clones that repo — no DVC remote, no hosted manifest, nothing to
+configure — runs `dvc pull` and gets the bytes, verified. Measured end to end on
+GSE176078, which is the case that motivated it.
+
+**Why local wins over deposit-relative**, given local is checked first: there is
+nothing to shadow. A manifest that genuinely is a member of the deposit arrives through
+the `info` short-circuit, because `_members()` passes `native.get(manifest_path)`; and
+a bare deposit-relative name never resolved anyway, since the fallback resolves from
+the filesystem *root* rather than the container. A test pins the precedence with a
+deliberate local decoy, so the depositor's own manifest still wins.
+
+**The error message also got the fix it needed.** It now names every place it looked,
+absolute, so "which directory did it mean?" is answerable:
+
+```
+nosuch.chiro.json is named as this deposit's manifest but could not be fetched (…).
+Looked for /home/you/project/nosuch.chiro.json (local file), then nosuch.chiro.json
+(inside the archive). Fix or remove the `chiro` setting, or pass chiro=False …
+```
+
+**What this does not change.** A manifest you write over someone else's deposit records
+*your* observation, not the archive's claim — chirograph types it `observed-download`,
+and that distinction is worth stating when the checksums are offered as evidence. It is
+strictly better than no checksum, and it is the best available for an archive that
+publishes none, but it warrants differently from a Zenodo md5. A registry of published
+manifests would be a different thing again, and is not needed for this: see
+[`ideas.md`](ideas.md) #5 for the writing side.

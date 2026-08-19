@@ -30,6 +30,7 @@ from __future__ import annotations
 import logging
 import posixpath
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from archivefs.errors import ManifestError, MissingExtraError
@@ -101,34 +102,62 @@ def load_manifest(
 ) -> Any:
     """Fetch and parse one manifest through ``fs``.
 
-    ``path`` may be a path inside the same filesystem, or an absolute URL/local
-    path for a manifest that lives somewhere else entirely (a registry, a git
-    checkout) — that is the case the format's ``chiro://`` references exist for.
+    Resolution order for ``path``, first hit wins:
 
-    ``info`` short-circuits path resolution. It has to exist: a manifest that
-    lives *inside* the deposit it describes is fetched while that deposit's
-    listing is still being built, so going back through ``cat_file`` would
-    re-enter the listing and recurse forever.
+    1. ``info`` — the manifest is a member of the deposit being listed, and its
+       ``info`` dict was passed in. This short-circuit has to exist: such a
+       manifest is fetched *while* that deposit's listing is being built, so going
+       back through ``cat_file`` would re-enter the listing and recurse forever.
+    2. A URL or an absolute path — a manifest that lives somewhere else entirely
+       (a registry, a hosted copy, a git checkout). This is the case the format's
+       ``chiro://`` references exist for.
+    3. **A local file**, including a plain relative name. This is the manifest
+       committed next to the ``.dvc`` that references it: the common case for a
+       deposit you do not control, where the archive publishes no checksum and
+       cannot be made to carry your manifest. Without it the only portable
+       reference is a URL, which means hosting a copy of a file that belongs in
+       the analysis repo. See ``docs/decisions.md`` D18.
+    4. A path inside the filesystem, resolved from its root (not the deposit) —
+       kept for a manifest that is in the deposit but absent from the listing.
+
+    Note that 3 precedes 4, so a local file shadows a same-named remote path. In
+    practice there is nothing to shadow: a manifest that really is a member of the
+    deposit arrives via 1, and a deposit-relative bare name never resolved under 4
+    anyway.
     """
     chirograph = _chirograph()
+    searched: list[str] = []
     try:
         if info is not None:
             payload = fs._fetch_range(info, 0, fs._size_of(info))
         elif "://" in path or path.startswith("/"):
             import fsspec
 
+            searched.append(path)
             with fsspec.open(path, "rb") as handle:
                 payload = handle.read()
         else:
-            payload = fs.cat_file(path)
+            local = Path(path).expanduser()
+            # Absolute in the message even when the setting is relative: "looked
+            # for foo.json" does not say *where*, and the answer is whichever
+            # directory dvc happened to run in.
+            searched.append(f"{local.resolve()} (local file)")
+            if local.is_file():
+                payload = local.read_bytes()
+            else:
+                searched.append(f"{path} (inside the archive)")
+                payload = fs.cat_file(path)
     except FileNotFoundError as exc:
         # Deliberately *not* re-raised as a FileNotFoundError: fsspec's walk()
         # swallows those, so an unfetchable manifest would surface as an empty
         # directory — a listing that silently loses every file in the deposit.
+        places = ", then ".join(searched)
         raise ManifestError(
             f"{path} is named as this deposit's manifest but could not be "
-            f"fetched ({exc}). Fix or remove the `chiro` setting, or pass "
-            f"chiro=False to fall back to the archive's own listing."
+            f"fetched ({exc})."
+            + (f" Looked for {places}." if places else "")
+            + " Fix or remove the `chiro` setting, or pass "
+            "chiro=False to fall back to the archive's own listing."
         ) from exc
     try:
         return chirograph.loads(payload)

@@ -82,9 +82,23 @@ the committed `.dvc` in the shape a reviewer can use. Verified: a clone with no 
 anywhere runs `dvc pull` and gets the right bytes.
 
 **It also needs the archive to publish a checksum.** `geo://` and `bia://` submitted
-files publish none, so a reviewer route requires a `.chiro` manifest to supply one
-(`--fs-config chiro=…`). For those two, a manifest is not a nicety — without it there
-is no way for anyone else to pull from the source.
+files publish none, so a reviewer route requires a `.chiro` manifest to supply one. For
+those two, a manifest is not a nicety — without it there is no way for anyone else to
+pull from the source. Commit the manifest beside the `.dvc` and name it relatively, so
+it travels with the clone and nothing has to be hosted:
+
+```console
+$ cp …/GSE176078.chiro.json .
+$ dvc import-url --no-download --fs-config chiro=GSE176078.chiro.json -- \
+    geo://GSE176078/GSE176078_Wu_etal_2021_bulkRNAseq_raw_counts.txt.gz bulk.txt.gz
+$ dvc pull && git add -A && git commit -m "GEO import with committed manifest"
+```
+
+A reviewer who clones that gets `dvc pull` working with no remote and no manifest of
+their own ([`decisions.md`](decisions.md) D18). Note that a manifest you wrote over
+someone else's deposit records *your* observation rather than the archive's claim —
+honest and useful, but a different warrant from a Zenodo md5, and worth saying so if
+the checksums are offered as evidence.
 
 | form | bytes now | `.dvc` written | reviewer can pull from archive | use when |
 |---|---|---|---|---|

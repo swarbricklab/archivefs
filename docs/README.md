@@ -41,7 +41,7 @@ private file, and every other route is refused. See
 
 | option | values | meaning |
 |---|---|---|
-| `chiro` | `auto` (default), `false`, or a path/URL | use a `.chiro.json` manifest as the listing and the checksums. `auto` discovers one inside the deposit; a path may be inside the deposit, local, or a URL. |
+| `chiro` | `auto` (default), `false`, or a path/URL | use a `.chiro.json` manifest as the listing and the checksums. `auto` discovers one inside the deposit. An explicit value may be a **file in your repo** (`chiro=GSE176078.chiro.json` — resolved locally first, so it travels with a `git clone`), an absolute path, a URL, or a path inside the deposit. Order and rationale: [`decisions.md`](decisions.md) D18. |
 
 **Per backend:**
 

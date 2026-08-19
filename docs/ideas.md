@@ -192,31 +192,6 @@ since both are "DVC needs one small seam for third-party filesystems".
 Until then the sidecar manifest (`-o chiro=…`) is the real answer, and the one the
 BIA guide recommends.
 
-### 18. Let `chiro=` name a manifest committed in the *repo*
-**Effort: small. Value: high — without it the reviewer route is unusable for GEO.**
-
-A relative `chiro` path is interpreted as a path *inside the deposit*, which is right
-for a deposit that ships its own manifest but means you cannot point at one you have
-committed next to the `.dvc`:
-
-```console
-$ dvc import-url --fs-config chiro=gse176078.chiro.json -- geo://GSE176078/… out
-ERROR: gse176078.chiro.json is named as this deposit's manifest but could not be
-fetched ('gse176078.chiro.json' is not a GEO accession…)
-```
-
-That leaves an absolute path (machine-specific, useless to a collaborator) or a URL
-(portable, but you must host it). Committing the manifest beside the data it describes
-is the obvious thing to want, and it is exactly what
-[D17](decisions.md)'s reviewer route needs for `geo://` and `bia://` submitted files,
-where the manifest is the *only* way to supply `deps.checksum`.
-
-Proposed resolution order for a `chiro` value that is not a URL: an existing local file
-(relative to CWD, i.e. the repo root when DVC runs) wins; otherwise treat it as
-deposit-relative as now. Ambiguity is possible in principle and vanishingly unlikely in
-practice, and the error message can name which interpretation was used. A `file://`
-prefix would be the explicit escape hatch.
-
 ### 17. Audit *history* for secrets that were committed before the policy landed
 This idea originally proposed linting new commits, because
 `dvc import-url --fs-config password=… -- ega://…` wrote the password straight into
