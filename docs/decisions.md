@@ -792,3 +792,94 @@ credential silently readable by everyone in the project group.
 `_refuse_option_credentials`, so nothing here is hard to walk back — but doing so
 re-opens `--fs-config password=…` writing plaintext into a committed file, which is
 the thing that motivated it.
+
+---
+
+## D17 — ⚠️ **`dvc pull` can only reach the archive for a *partial* import**
+
+**The requirement this threatens.** The project exists so a reviewer or reproducer can
+clone an analysis repo and pull the raw data **from the archive**, as tracked, without
+the authors having to re-host a copy on a DVC remote. Anything that quietly requires
+re-hosting defeats the purpose.
+
+**What is actually true**, measured against DVC 3.67.1 on the live archives. Whether a
+fresh clone with **no DVC remote** can materialise the data:
+
+| import | `outs.md5` | `deps.checksum` | `dvc pull` in a fresh clone |
+|---|---|---|---|
+| `import-url` (full download), zenodo | ✓ | ✓ | ✗ **fails** |
+| `import-url` (full download), geo | ✓ | ✗ | ✗ fails |
+| `import-url --no-download`, zenodo | ✗ | ✓ | ✓ **works** |
+| `import-url --no-download`, bia derived | ✗ | ✓ | ✓ works |
+| `import-url --no-download`, geo | ✗ | ✗ | ✗ fails |
+| `import-url --no-download` + `.chiro`, geo | ✗ | ✓ | ✓ works |
+
+Two conditions, **both** required: the stage must be a *partial* import, and the
+dependency must carry a published `checksum`.
+
+**Where the first comes from.** `dvc/repo/index.py`, `_load_storage_from_import`:
+
+```python
+if out.stage.is_repo_import or not out.hash_info or dep.fs.version_aware:
+    storage_map.add_remote(FileStorage(key, dep.fs, dep.fs_path, read_only=True))
+```
+
+`out.hash_info` is `outs[0].md5`. When it is **present** — a completed download — DVC
+does not register the source as a fallback remote at all. It assumes a finished import
+means the bytes belong in your DVC remote. The failure is then
+`Checkout failed … Is your cache up to date?`, because `.dvc/.gitignore` lists
+`/cache`: the clone starts empty and there is nowhere to fetch from.
+
+Note what this is *not*. The checksum is known — it is sitting in the committed
+`.dvc`. The clone knows exactly which bytes it wants. What it lacks is a **source**.
+The more complete the import, the less able a reviewer is to pull it.
+
+The second condition is empirical: rows 5 and 6 differ only in `deps.checksum`, and
+only row 6 works. Without it the fetch reports "Everything is up to date" and
+transfers nothing.
+
+**`version_aware = True` does not solve it, and makes things worse.** That third
+disjunct above looks like the answer, so it was tried: set `version_aware` and add the
+`version_path` shim DVC then demands (a no-op is semantically right for us — a
+published record is immutable, so the path *is* the version). Result: full download
+still could not be pulled in a fresh clone, for zenodo *or* geo, **and** DVC wrote
+`push: false` into the `.dvc` (`dvc/repo/imp_url.py` sets `can_push = False` for a
+version-aware dependency), which would break the one workflow that does work. Closed.
+
+**What does work, and is now the recommended pattern:** `--no-download` **followed by
+`dvc pull`**.
+
+```console
+$ dvc import-url --no-download zenodo://1486184/github-mark.zip logo.zip
+$ dvc pull                       # the bytes, locally, verified
+$ git diff logo.zip.dvc          # unchanged — the source-fallback shape is preserved
+```
+
+`--no-download` does not mean "do without the data"; it means "do not record an out
+hash". You then pull, which gives you the bytes in the workspace and the cache, leaves
+the committed `.dvc` byte-identical, and keeps the stage in the shape a reviewer can
+pull from. Verified end to end: clone with no remote configured anywhere → `dvc pull`
+→ correct md5.
+
+**Consequences for the checksum-less archives.** `geo://` and `bia://` submitted files
+still need a `.chiro` manifest to supply `deps.checksum`; without one, no reviewer
+route exists and the `--no-download` step streams the whole file anyway (D14) before
+`dvc pull` fetches it a second time. For those archives a manifest is not a nicety, it
+is the thing that makes the reviewer story work at all.
+
+**`dvc push` remains available and pushes archive data**, unlike `dvc import` from
+another DVC repo — measured: `import-url` + `push` puts the object in the remote and a
+clone pulls it, while `import` + `push` reports "Everything is up to date" and pushes
+nothing. That works for every archive regardless of checksums, but it means hosting a
+copy, which is what we are trying to avoid.
+
+**Tripwire.** `can_push` is only forced off for a version-aware dependency, so our
+hard `version_aware = False` (D6) is what keeps `dvc push` working. A future change
+that makes archivefs version-aware would silently stop `dvc push` pushing archive data
+and break every collaborator's pull. The test pinning `version_aware is False` now
+says so.
+
+**Where this should go next.** The gap is upstream: DVC has no way to say "this
+dependency's source is immutable and re-fetchable, use it as a fallback even for a
+completed import". That is a feature request against DVC, and a natural companion to
+the storage-backend plugin hook (D4) — see [`ideas.md`](ideas.md).

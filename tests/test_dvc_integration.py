@@ -298,3 +298,81 @@ def test_bia_submitted_import_hashes_what_it_downloads(repo):
     payload = (root / "clinical.csv").read_bytes()
     assert hashlib.md5(payload).hexdigest() == BIA_CSV_MD5  # noqa: S324
     assert payload.startswith(b"ICAIRD number,Gender,Response")
+
+
+# ------------------------------------------------------- the reviewer's route (D17)
+
+
+def _clone_and_pull(root: Path, name: str, dvc_bin: Path):
+    """Clone *root* into a sibling and `dvc pull` there, with no DVC remote."""
+    clone = root.parent / name
+    subprocess.run(["git", "clone", "-q", str(root), str(clone)], check=True)
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(
+            [str(Path(__file__).parent.parent / "src"), os.environ.get("PYTHONPATH", "")]
+        ),
+    }
+    env.pop("ARCHIVEFS_NO_DVC_HOOK", None)
+    result = subprocess.run(
+        [str(dvc_bin), "pull"],
+        cwd=clone,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=900,
+        check=False,
+    )
+    return clone, result
+
+
+def _commit_all(root: Path) -> None:
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "import"],
+        cwd=root,
+        check=True,
+    )
+
+
+def test_partial_import_is_pullable_from_the_archive_by_a_reviewer(repo):
+    """The project's core promise, pinned: clone, no remote, `dvc pull` works.
+
+    `--no-download` then `dvc pull` leaves the committed .dvc without an `outs.md5`,
+    which is what makes DVC keep the source URL as a fallback storage. See
+    decisions.md D17 — this is the *only* shape a reviewer can pull without the
+    authors hosting a second copy of already-published data.
+    """
+    root, run = repo
+    dvc_bin = Path(sys.executable).with_name("dvc")
+    assert run("import-url", "--no-download", ZENODO_FILE, "logo.zip").returncode == 0
+    before = (root / "logo.zip.dvc").read_text()
+    assert run("pull").returncode == 0
+    assert hashlib.md5((root / "logo.zip").read_bytes()).hexdigest() == ZENODO_MD5  # noqa: S324
+    # pulling locally must not change the stage, or the reviewer route is lost
+    assert (root / "logo.zip.dvc").read_text() == before
+    assert "md5" not in yaml.safe_load(before)["outs"][0]
+
+    _commit_all(root)
+    clone, result = _clone_and_pull(root, "reviewer", dvc_bin)
+    assert result.returncode == 0, result.stderr
+    assert hashlib.md5((clone / "logo.zip").read_bytes()).hexdigest() == ZENODO_MD5  # noqa: S324
+
+
+def test_completed_import_is_not_pullable_without_a_remote(repo):
+    """The trap, pinned so we notice if DVC ever changes it.
+
+    A full `dvc import-url` records `outs.md5`, and DVC then stops offering the
+    source as a fallback — so a reviewer with no remote cannot get the bytes even
+    though the checksum is in the committed file. If this test ever *fails*, the
+    upstream gap in ideas.md #0 has been closed and the docs should say so.
+    """
+    root, run = repo
+    dvc_bin = Path(sys.executable).with_name("dvc")
+    assert run("import-url", ZENODO_FILE, "logo.zip").returncode == 0
+    assert yaml.safe_load((root / "logo.zip.dvc").read_text())["outs"][0]["md5"]
+
+    _commit_all(root)
+    clone, result = _clone_and_pull(root, "reviewer-full", dvc_bin)
+    assert result.returncode != 0
+    assert not (clone / "logo.zip").exists()

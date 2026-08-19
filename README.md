@@ -37,6 +37,11 @@ outs:
 $ dvc pull logo.zip.dvc                    # bytes on demand, verified by DVC
 ```
 
+That order matters. `--no-download` then `dvc pull` gives you the data locally *and*
+leaves the committed `.dvc` in the one shape a reviewer can pull from the archive
+without you hosting a copy — which is the point of the exercise.
+[`docs/decisions.md`](docs/decisions.md) D17.
+
 The same works for `ega://` with credentials resolved from the environment at pull
 time, and for `geo://` and `bia://` anonymously. For imaging, BIA's own OME-Zarr
 conversions carry real MD5s, so that tier is download-free too:
@@ -139,10 +144,11 @@ run is entirely offline.
   how-to, from `conda env update` to a committed `.dvc` file.
 - **Using any archive with DVC:** [`docs/using-with-dvc.md`](docs/using-with-dvc.md) ·
   **credentials:** [`docs/credentials.md`](docs/credentials.md)
-- **Decisions and deviations:** [`docs/decisions.md`](docs/decisions.md) — sixteen
+- **Decisions and deviations:** [`docs/decisions.md`](docs/decisions.md) — seventeen
   entries, including the resolved EGA checksum question, several undocumented archive
-  behaviours worth knowing about, the credential routes closed off in D16, and the
-  silent bugs an adversarial review of the finished code turned up.
+  behaviours worth knowing about, the credential routes closed off in D16, why a
+  reviewer can only pull from the archive for a *partial* import (D17), and the silent
+  bugs an adversarial review of the finished code turned up.
 - **Ideas and extensions:** [`docs/ideas.md`](docs/ideas.md)
 - **Architecture:** [`docs/design.md`](docs/design.md) · **checklist:**
   [`docs/plan.md`](docs/plan.md)

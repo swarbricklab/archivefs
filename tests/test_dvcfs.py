@@ -173,7 +173,20 @@ def test_unstrip_protocol_round_trips():
 
 
 def test_not_version_aware_even_when_dvc_asks():
-    """Our version tokens are DOIs, not cloud object versions (decisions.md D6)."""
+    """Our version tokens are DOIs, not cloud object versions (decisions.md D6).
+
+    Two things depend on this staying False, and both fail *silently*:
+
+    * `dvc/repo/imp_url.py` sets `outs[0].can_push = False` for a version-aware
+      dependency. Flipping this on writes `push: false` into every `.dvc` and
+      `dvc push` then stops pushing archive data — so every collaborator's
+      `dvc pull` breaks, with no error at import time (decisions.md D17).
+    * A version-aware filesystem must also provide `version_path`; without it
+      `dvc import-url` dies with `object has no attribute 'version_path'`.
+
+    Setting it True does *not* buy the thing it looks like it should — pulling a
+    completed import from the source — which was measured and rejected in D17.
+    """
     fs = dvcfs.ZenodoDVCFileSystem(url="zenodo://1486184", version_aware=True)
     assert fs.version_aware is False
     # and an old .dvc carrying a version_id must not crash

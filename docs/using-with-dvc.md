@@ -56,18 +56,53 @@ S-BIAD599-annotation-representative-512-512.png
 `archivefs ls -l` shows the same thing plus checksums, which is usually what you
 actually want ([`cli-ls.md`](cli-ls.md)).
 
-## `--no-download` is about *when*, and sometimes costs a full transfer
+## If a reviewer must be able to pull from the archive, use `--no-download` then `dvc pull`
 
-| form | bytes now | `.dvc` written | use when |
-|---|---|---|---|
-| `dvc import-url URL out` | yes | yes | you want the data now |
-| `dvc import-url --no-download URL out` | *usually* not | yes | you want the pin now, the data later (CI, a shared repo, a big study) |
-| `dvc import-url --no-exec URL out` | no | yes, **without checksums** | you only want the wiring |
+This is the most important thing on this page, and it is not obvious.
 
-The catch, measured: `--no-download` records a **correct** checksum, and where the
-archive publishes none, DVC computes it by streaming the whole file. On a 120 MB BIA
-submitted file that is 83 s of transfer for a stage that keeps no bytes, and you will
-transfer it again on `dvc pull`.
+**A completed `dvc import-url` cannot be pulled from the archive by anyone else.** Once
+`outs.md5` is recorded, DVC stops treating the source URL as a place the bytes could
+come from — it assumes they are in your DVC remote. A reviewer who clones your repo
+with no remote configured gets `Checkout failed … Is your cache up to date?`, even
+though the checksum is sitting right there in the committed `.dvc`. The problem is not
+verification, it is that there is no byte source. Full measurements:
+[`decisions.md`](decisions.md) D17.
+
+The fix costs one extra command:
+
+```console
+$ dvc import-url --no-download zenodo://1486184/github-mark.zip logo.zip
+$ dvc pull                       # you get the bytes, locally, verified
+$ git diff logo.zip.dvc          # unchanged: still pullable from the archive
+```
+
+`--no-download` does not mean "do without the data" — it means "do not record an out
+hash". Pulling afterwards gives you the file in your workspace and cache while leaving
+the committed `.dvc` in the shape a reviewer can use. Verified: a clone with no remote
+anywhere runs `dvc pull` and gets the right bytes.
+
+**It also needs the archive to publish a checksum.** `geo://` and `bia://` submitted
+files publish none, so a reviewer route requires a `.chiro` manifest to supply one
+(`--fs-config chiro=…`). For those two, a manifest is not a nicety — without it there
+is no way for anyone else to pull from the source.
+
+| form | bytes now | `.dvc` written | reviewer can pull from archive | use when |
+|---|---|---|---|---|
+| `dvc import-url --no-download URL out` then `dvc pull` | yes | yes | **yes**, if a checksum is published | you want the data *and* a reproducible repo |
+| `dvc import-url URL out` | yes | yes | no — needs `dvc push` to a remote | the data is only for you, or you host a remote |
+| `dvc import-url --no-download URL out` | *usually* not | yes | as above | you want the pin now, the data later |
+| `dvc import-url --no-exec URL out` | no | yes, **without checksums** | no | you only want the wiring |
+
+`dvc push` does work for `import-url` stages and covers every archive regardless of
+checksums — unlike `dvc import` from another DVC repo, which pushes nothing. But it
+means hosting a copy of data that is already published, which is usually the thing you
+were trying to avoid.
+
+### The cost side of `--no-download`
+
+`--no-download` records a **correct** checksum, and where the archive publishes none,
+DVC computes it by streaming the whole file. On a 120 MB BIA submitted file that is 83 s
+of transfer for a stage that keeps no bytes, and you transfer it again on `dvc pull`.
 
 | archive | publishes checksums? | `--no-download` cost |
 |---|---|---|
@@ -84,11 +119,13 @@ $ archivefs stat geo://GSE176078/GSE176078_RAW.tar | grep '"md5"'
   "md5": null,
 ```
 
-`null` means: either drop `--no-download` (one transfer instead of two), or supply a
-`.chiro` manifest so the checksum comes from metadata again. Background:
-[`decisions.md`](decisions.md) D14.
+`null` means you have a decision to make, and it is the one from the top of this page:
+supply a `.chiro` manifest and keep the reviewer route (the checksum then comes from
+metadata, so `--no-download` is cheap *and* pullable), or drop `--no-download` to save
+one transfer and accept that only a DVC remote will get the data to anyone else.
+Background: [`decisions.md`](decisions.md) D14 for the cost, D17 for the reviewer route.
 
-## Passing storage options: `--fs-config` or a remote
+## Passing storage options with `--fs-config`
 
 Some backends need a setting — which BIA view, which EGA layout, a manifest to use.
 Two ways, and they differ in what ends up in the committed file.
@@ -173,8 +210,22 @@ Cloning your repo and running `dvc pull` requires, in their environment:
 3. **Credentials, only for controlled access.** `zenodo://`, `geo://` and `bia://` are
    open. `ega://` needs their *own* EGA account, authorised by the relevant DAC — the
    `.dvc` file contains no credentials by design.
-4. **Nothing else.** No copy of your cache, no shared remote — the archive is the
-   remote.
+4. **A stage they can actually pull.** This is on *you*, not them, and it is the part
+   people get wrong. The archive is only usable as the remote when the stage was
+   imported with `--no-download` **and** the archive publishes a checksum. Otherwise
+   they need a DVC remote you have pushed to. Check before you hand the repo over:
+
+   ```console
+   $ grep -A3 '^outs' bulk.txt.gz.dvc
+   outs:
+   - hash: md5
+     path: bulk.txt.gz        # no `md5:` here → pullable from the archive
+   ```
+
+   An `md5:` under `outs` means a completed import, and a reviewer without your cache
+   or a remote will get `Checkout failed … Is your cache up to date?`. Fix it by
+   re-importing with `--no-download` and then `dvc pull` — you keep the data, they gain
+   the route. [`decisions.md`](decisions.md) D17.
 
 ## Troubleshooting
 
