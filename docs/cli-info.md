@@ -19,7 +19,7 @@ it is the first thing to run when something else fails in a confusing way.
 
 ```console
 $ archivefs info
-archivefs 0.0.0.post23
+archivefs 0.1.0
 
   ✓ ega://     ready                              European Genome-phenome Archive (controlled access; needs credentials)
   ✓ zenodo://  ready                              Zenodo records by id or DOI (public; token only for restricted)
@@ -69,13 +69,20 @@ $ archivefs dvc status >/dev/null || echo "DVC integration is not set up"
 ```console
 $ archivefs info --json | python -c 'import json,sys; d=json.load(sys.stdin); print(d["dvc"])'
 {'dvc_installed': True, 'hook_path': '/…/site-packages/archivefs_dvc.pth',
- 'hook_installed': False, 'registered': [], 'protocols': [...], 'deferred': ['dbgap']}
+ 'hook_installed': False, 'registered': ['bia', 'ega', 'geo', 'zenodo'],
+ 'protocols': ['bia', 'ega', 'geo', 'zenodo'], 'deferred': ['dbgap']}
 ```
 
 `hook_installed: False` with `dvc_installed: True` is the whole diagnosis: they have
 DVC, they have archivefs, and DVC cannot see it. One `archivefs dvc enable` in *their*
 environment fixes it. Note that the hook is per-environment — activating a different
 conda env is enough to lose it.
+
+**Do not read `registered` as the signal.** It is populated here even though the hook is
+missing, because `status()` *probes* — it performs the registration in this process
+before reporting, so the answer means "registration works" rather than "registration
+happened". `hook_installed` is the field that tells you whether it will happen in a
+`dvc` process.
 
 ## See also
 

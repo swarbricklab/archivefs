@@ -35,7 +35,7 @@ D4).
 ```console
 $ archivefs dvc enable          # writes a .pth into this env's site-packages
 $ archivefs info
-archivefs 0.0.0.post23
+archivefs 0.1.0
 
   ✓ ega://     ready
   ✓ zenodo://  ready
@@ -194,13 +194,17 @@ you will transfer it again on `dvc pull`.
 
 So, for the submitted tier, choose deliberately:
 
-* **Just download it.** `dvc import-url` *without* `--no-download` costs one
-  transfer instead of two, and you keep the bytes.
 * **Pick your files first.** Import the handful you need, not the study. Use `stat`
-  (§3) to choose them.
-* **Supply a `.chiro` manifest** if the deposit has one, or if you can make one:
-  `-o chiro=<url-or-path>`. Then the checksums come from the manifest and
-  `--no-download` is honest again.
+  (§3) to choose them. This is the one that saves the most.
+* **Supply a `.chiro` manifest** if the deposit has one, or if you can make one —
+  `--fs-config chiro=S-BIAD599.chiro.json`, committed beside the `.dvc`. Then the
+  checksums come from the manifest, `--no-download` is honest again, **and** a
+  collaborator can `dvc pull` from BIA without you hosting a copy. For the submitted
+  tier this is the only way they can ([`decisions.md`](decisions.md) D17, D18).
+* **Just download it**, accepting the consequence: `dvc import-url` *without*
+  `--no-download` costs one transfer instead of two and you keep the bytes, but the
+  recorded `outs.md5` stops DVC offering BIA as a fallback source, so nobody else can
+  pull it without a DVC remote you have pushed to. Fine for data only you need.
 * **Use the derived view** where its bytes are good enough.
 
 `dvc update f.tif.dvc` re-checks the source later and re-imports if it changed.

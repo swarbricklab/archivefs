@@ -62,14 +62,23 @@ nothing; `bia.attributes` says the organism, the channel and the label. Combined
 `ls --json`, that is a filter:
 
 ```console
-$ archivefs ls --json bia://S-BIAD599/20200220-ftp/experimentA \
+$ archivefs ls -R --json bia://S-BIAD599/20200220-ftp/experimentA/056F63395C \
   | python -c '
 import json,sys
 for e in json.load(sys.stdin):
     a = (e.get("bia") or {}).get("attributes", {})
     if "lyn-EGFP" in a.get("Experimental_Condition__Fluorescent_Labels_", ""):
         print(e["name"])'
+S-BIAD599/20200220-ftp/experimentA/056F63395C/056F63395C_8bit_lynEGFP.tif
+S-BIAD599/20200220-ftp/experimentA/056F63395C/056F63395C_8bit_lynEGFP_seg.tif
 ```
+
+**`-R` is load-bearing here.** `ls` is children-only, and the children of a BIA
+experiment directory are *directories* — one per image — which carry no
+`bia.attributes`. Without `-R` the filter silently matches nothing, which looks
+identical to "no image uses that label". Scope the recursion to one sample or one
+experiment rather than the whole study: `-R` calls `info()` per file, and `S-BIAD599`
+has 584 of them ([`cli-ls.md`](cli-ls.md)).
 
 ## Scenario: will this import be download-free?
 

@@ -40,7 +40,13 @@ So `body hash: ok · 1 failure(s)` is not a contradiction — it means "a trustw
 manifest, and a file that does not match it":
 
 ```console
+$ printf 'x' | dd of=./corrupt/github-mark.zip bs=1 seek=10 conv=notrunc   # same size
 $ archivefs verify -o chiro=./1486184.chiro.json zenodo://1486184 ./corrupt
+body hash: ok · checked 1 file(s) · 1 failure(s)
+  hash-mismatch    github-mark.zip
+
+$ truncate -s 800 ./short/github-mark.zip                                  # size changes
+$ archivefs verify -o chiro=./1486184.chiro.json zenodo://1486184 ./short
 body hash: ok · checked 1 file(s) · 1 failure(s)
   size-mismatch    github-mark.zip
 
@@ -48,6 +54,10 @@ $ archivefs verify -o chiro=./1486184.chiro.json zenodo://1486184 ./empty
 body hash: ok · checked 1 file(s) · 1 failure(s)
   missing          github-mark.zip
 ```
+
+The first is the one worth having a manifest for. A truncated or appended file changes
+size, so you could have caught it with `ls -l`; a file that is the *right size and the
+wrong bytes* is invisible to everything except a checksum.
 
 | status | meaning |
 |---|---|
