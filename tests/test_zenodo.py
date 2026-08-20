@@ -222,7 +222,7 @@ def test_restricted_record_without_token_says_what_to_do(fake_zenodo):
         fs.ls(RECID)
     message = str(exc.value)
     assert "ZENODO_TOKEN" in message
-    assert "never in the committed" in message
+    assert "docs/credentials.md" in message
 
 
 def test_token_from_env_is_used(fake_zenodo, monkeypatch):
@@ -529,3 +529,35 @@ def test_invalidating_one_spelling_invalidates_the_aliases(fs, fake_zenodo):
     fs.invalidate_cache(RECID)
     assert DOI not in fs._records
     assert CONCEPT_DOI not in fs._records
+
+
+def test_a_restricted_record_is_not_an_empty_directory(fake_zenodo):
+    """Zenodo answers 200 with metadata and *no* file list for a record you
+    cannot read — not 401, not 403.
+
+    Reporting that as an empty directory is the worst available outcome: `ls`
+    says the record holds nothing, and `dvc import-url` of the record writes an
+    empty .dir and exits 0, so a pipeline imports nothing and calls it success.
+    Measured on 10.5281/zenodo.18917100 (access_right: restricted).
+    """
+    fake_zenodo.record["files"] = []
+    fake_zenodo.record["metadata"]["access_right"] = "restricted"
+    fs = ZenodoFileSystem(skip_instance_cache=True)
+    with pytest.raises(AuthenticationError) as exc:
+        fs.ls(RECID)
+    message = str(exc.value)
+    assert "restricted" in message
+    assert "no file list" in message
+    assert "ZENODO_TOKEN" in message
+    # nothing was sent, so nothing was "rejected"
+    assert "refused access" in message
+    assert "rejected the credential" not in message
+    assert exc.value.used_credentials is False
+
+
+def test_an_open_record_with_no_files_is_still_empty_not_an_error(fake_zenodo):
+    """A metadata-only deposit is a legitimate thing; only restriction is an error."""
+    fake_zenodo.record["files"] = []
+    fake_zenodo.record["metadata"]["access_right"] = "open"
+    fs = ZenodoFileSystem(skip_instance_cache=True)
+    assert fs.ls(RECID, detail=False) == []

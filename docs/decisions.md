@@ -947,3 +947,47 @@ strictly better than no checksum, and it is the best available for an archive th
 publishes none, but it warrants differently from a Zenodo md5. A registry of published
 manifests would be a different thing again, and is not needed for this: see
 [`ideas.md`](ideas.md) #5 for the writing side.
+
+---
+
+## D19 — 🩹 a record you may not read is not an empty directory
+
+**Found by trying `zenodo://10.5281/zenodo.18917100`.** It listed nothing, exit 0.
+
+Zenodo answers a restricted record with **HTTP 200**, full metadata, and an *empty*
+`files` list — not 401, not 403:
+
+```console
+$ curl -s https://zenodo.org/api/records/18917100 | python -c '…'
+title:   Spatial Transcriptomics Data for Breast Cancer TLS and HEV Analysis
+files:   0 entries
+metadata.access_right: restricted
+```
+
+`_load_members` took `files: []` at face value, so `ls` reported an empty record and
+`archivefs`/DVC had nothing to complain about. That is the worst available outcome:
+`dvc import-url zenodo://<recid> dir/` on such a record writes an empty `.dir` and
+**exits 0**, so a pipeline imports nothing and reports success. The failure only
+surfaces later, as an analysis with no input.
+
+**Decision.** An empty file list is an error when `metadata.access_right` is
+`restricted`, `embargoed` or `closed`, naming the access level, the embargo date when
+there is one, and how to supply a token. An empty list on an *open* record stays empty:
+a metadata-only deposit is a legitimate thing, and a test pins both directions.
+
+This is the same principle the BIA backend already applied to short listings —
+*refuse a partial answer rather than silently hand over fewer files than the record
+has* (D13) — extended to the case where the partial answer is "none at all".
+
+**Two smaller things it exposed.**
+
+* **The remediation was stale.** It advised `dvc remote modify --local <remote>
+  token …`, which D16 made impossible — DVC now rejects the key outright. It now
+  points at `$ZENODO_TOKEN` or `~/.config/archivefs/zenodo.json` and says the setting
+  cannot go in DVC config at all.
+* **"Rejected the credential" was reported when none was sent.** The 401/403 path keyed
+  its wording on whether the *backend declares* a credential, so an anonymous request
+  to a restricted record produced `Zenodo rejected the credential (credential came
+  from: token from not found)`. It now keys on whether a credential was actually put on
+  the request, which is the honest signal and matters for any backend whose credential
+  is optional. Same distinction as D18's BIA fix, one layer down.

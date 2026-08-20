@@ -30,7 +30,11 @@ from urllib.parse import quote
 
 from archivefs.base import ArchiveFileSystem
 from archivefs.credentials import Credential
-from archivefs.errors import ArchiveNotFoundError, NotSupportedError
+from archivefs.errors import (
+    ArchiveNotFoundError,
+    AuthenticationError,
+    NotSupportedError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -146,9 +150,10 @@ class ZenodoFileSystem(ArchiveFileSystem):
     def _auth_remediation(self, status: int, url: str) -> str:
         if not self.token:
             return (
-                "this record is restricted or embargoed. Put a personal access "
-                "token in $ZENODO_TOKEN (or `dvc remote modify --local <remote> "
-                "token ...`) — never in the committed .dvc file."
+                "this record is restricted or embargoed. If you have been granted "
+                "access, put a personal access token in $ZENODO_TOKEN or in "
+                "~/.config/archivefs/zenodo.json (mode 0600). It cannot go in DVC "
+                "config or on the command line — see docs/credentials.md."
             )
         return (
             f"the token archivefs resolved from {self.token_source} was rejected. "
@@ -234,6 +239,26 @@ class ZenodoFileSystem(ArchiveFileSystem):
             # Some record views omit the file list; ask the dedicated endpoint.
             files = (self._get_json(f"{self.api_url}/records/{recid}/files") or {}).get(
                 "entries", []
+            )
+        # A record you may not read comes back HTTP 200 with metadata and an
+        # *empty* file list — not a 401, not a 403. Returning that as an empty
+        # directory is the worst outcome available: `ls` says the record is
+        # empty, and `dvc import-url` of the record records an empty .dir and
+        # exits 0, so a pipeline imports nothing and reports success. Measured on
+        # 10.5281/zenodo.18917100 (access_right: restricted).
+        metadata = record.get("metadata") or {}
+        access = metadata.get("access_right")
+        if not files and access in ("restricted", "embargoed", "closed"):
+            embargo = metadata.get("embargo_date")
+            detail = f"record {recid} is {access}"
+            if embargo:
+                detail += f" until {embargo}"
+            raise AuthenticationError(
+                self.archive_name,
+                f"{detail}; Zenodo served its metadata but no file list",
+                self._auth_remediation(403, container),
+                source=self.token_source if self.token else None,
+                used_credentials=bool(self.token),
             )
         provenance = self._record_provenance(record, requested=container)
         if provenance["resolved_from_concept"]:

@@ -255,7 +255,8 @@ class ArchiveFileSystem(AbstractFileSystem):
         may_refresh = allow_auth_refresh
         while True:
             attempt += 1
-            all_headers = self._auth_headers()
+            auth_headers = self._auth_headers()
+            all_headers = dict(auth_headers)
             all_headers.update(headers or {})
             try:
                 response = self.session.request(
@@ -280,7 +281,12 @@ class ArchiveFileSystem(AbstractFileSystem):
                 may_refresh = False
                 continue
             if status in (401, 403):
-                uses_credentials = bool(type(self).credentials)
+                # "Did we actually send a credential", not "does this backend
+                # declare one". Zenodo's token is optional, so an anonymous
+                # request to a restricted record was reporting "rejected the
+                # credential (credential came from: token from not found)" —
+                # blaming a credential that was never sent.
+                uses_credentials = bool(auth_headers)
                 origin = (self.creds.describe() or None) if uses_credentials else None
                 raise AuthenticationError(
                     self.archive_name,
