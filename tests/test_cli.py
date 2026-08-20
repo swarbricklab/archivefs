@@ -130,6 +130,22 @@ def test_unknown_protocol_is_refused(capsys):
     assert "archivefs speaks" in str(exc.value)
 
 
+def test_a_chained_url_is_refused_with_the_cli_equivalent():
+    """The chain is a documented form, so "unknown protocol 'zip'" is a dead end.
+
+    `docs/design.md` and `ZenodoFileSystem`'s docstring both write
+    ``zip://::zenodo://...``, so a reader will try it here first. It cannot work
+    — `-o` has no way to say which protocol an option belongs to — but the
+    refusal has to hand back the two forms that do.
+    """
+    with pytest.raises(SystemExit) as exc:
+        main(["ls", "zip://::zenodo://1486184/github-mark.zip"])
+    message = str(exc.value)
+    assert "chained fsspec URL" in message
+    assert "extract_zips=true zenodo://1486184/github-mark.zip" in message
+    assert "url_to_fs" in message
+
+
 def test_a_bare_word_is_not_a_url():
     with pytest.raises(SystemExit) as exc:
         main(["ls", "GSE176078"])

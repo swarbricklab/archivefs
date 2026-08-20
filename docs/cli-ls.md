@@ -111,6 +111,34 @@ Opt-in, Zenodo only, and it reads the ZIP's central directory over ranged reques
 rather than fetching the archive. Members are checked for zip-slip, symlinks and
 absurd compression ratios at *listing* time ([`decisions.md`](decisions.md) D9).
 
+Note the `-R`. Without it, `ls` is children-only — as fsspec requires — so a
+record-level listing shows the ZIP as the one entry it is, and looks identical to
+the listing with expansion off:
+
+```console
+$ archivefs ls -o extract_zips=true zenodo://1486184
+1486184/github-mark.zip
+```
+
+That is not expansion failing. To see inside, recurse with `-R` or address the ZIP
+itself — `archivefs ls -o extract_zips=true zenodo://1486184/github-mark.zip`. To
+confirm expansion is on at all, use `-l`: an expanded ZIP has no checksum of its
+own, so the digest column goes to `-`.
+
+```console
+$ archivefs ls -l -o extract_zips=true zenodo://1486184
+       853 B  -                                 1486184/github-mark.zip
+```
+
+The container's MD5 has not been lost — it moves to `zenodo.container_md5`, where
+it describes the archive rather than the directory standing in for it. `archivefs
+stat` shows it, with the integrity contract spelled out ([`cli-stat.md`](cli-stat.md)).
+
+The chained form `zip://::zenodo://1486184/github-mark.zip` that `design.md` writes
+is an **fsspec/Python** URL, not a CLI one: `-o` has no way to say which protocol
+an option belongs to. In Python it is `fsspec.core.url_to_fs(...)`; on the CLI use
+`-o extract_zips=true`. Typing the chain here gets you that advice, not a listing.
+
 ## Scenario: list with a manifest instead of the archive's listing
 
 ```console

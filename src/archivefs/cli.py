@@ -35,6 +35,19 @@ def _filesystem(url: str, options: list[str] | None = None) -> tuple[Any, str]:
             f"{url!r} does not look like an archive URL. Expected e.g. "
             f"zenodo://1486184 or ega://EGAD00001006673/EGAF00004908765."
         )
+    if "::" in url:
+        # A chained URL is an fsspec/Python form: its storage options nest per
+        # protocol, and `-o key=value` has nowhere unambiguous to go. Say so and
+        # give the CLI equivalent, rather than leave the reader with "unknown
+        # protocol 'zip'" for a URL the docs told them to write.
+        inner = url.split("::", 1)[1]
+        raise SystemExit(
+            f"{url!r} is a chained fsspec URL, which this CLI does not take — "
+            f"`-o` could not tell which protocol an option belonged to. Either\n"
+            f"  archivefs ls -o extract_zips=true {inner}\n"
+            f"or, for the chain itself, use Python:\n"
+            f'  fsspec.core.url_to_fs("{url}")'
+        )
     if protocol not in PROTOCOLS:
         raise SystemExit(
             f"unknown protocol {protocol!r}. archivefs speaks: "

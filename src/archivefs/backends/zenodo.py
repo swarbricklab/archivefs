@@ -15,6 +15,11 @@ URL grammar
     zenodo://10.5281/zenodo.1486183           # concept DOI -> latest version
     zip://::zenodo://1486184/github-mark.zip  # the ZIP's interior (fsspec chain)
 
+The first four work anywhere a URL does, including the CLI. The chain is Python
+only — ``fsspec.core.url_to_fs``/``fsspec.open`` — because chained storage options
+nest per protocol and the CLI's flat ``-o key=value`` cannot express that; the CLI
+equivalent is ``-o extract_zips=true`` on the ZIP's own path.
+
 Zenodo is the reference case for a reason: every file comes with an MD5 in the
 record metadata, so ``info()`` is download-free *and* content-verified, and a
 version DOI is immutable — which is what makes the ZIP integrity argument below
@@ -512,8 +517,13 @@ class ZenodoFileSystem(ArchiveFileSystem):
 
         entries = super().ls(path, detail=True, **kwargs)
         if self.extract_zips:
+            # Through `_container_as_directory`, not a local `type` flip: a
+            # listing and an `info()` of the same path must agree, and that
+            # helper is where the "a directory carries no md5 of its own" rule
+            # lives. It reads the member cache `super().ls` just populated, so
+            # this costs no requests and does not open the ZIP.
             entries = [
-                {**e, "type": "directory"}
+                self._container_as_directory(str(e["name"]))
                 if str(e.get("name", "")).lower().endswith(".zip")
                 else e
                 for e in entries

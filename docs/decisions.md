@@ -1047,3 +1047,52 @@ route with ZIP expansion is not currently possible:
 The second is the better default for a published analysis, and it is what D9 already
 implied — "if you want a genuinely download-free pin, import the ZIP" — now with the
 reviewer consequence spelled out.
+
+## D21 — 🩹 a listing and an `info()` of the same expanded ZIP must agree; the CLI takes no chained URLs
+
+**Found by checking a report that neither `archivefs ls -o extract_zips=true
+zenodo://<recid>` nor `archivefs ls zip://::zenodo://<recid>` "was able to list
+inside the zip files".** Neither was a ZIP-expansion failure, and both were real
+defects — one in the code, one in what the docs promise.
+
+**The listing bug.** `ZenodoFileSystem.ls` flipped only `type`:
+
+```python
+{**e, "type": "directory"} if name.lower().endswith(".zip") else e
+```
+
+leaving the container's md5 in the `md5` field of something it had just called a
+directory — the exact thing `_container_as_directory` exists to prevent, and whose
+docstring, one screen away, says why: "leaving the archive's md5 in the `md5` field
+would offer a consumer a checksum for something it is not going to write." So
+`ls --json` reported `type: directory` with `md5: 49f6a914…` while `stat` on the
+same path reported `md5: null, container_md5: 49f6a914…`. `archivefs ls -l` printed
+a checksum next to a directory. `ls` now routes ZIP entries through that helper; it
+reads the member cache `super().ls` has just populated, so it costs no requests and
+does not open the ZIP — a second test pins that, because reaching for `zip_view`
+here would open every ZIP in a record just to list it.
+
+No test caught this: the only coverage asserted `type == "directory"` and stopped.
+The replacement asserts the whole entry equals `info()` on the same path — an
+equality, so it cannot rot into checking one field again.
+
+**The listing that looked broken but wasn't.** `ls` is children-only, as fsspec
+requires, so a record-level listing shows the ZIP as one entry whether expansion is
+on or off. Byte-identical output for both, and before the fix `-l` showed a size and
+an md5 too, so there was *no* signal available to the user that expansion was
+working. Now `-l` shows `-` in the digest column, which is the tell; `-R`, or
+addressing the ZIP directly, is how to see inside. Written up in `cli-ls.md`.
+
+**The chained URL.** `zip://::zenodo://…` is an fsspec/Python form only — verified
+working through `fsspec.core.url_to_fs` — but the CLI refuses it, and refusing is
+right: chained storage options nest per protocol and a flat `-o key=value` cannot
+say which protocol an option belongs to. The bug was that `zenodo.py` listed it in
+the same URL-grammar block as the four forms that *do* work anywhere, so a reader
+would reasonably type it at a shell and get `unknown protocol 'zip'` — a dead end
+that names neither of the two forms that work.
+
+**Decision: keep the CLI protocol-only, and make the refusal do the teaching.** It
+now names the `-o extract_zips=true` equivalent and the `url_to_fs` form, both
+verified before shipping. Widening the CLI to accept chains would mean inventing a
+syntax for per-protocol options, which is a real feature and not one anybody has
+asked for. The URL-grammar block now marks the chain as Python-only.

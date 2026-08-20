@@ -259,6 +259,34 @@ def test_zip_member_becomes_a_directory(zfs):
     assert entries[f"{RECID}/samples.csv"]["type"] == "file"
 
 
+def test_listing_a_record_does_not_open_its_zips(zfs, fake_zenodo):
+    """Routing `ls` through `_container_as_directory` must stay request-free.
+
+    It reads the member cache `super().ls` just populated; if it ever reached for
+    `zip_view` instead, listing a record of ZIPs would open every one of them.
+    """
+    zfs.ls(RECID)
+    assert fake_zenodo.bytes_served == 0
+
+
+def test_listing_and_info_agree_about_an_expanded_zip(zfs):
+    """A listed entry and an ``info()`` of the same path must not disagree.
+
+    `ls` used to flip only ``type``, leaving the container's md5 in the ``md5``
+    field of something it had just called a directory — precisely what
+    ``_container_as_directory`` exists to prevent. ``archivefs ls -l`` then
+    printed a checksum for a directory, and any consumer reading md5 off a
+    listing got a hash for bytes it was never going to write.
+    """
+    listed = {e["name"]: e for e in zfs.ls(RECID)}[f"{RECID}/archive.zip"]
+    assert listed == zfs.info(f"{RECID}/archive.zip")
+    assert listed["md5"] is None
+    assert listed["checksum"] is None
+    assert listed["checksum_type"] is None
+    # ...and the strong download-free hash is still reachable, just relabelled.
+    assert listed["zenodo"]["container_md5"]
+
+
 def test_zip_interior_listing_is_download_free(zfs, fake_zenodo):
     """Non-negotiable per docs/design.md: list from the central directory only."""
     names = zfs.find(f"{RECID}/archive.zip")
