@@ -376,3 +376,39 @@ def test_completed_import_is_not_pullable_without_a_remote(repo):
     clone, result = _clone_and_pull(root, "reviewer-full", dvc_bin)
     assert result.returncode != 0
     assert not (clone / "logo.zip").exists()
+
+
+def test_an_expanded_zip_import_must_not_use_no_download(repo):
+    """`--no-download` + extract_zips writes a stage that cannot be pulled.
+
+    Not even locally: fetch transfers nothing and checkout fails with
+    `CheckoutError`. A zip member publishes no md5 (D9 — member integrity is
+    CRC32 plus the workspace hash at extraction), so the recorded .dir has no
+    per-member checksum for DVC to fetch against, and the source-fallback that
+    makes a plain partial import pullable (D17) has nothing to work with.
+
+    Pinned so we notice if DVC changes it. A full import (no --no-download) works
+    and is what decisions.md D20 tells people to use.
+    """
+    root, run = repo
+    assert run(
+        "import-url", "--no-download", "--fs-config", "extract_zips=true", "--",
+        ZENODO_FILE, "tree",
+    ).returncode == 0
+    spec = yaml.safe_load((root / "tree.dvc").read_text())
+    assert spec["deps"][0]["md5"].endswith(".dir")  # the stage looks fine...
+    assert run("pull").returncode != 0             # ...and cannot be materialised
+    assert not (root / "tree").exists()
+
+
+def test_an_expanded_zip_full_import_does_work(repo):
+    """The supported form: no --no-download, bytes land at import time."""
+    root, run = repo
+    result = run(
+        "import-url", "--fs-config", "extract_zips=true", "--", ZENODO_FILE, "tree"
+    )
+    assert result.returncode == 0, result.stderr
+    assert sorted(p.name for p in (root / "tree").iterdir()) == [
+        "github-mark.svg",
+        "md5sum",
+    ]

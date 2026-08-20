@@ -991,3 +991,59 @@ has* (D13) — extended to the case where the partial answer is "none at all".
   from: token from not found)`. It now keys on whether a credential was actually put on
   the request, which is the honest signal and matters for any backend whose credential
   is optional. Same distinction as D18's BIA fix, one layer down.
+
+---
+
+## D20 — 🩹 an **expanded** ZIP cannot be pulled; import zips opaquely if a reviewer must
+
+**Found by checking a report that `dvc import-url` "downloaded ZIP files without
+expanding them".** It had not: `extract_zips` is off by default, exactly as
+`design.md` specifies ("Opt-in, not automatic. Some ZIPs are genuine archival units
+and shouldn't" be sprayed across a workspace) and as `plan.md` records. All three
+documented routes to expansion work, verified on `zenodo://1486184`:
+
+| route | result |
+|---|---|
+| `dvc import-url --fs-config extract_zips=true -- zenodo://1486184/github-mark.zip tree` | `tree/{github-mark.svg,md5sum}`, dep is a `.dir` with `nfiles: 2` |
+| the same on a whole record | `record/github-mark.zip/{…}` — the zip becomes a *directory* keeping its `.zip` name |
+| `zip://::zenodo://1486184/github-mark.zip` through plain fsspec | `ZipFileSystem`, members listed |
+
+**What the check did find.** Adding `--no-download` to an expanded-zip import writes
+a stage that **cannot be materialised at all** — not by a reviewer, not by you:
+
+```console
+$ dvc import-url --no-download --fs-config extract_zips=true -- \
+    zenodo://1486184/github-mark.zip tree
+$ dvc pull
+ERROR: failed to pull data from the cloud - Checkout failed for following targets:
+tree
+```
+
+Fetch transfers nothing, then checkout fails. The filesystem is not at fault:
+`archivefs get -o extract_zips=true zenodo://1486184/github-mark.zip/md5sum` reads a
+member fine, and so does plain `fsspec.filesystem("zenodo", extract_zips=True)`. The
+missing piece is a per-member checksum — a ZIP member publishes no md5 (D9: member
+integrity is CRC32 from the central directory plus the workspace hash at extraction),
+so the recorded `.dir` gives DVC nothing to fetch against, and the source-fallback
+that makes an ordinary partial import pullable (D17) has nothing to work with. A
+*plain* directory partial import is pullable, which is what localises this to zip
+expansion.
+
+**Decision: document and pin rather than work around.** Two tests hold both halves —
+the expanded partial import fails, the expanded full import succeeds — so a future
+DVC that fixes this fails the negative test and tells us to update this entry.
+
+**The guidance that follows, and it is a real trade-off.** Combining the D17 reviewer
+route with ZIP expansion is not currently possible:
+
+* **Expansion, no reviewer route.** Full `dvc import-url --fs-config
+  extract_zips=true`. Bytes land at import; anyone else needs a DVC remote you have
+  pushed to.
+* **Reviewer route, no expansion.** `--no-download` then `dvc pull` on the ZIP as an
+  opaque file. The archive publishes the *container's* md5, so this is download-free,
+  pinned, and pullable from the archive by anyone. Expand it in the pipeline
+  (`unzip`, or `zip://::` in the code that reads it) rather than at import.
+
+The second is the better default for a published analysis, and it is what D9 already
+implied — "if you want a genuinely download-free pin, import the ZIP" — now with the
+reviewer consequence spelled out.

@@ -52,7 +52,7 @@ private file, and every other route is refused. See
 | `ega` | `credentials_file` | path | JSON file to read username + password from — a *path*, so it may be committed |
 | | `layout` | `accession` (default), `display`, `nested` | how dataset members are named ([`decisions.md`](decisions.md) D7) |
 | | `api_url` | URL | override the EGA API endpoint |
-| `zenodo` | `extract_zips` | `true`, `false` (default) | list ZIP contents as directories, read members by range |
+| `zenodo` | `extract_zips` | `true`, `false` (default) | list ZIP contents as directories, read members by range. **Off by default on purpose** — some ZIPs are archival units. Do not combine with `--no-download`: the stage cannot then be pulled ([`decisions.md`](decisions.md) D20) |
 | | `api_url` | URL | override the Zenodo API endpoint |
 | `geo` | `view` | `supplementary` (default), `raw` | `raw` is a deliberate seam and refuses with an explanation |
 | | `base_url` | URL | override the GEO FTP-over-HTTPS root |

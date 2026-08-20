@@ -112,6 +112,28 @@ checksums — unlike `dvc import` from another DVC repo, which pushes nothing. B
 means hosting a copy of data that is already published, which is usually the thing you
 were trying to avoid.
 
+### ZIPs: expansion and the reviewer route are mutually exclusive
+
+`extract_zips=true` presents a Zenodo `.zip` as a directory. It is **off by default**
+— some ZIPs are archival units, not folders — so a plain import gives you the `.zip`
+file, which is expected rather than a bug.
+
+You cannot currently have both expansion and a reviewer-pullable stage:
+
+```console
+# expansion — works, but only you can materialise it
+$ dvc import-url --fs-config extract_zips=true -- zenodo://<rec>/archive.zip tree
+
+# reviewer route — works, but the ZIP stays opaque
+$ dvc import-url --no-download zenodo://<rec>/archive.zip archive.zip && dvc pull
+```
+
+Combining them writes a stage that **cannot be pulled at all**, not even locally: a
+ZIP member publishes no md5, so the recorded `.dir` gives DVC nothing to fetch against
+([`decisions.md`](decisions.md) D20). For a published analysis prefer the second and
+expand in the pipeline — the archive publishes the *container's* checksum, so the pin
+is download-free and anyone can pull it.
+
 ### The cost side of `--no-download`
 
 `--no-download` records a **correct** checksum, and where the archive publishes none,
