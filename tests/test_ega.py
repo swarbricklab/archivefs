@@ -446,19 +446,23 @@ pytestmark_network = pytest.mark.network
 
 
 @pytest.fixture
-def live_fs():
+def live_fs(monkeypatch):
     """The live EGA service, via EGA's own published test account.
 
     ``ega-test-data@ebi.ac.uk`` ships inside pyega3
     (``config/default_credential_file.json``) and serves only synthetic data.
+
+    Credentials go through the *environment*, not constructor options. D16 refuses
+    option-supplied credentials outright, so passing them here raised
+    `CredentialSourceError` — which nobody saw, because this fixture only runs under
+    `ARCHIVEFS_TEST_EGA=1`. Using a supported source is also the better test: it
+    exercises the lookup chain a real user goes through.
     """
     if os.environ.get("ARCHIVEFS_TEST_EGA", "") != "1":
         pytest.skip("set ARCHIVEFS_TEST_EGA=1 to hit the live EGA service")
-    return EGAFileSystem(
-        username="ega-test-data@ebi.ac.uk",
-        password="egarocks",
-        skip_instance_cache=True,
-    )
+    monkeypatch.setenv("EGA_USERNAME", "ega-test-data@ebi.ac.uk")
+    monkeypatch.setenv("EGA_PASSWORD", "egarocks")
+    return EGAFileSystem(skip_instance_cache=True)
 
 
 @pytest.mark.network

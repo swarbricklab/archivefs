@@ -159,6 +159,59 @@ Only after this should the `extract_zips` default be reconsidered — flipping i
 expansion still costs the reviewer route would trade away the project's core promise
 for convenience.
 
+### 0e. Make `pip install 'archivefs[chiro]'` a command that can actually succeed
+**Effort: hours, once chirograph is published. Value: it is on the critical path to
+going public.**
+
+`pyproject.toml` declares `chiro = ["chirograph>=0.1"]`, and four places tell the
+user to install it: `README.md`, `cli.py`'s `info` output, `base.py`'s
+manifest-missing warning, and D5's write-up. **chirograph is not on PyPI** — `pip
+index versions chirograph` and a `--dry-run` install both come back "No matching
+distribution found". It exists only as an unpublished local repo
+(`/scratch/a56/jr9959/chirograph`, version 0.1.0).
+
+So today the advice archivefs gives when it hits a manifest it cannot read is advice
+that cannot be followed, by anyone, including us. That is worse than no advice: the
+warning reads as "you forgot a step" when the step does not exist yet.
+
+Consequences beyond the message:
+
+* **The chiro layer is untested by default.** `tests/test_chiro.py` has a
+  module-level `pytest.importorskip("chirograph")`, so the whole file — plus 10
+  tests in `test_cli.py` — silently skips. That is the layer `design.md` calls the
+  central abstraction, and the one D18 and #0d both build on. With chirograph on
+  `PYTHONPATH` all 67 of them pass, so the code is fine; the *default* signal is
+  what is misleading, since a green run says nothing about chiro.
+* **Going public makes it visible.** A stranger following the README hits it
+  immediately.
+
+Options, cheapest first: publish chirograph to PyPI and keep the extra as-is;
+or point the extra at a VCS URL, which works for `pip` but cannot be uploaded to
+PyPI as a dependency; or drop the extra and document a manual install, which is
+honest but gives up the `[chiro]` ergonomics. Publishing is clearly right if
+chirograph is meant to be a real package — its own repo, LICENSE and test suite say
+it is.
+
+Meanwhile the suite should not report green while skipping its central abstraction:
+make the skip loud (a warning summary, or a marker that CI must run) rather than one
+quiet `SKIPPED` line.
+
+**This is a pattern, not one bug.** Every gate in the suite — `chirograph` absent,
+`ARCHIVEFS_TEST_EGA`, `_DVC`, `_ZENODO`, `_GEO`, `_BIA` — hides code that can rot
+unnoticed, and two instances turned up the first time they were all switched on
+together (2026-08-21):
+
+* `tests/test_chiro.py` plus 10 CLI tests never ran at all. They pass (67) once
+  chirograph is importable.
+* The three live EGA tests **errored**: their fixture passed `username`/`password`
+  as constructor options, which D16 had made a `CredentialSourceError` months of
+  green runs earlier. Fixed by putting them in the environment — which is also the
+  better test, since it exercises the lookup chain a user actually goes through.
+
+So a default `pytest` run proves less than it appears to. Worth: a CI job that runs
+everything, and a default-run summary that says plainly which capabilities were not
+exercised.
+
 ### 1. Report the EGA range-alignment bug upstream
 **Effort: an hour. Value: high, and not just to us.**
 
