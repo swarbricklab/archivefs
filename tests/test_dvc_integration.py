@@ -387,8 +387,16 @@ def test_an_expanded_zip_import_must_not_use_no_download(repo):
     per-member checksum for DVC to fetch against, and the source-fallback that
     makes a plain partial import pullable (D17) has nothing to work with.
 
-    Pinned so we notice if DVC changes it. A full import (no --no-download) works
-    and is what decisions.md D20 tells people to use.
+    Pinned so we notice if *our* behaviour changes — not DVC's. A probe that forced
+    a per-member md5 in made `dvc pull` materialise this exact stage, from a fresh
+    clone with no remote, without altering the .dvc file at all
+    (evidence/zip-member-md5-pull-probe-2026-08-21.md). So this test guards the
+    consequence of `_zip_info` reporting `md5 = None`, and it should start failing
+    the day a .chiro manifest can supply ZIP-member checksums (ideas.md #0d) — at
+    which point invert it rather than delete it.
+
+    A full import (no --no-download) works and is what decisions.md D20 tells
+    people to use meanwhile.
     """
     root, run = repo
     assert run(

@@ -1033,6 +1033,27 @@ expansion.
 the expanded partial import fails, the expanded full import succeeds — so a future
 DVC that fixes this fails the negative test and tells us to update this entry.
 
+> **Corrected 2026-08-21 — this is our gap, not DVC's.** The paragraph above says
+> "a future DVC that fixes this", which was the wrong diagnosis. A probe
+> ([`evidence/zip-member-md5-pull-probe-2026-08-21.md`](evidence/zip-member-md5-pull-probe-2026-08-21.md))
+> forced a per-member md5 into `_zip_info` and re-ran the exact sequence: `dvc pull`
+> then materialises the tree from Zenodo — in the same repo, from a stage written
+> *before* the change, and in a fresh `git clone` with no remote. The `.dvc` file is
+> byte-identical either way, so nothing about the recorded format needs to change and
+> already-committed stages become pullable retroactively. DVC needs no fix.
+>
+> The real cause is that `_zip_info` sets `md5 = None`, which is the same thing
+> `geo.py` does for the same principled reason — never substitute a token that is not
+> a content checksum. So ZIP members are in GEO's position, and the answer is GEO's
+> answer: a `.chiro` sidecar. The gap is that the chiro layer runs at *record* level
+> (`_resolve_with_manifest` fills the container's member cache) and never reaches ZIP
+> interiors. The probe's `md5(view.cat_file(member))` must not ship — computing a
+> member hash inside `info()` would turn a download-free listing into a full download
+> of the archive.
+>
+> So the trade-off below is real **today**, but it is not inherent, and the negative
+> test pins our behaviour rather than DVC's. See `ideas.md` #0d.
+
 **The guidance that follows, and it is a real trade-off.** Combining the D17 reviewer
 route with ZIP expansion is not currently possible:
 

@@ -1,0 +1,16 @@
+a/src/archivefs/backends/zenodo.py	2026-08-20 21:39:34.000000000 +1000
+b/archivefs/backends/zenodo.py	2026-08-21 21:04:05.000000000 +1000
+@@ -486,8 +486,11 @@
+             # from the extracted bytes. Soundness rests on version immutability.
+             container = self._member(*self.split_path(zip_path))
+             info["crc32"] = info.get("CRC")
+-            info["md5"] = None
+-            info["checksum"] = None
++            # EXPERIMENT: compute the member md5 from its bytes, to test whether a
++            # per-member md5 is what `dvc pull` needs for an expanded ZIP.
++            import hashlib as _h
++            info["md5"] = _h.md5(view.cat_file(interior)).hexdigest()  # noqa: S324
++            info["checksum"] = info["md5"]
+             info["zenodo"] = {
+                 **container["zenodo"],
+                 "container": container["name"],

@@ -89,6 +89,10 @@ markers = [
 [tool.ruff]
 line-length = 88
 src = ["src", "tests"]
+# docs/evidence holds measurement scripts committed exactly as they were run, next
+# to the write-up of what they produced. Their value is that the numbers can be
+# reproduced from the same code, so tidying them would misrepresent the record.
+extend-exclude = ["docs/evidence"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "RUF", "S", "BLE"]

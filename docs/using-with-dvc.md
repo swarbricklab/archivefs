@@ -112,11 +112,16 @@ checksums — unlike `dvc import` from another DVC repo, which pushes nothing. B
 means hosting a copy of data that is already published, which is usually the thing you
 were trying to avoid.
 
-### ZIPs: expansion and the reviewer route are mutually exclusive
+### ZIPs: expansion and the reviewer route cannot yet be combined
 
-`extract_zips=true` presents a Zenodo `.zip` as a directory. It is **off by default**
-— some ZIPs are archival units, not folders — so a plain import gives you the `.zip`
-file, which is expected rather than a bug.
+`extract_zips=true` presents a Zenodo `.zip` as a directory. It is **off by default**,
+so a plain import gives you the `.zip` file — expected rather than a bug.
+
+(The default is *not* justified by "some ZIPs are archival units". On Zenodo that
+turns out to be unevidenced: of 40 real ZIPs inspected, ~80% are a single top-level
+directory and none was a ZIP that must stay zipped —
+[`evidence/zenodo-zip-shape-2026-08-21.md`](evidence/zenodo-zip-shape-2026-08-21.md).
+What keeps it off is the limitation below.)
 
 You cannot currently have both expansion and a reviewer-pullable stage:
 
@@ -129,10 +134,17 @@ $ dvc import-url --no-download zenodo://<rec>/archive.zip archive.zip && dvc pul
 ```
 
 Combining them writes a stage that **cannot be pulled at all**, not even locally: a
-ZIP member publishes no md5, so the recorded `.dir` gives DVC nothing to fetch against
-([`decisions.md`](decisions.md) D20). For a published analysis prefer the second and
-expand in the pipeline — the archive publishes the *container's* checksum, so the pin
-is download-free and anyone can pull it.
+ZIP member publishes no md5, so `info()` reports none and DVC has nothing to fetch
+against ([`decisions.md`](decisions.md) D20). For a published analysis prefer the
+second and expand in the pipeline — the archive publishes the *container's* checksum,
+so the pin is download-free and anyone can pull it.
+
+This is a gap in archivefs, not in DVC. Forcing a per-member md5 in makes `dvc pull`
+materialise the expanded tree straight from Zenodo, in a fresh clone with no remote,
+without changing the `.dvc` file at all — so stages you commit today would start
+working retroactively once a `.chiro` manifest can supply member checksums
+([`evidence/zip-member-md5-pull-probe-2026-08-21.md`](evidence/zip-member-md5-pull-probe-2026-08-21.md),
+[`ideas.md`](ideas.md) #0d). Until then the two routes stay separate.
 
 ### The cost side of `--no-download`
 

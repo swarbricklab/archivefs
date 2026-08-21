@@ -116,6 +116,49 @@ Three things to settle first, one of which is a real obstacle:
 Worth doing (b) and skipping (a): a half-measure that only works when you already know
 the answer is not worth the surface area.
 
+### 0d. Let a `.chiro` manifest supply ZIP-member checksums
+**Effort: a few days. Value: high — it unblocks expansion *and* the reviewer route.**
+
+Measured, not assumed: forcing a per-member md5 into `_zip_info` makes `dvc pull`
+materialise an expanded ZIP straight from Zenodo, in a fresh `git clone` with no DVC
+remote, and it does so for a stage written *before* the change, because the `.dvc`
+file is byte-identical either way
+([`evidence/zip-member-md5-pull-probe-2026-08-21.md`](evidence/zip-member-md5-pull-probe-2026-08-21.md)).
+So [D20](decisions.md) is our gap, not DVC's, and closing it is retroactive — stages
+committed today start working.
+
+Why this matters more than it sounds: Zenodo's file namespace is flat (of 5592 keys
+across 900 records, the only 55 containing a `/` are the GitHub-release integration),
+so **directory-structured data on Zenodo can only be a ZIP**. Expansion is not a
+convenience feature there; it is how you address a deposit's actual structure. And
+~80% of real Zenodo ZIPs are a single top-level directory
+([`evidence/zenodo-zip-shape-2026-08-21.md`](evidence/zenodo-zip-shape-2026-08-21.md)).
+
+The shape of the work:
+
+1. **Reach ZIP interiors from the chiro layer.** `_resolve_with_manifest` runs at
+   *record* level, filling the container's member cache; `_zip_info` builds member
+   entries independently and hard-sets `md5 = None`. Decide how a manifest addresses
+   a member — almost certainly the two-path model already in use, with `source` as
+   `archive.zip/outs/…`.
+2. **Do not compute md5 by streaming.** The probe did, deliberately, and it must not
+   ship: hashing a member inside `info()` turns a download-free listing into a full
+   download of the archive. `geo.py` states the rule — never substitute a token that
+   is not a content checksum — and ZIP members sit in exactly GEO's position.
+3. **Write the manifests** (#5 is the same machinery): for our own deposits, capture
+   the interior at deposit time. For third-party ZIPs, a manifest can only be
+   *observed* — one download, recorded once, reusable by everyone after.
+4. **Invert the negative test** in `test_dvc_integration.py` when it lands.
+
+Worth noting ZIP members are better placed than GEO files for verification: the
+central directory publishes a **CRC32** per member, download-free, and `_zip_info`
+already records it as `crc32`. DVC cannot consume CRC32 as a content hash, but
+archivefs can use it to catch a corrupt member without trusting the workspace hash.
+
+Only after this should the `extract_zips` default be reconsidered — flipping it while
+expansion still costs the reviewer route would trade away the project's core promise
+for convenience.
+
 ### 1. Report the EGA range-alignment bug upstream
 **Effort: an hour. Value: high, and not just to us.**
 
