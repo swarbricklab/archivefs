@@ -259,6 +259,37 @@ def test_zip_member_becomes_a_directory(zfs):
     assert entries[f"{RECID}/samples.csv"]["type"] == "file"
 
 
+def test_an_inner_zip_stays_a_file(fake_zenodo):
+    """Expansion is one level deep: outer ZIPs open, ZIPs *inside* them do not.
+
+    Recursing would make listing cost unbounded ranged reads (every nested ZIP
+    opened to list it) and would bury the point at which the integrity contract
+    stops being checkable. One level is where the container md5 still means
+    something.
+    """
+    inner = io.BytesIO()
+    with zipfile.ZipFile(inner, "w") as zf:
+        zf.writestr("secret/deep.txt", b"inside the inner zip")
+    outer = io.BytesIO()
+    with zipfile.ZipFile(outer, "w") as zf:
+        zf.writestr("top.txt", b"plain member")
+        zf.writestr("nested/payload.zip", inner.getvalue())
+    fake_zenodo.bodies["archive.zip"] = outer.getvalue()
+    fake_zenodo.record["files"][0]["size"] = len(outer.getvalue())
+    fake_zenodo.record["files"][0]["checksum"] = (
+        f"md5:{hashlib.md5(outer.getvalue()).hexdigest()}"  # noqa: S324
+    )
+    fs = ZenodoFileSystem(extract_zips=True, skip_instance_cache=True)
+
+    assert fs.info(f"{RECID}/archive.zip")["type"] == "directory"
+    inner_path = f"{RECID}/archive.zip/nested/payload.zip"
+    assert fs.info(inner_path)["type"] == "file"
+    assert not fs.isdir(inner_path)
+    # its bytes are readable as the ZIP it is, and it has no interior here
+    assert fs.cat_file(inner_path) == inner.getvalue()
+    assert f"{inner_path}/secret/deep.txt" not in fs.find(f"{RECID}/archive.zip")
+
+
 def test_listing_a_record_does_not_open_its_zips(zfs, fake_zenodo):
     """Routing `ls` through `_container_as_directory` must stay request-free.
 
