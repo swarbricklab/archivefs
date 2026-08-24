@@ -141,17 +141,21 @@ def _make_dvc_class(name: str, protocol: str, fsspec_class_path: str) -> type:
     )
 
 
-#: wrapper class name -> (protocol, the fsspec class it wraps). The classes are
-#: built on first *attribute access*, not at import, because building one needs
-#: ``dvc_objects`` — and this module must be importable without DVC installed, or
-#: ``archivefs info`` cannot even report that DVC is absent. DVC resolves our
-#: wrappers by string path (``archivefs.dvcfs.ZenodoDVCFileSystem``) and so goes
-#: through ``getattr`` on the module, which is exactly what ``__getattr__`` serves.
+#: wrapper class name -> (protocol, the fsspec class it wraps). Derived from the
+#: archive profiles in ``registry.py`` rather than written out, because this used to
+#: be one of four parallel protocol-keyed dicts here and they drifted; a profile with
+#: no ``dvc_wrapper`` (dbGaP, deferred) is absent from all of them by construction.
+#:
+#: The classes are built on first *attribute access*, not at import, because building
+#: one needs ``dvc_objects`` — and this module must be importable without DVC
+#: installed, or ``archivefs info`` cannot even report that DVC is absent. DVC
+#: resolves our wrappers by string path (``archivefs.dvcfs.ZenodoDVCFileSystem``) and
+#: so goes through ``getattr`` on the module, which is exactly what ``__getattr__``
+#: serves.
 _WRAPPERS: dict[str, tuple[str, str]] = {
-    "EGADVCFileSystem": ("ega", "archivefs.backends.ega.EGAFileSystem"),
-    "ZenodoDVCFileSystem": ("zenodo", "archivefs.backends.zenodo.ZenodoFileSystem"),
-    "GEODVCFileSystem": ("geo", "archivefs.backends.geo.GEOFileSystem"),
-    "BIADVCFileSystem": ("bia", "archivefs.backends.bia.BIAFileSystem"),
+    backend.dvc_wrapper: (backend.protocol, backend.class_path)
+    for backend in PROTOCOLS.values()
+    if backend.dvc_wrapper
 }
 _built: dict[str, type] = {}
 
@@ -169,44 +173,29 @@ def __dir__() -> list[str]:
     return sorted({*globals(), *_WRAPPERS})
 
 
-#: protocol -> our DVC wrapper's import path. dbGaP is absent on purpose: it is
-#: deferred, and registering it with DVC would advertise a backend that refuses.
+#: protocol -> our DVC wrapper's import path. Derived, like ``_WRAPPERS``: dbGaP is
+#: absent because its profile sets no ``dvc_wrapper``, which is the one place that
+#: fact is now recorded. Registering it with DVC would advertise a backend that
+#: refuses.
 DVC_PROTOCOLS: dict[str, str] = {
-    "ega": "archivefs.dvcfs.EGADVCFileSystem",
-    "zenodo": "archivefs.dvcfs.ZenodoDVCFileSystem",
-    "geo": "archivefs.dvcfs.GEODVCFileSystem",
-    "bia": "archivefs.dvcfs.BIADVCFileSystem",
+    protocol: f"{__name__}.{wrapper}" for wrapper, (protocol, _) in _WRAPPERS.items()
 }
 
-#: Config keys DVC must accept for our remotes, beyond its common ones, and the
-#: type to coerce each to. **The type matters:** a DVC config file is INI, so every
-#: value arrives as a string — register `extract_zips` as a bare object and
-#: `extract_zips = false` reaches the filesystem as the string "false", which is
-#: truthy, so ZIPs get presented as directories against the user's explicit
-#: instruction. DVC's own booleans go through its `Bool`, and so must ours.
-#:
-#: These are the *non-secret* options, and the omissions are load-bearing. DVC
-#: validates remote config and `--fs-config` against exactly this table, so a key
-#: that is absent here is refused by DVC itself:
-#:
-#:     $ dvc remote modify ega password hunter2
-#:     ERROR: configuration error - config file error:
-#:            extra keys not allowed @ data['remote']['ega']['password']
-#:
-#: That is why `username`, `password` and `token` are not listed. It is not a
-#: convention we ask users to respect — with them absent, the anti-pattern is a
-#: config parse error, and one that fires before any archivefs code runs. Adding
-#: any of them back would make it possible to commit a credential again:
-#: `--fs-config password=…` is written verbatim into the `.dvc` file's
-#: `deps[].fs_config`. `credentials_file` stays because it is a *path* — the ssh
-#: `IdentityFile` analogue, and the supported way to select an account per repo.
-_BOOL_KEYS = frozenset({"extract_zips"})
-_EXTRA_CONFIG_KEYS: dict[str, tuple[str, ...]] = {
-    "ega": ("credentials_file", "layout", "chiro", "api_url"),
-    "zenodo": ("extract_zips", "api_url", "chiro"),
-    "geo": ("view", "base_url", "chiro"),
-    "bia": ("view", "api_url", "s3_url", "chiro"),
-}
+
+def _remote_schema(backend: Any) -> dict:
+    """Translate one archive profile's ``config`` into a DVC remote schema.
+
+    The config keys and their types come from ``registry.py``; all this adds is
+    DVC's own validator for each type. ``Bool`` is the one that matters — see the
+    ``Backend.config`` docstring for why an untyped boolean silently expands ZIPs
+    against the user's instruction.
+    """
+    from dvc import config_schema
+
+    validators: dict[type, Any] = {bool: config_schema.Bool, str: object}
+    return {
+        key: validators.get(kind, object) for key, kind in backend.config.items()
+    }
 
 
 def register() -> list[str]:
@@ -226,10 +215,7 @@ def register() -> list[str]:
             ),
         }
         config_schema.REMOTE_SCHEMAS[protocol] = {
-            **{
-                key: (config_schema.Bool if key in _BOOL_KEYS else object)
-                for key in _EXTRA_CONFIG_KEYS.get(protocol, ())
-            },
+            **_remote_schema(PROTOCOLS[protocol]),
             **config_schema.REMOTE_COMMON,
         }
 

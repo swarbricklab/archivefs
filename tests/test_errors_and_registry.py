@@ -94,6 +94,94 @@ def test_every_protocol_is_declared_and_consistent():
         assert backend.status in ("supported", "deferred")
 
 
+# ------------------------------------------------------- the archive profiles
+#
+# A profile is only worth having if the rules it encodes are enforced somewhere.
+# These are those rules. Each one exists because the fact used to live in a
+# different file from the code that depended on it.
+
+
+def test_no_credential_name_is_a_config_key():
+    """The credentials-never-in-a-committed-file invariant, as an assertion.
+
+    `--fs-config password=…` is written verbatim into a .dvc file's
+    `deps[].fs_config`, so the *only* thing stopping a secret being committed is
+    that DVC's schema — built from `Backend.config` — does not contain the key.
+    That used to rest on a comment explaining which names to leave out. Now
+    adding one to a profile fails here, and the two sources are compared rather
+    than kept in agreement by hand.
+
+    `credentials_file` and dbGaP's `ngc` are paths, not secrets; a path may
+    appear in a committed file, and selecting an account per repo is the
+    supported ssh-`IdentityFile` pattern. So the check is on secrecy, not on
+    being credential-adjacent.
+    """
+    from fsspec.registry import _import_class
+
+    for name, backend in PROTOCOLS.items():
+        cls = _import_class(backend.class_path)
+        secrets = {c.name for c in cls.credentials if c.secret}
+        assert not secrets & set(backend.config), (
+            f"{name}: secret credential(s) {sorted(secrets & set(backend.config))} "
+            f"are accepted as storage options and could be committed"
+        )
+
+
+def test_passthrough_info_keys_cover_every_backend_metadata_block():
+    """Each backend nests provenance under a block named for its protocol.
+
+    `chiro.py` carries those blocks across a manifest resolution, and it did so
+    from a hardcoded tuple that had fallen behind: `bia` was missing, so a
+    `bia://` import with a `.chiro` manifest silently dropped the BIA provenance
+    block from `info()`. Reads still worked — `url` was in the tuple — but
+    `archivefs stat` and `ls --json` lost the accession, view and S3 key.
+
+    Deriving the set from PROTOCOLS makes that class of omission impossible.
+    """
+    from archivefs.registry import PASSTHROUGH_INFO_KEYS
+
+    assert set(PROTOCOLS) <= PASSTHROUGH_INFO_KEYS
+    # plus the two generic keys, which belong to no single archive
+    assert {"url", "archive_version"} <= PASSTHROUGH_INFO_KEYS
+
+
+def test_no_archive_claims_an_immutability_basis_it_cannot_back():
+    """`immutability_basis` is the field whose wrong value fails *silently*.
+
+    Once DVC has a version-aware FileStorage remote, `_log_unversioned` drops
+    every entry with no `version_id` from the fetch and only warns. So a profile
+    must not claim a token unless the archive publishes something immutable about
+    the bytes to build it from — and an archive that is *mixed* across views (BIA:
+    md5s for derived objects, none for submitted ones) has to record the value
+    that is safe for the weaker view.
+    """
+    for name, backend in PROTOCOLS.items():
+        if backend.immutability_basis is not None:
+            assert backend.published_checksum is not None, (
+                f"{name} claims an immutable per-entry token but publishes no "
+                f"checksum to build one from"
+            )
+
+
+def test_a_deferred_backend_advertises_nothing():
+    """dbGaP is not implemented; every profile field must say so, not just `status`."""
+    dbgap = PROTOCOLS["dbgap"]
+    assert dbgap.status == "deferred"
+    assert dbgap.dvc_wrapper is None  # so DVC is never told it exists
+    assert dbgap.config == {}
+    assert dbgap.immutability_basis is None
+
+
+def test_installed_backends_reports_capabilities_not_just_readiness():
+    report = installed_backends()
+    assert report["zenodo"]["capabilities"]["expands_containers"] is True
+    assert report["zenodo"]["capabilities"]["published_checksum"] == "md5"
+    assert "extract_zips" in report["zenodo"]["capabilities"]["options"]
+    # GEO publishes no digest at all (D8), which is why a manifest is load-bearing
+    assert report["geo"]["capabilities"]["published_checksum"] is None
+    assert report["geo"]["capabilities"]["immutability_basis"] is None
+
+
 def test_error_text_names_the_extra_when_there_is_one():
     with_extra = Backend(
         protocol="x", class_path="archivefs.backends.x.X", extra="x", summary="s"

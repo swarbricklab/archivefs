@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from archivefs.errors import ManifestError, MissingExtraError
+from archivefs.registry import PASSTHROUGH_INFO_KEYS
 
 if TYPE_CHECKING:  # pragma: no cover
     from archivefs.base import ArchiveFileSystem
@@ -277,7 +278,9 @@ def apply_manifest(
             accounted.add(source)
             native_info = native[native_path]
             # Carry everything the backend needs to fetch, and its own metadata.
-            for key in ("url", "ega", "geo", "zenodo", "archive_version"):
+            # Derived from the archive profiles, so a new backend's metadata block
+            # is carried through without anyone remembering to add it here.
+            for key in PASSTHROUGH_INFO_KEYS:
                 if key in native_info:
                     info.setdefault(key, native_info[key])
             info["source_native_path"] = native_path

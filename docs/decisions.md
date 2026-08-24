@@ -1246,3 +1246,71 @@ now names the `-o extract_zips=true` equivalent and the `url_to_fs` form, both
 verified before shipping. Widening the CLI to accept chains would mean inventing a
 syntax for per-protocol options, which is a real feature and not one anybody has
 asked for. The URL-grammar block now marks the chain as Python-only.
+
+---
+
+## D22 — archive capabilities are **declared once** in `registry.Backend`, and the tables derive from it
+
+**Found by counting.** Adding an archive meant editing at least six places:
+`registry.PROTOCOLS`, **four** parallel protocol-keyed dicts in `dvcfs.py`
+(`_WRAPPERS`, `DVC_PROTOCOLS`, `_EXTRA_CONFIG_KEYS`, `_BOOL_KEYS`), the entry points
+in `pyproject.toml`, the backend class, a hardcoded key tuple in `chiro.py`, and
+capability tables kept by hand in `docs/`. Missing one fails in a way that does not
+point at what you forgot.
+
+**It had already drifted, and this found it.** `chiro.py`'s tuple was
+`("url", "ega", "geo", "zenodo", "archive_version")` — no `bia`. So a `bia://`
+import resolved through a `.chiro` manifest silently dropped the BIA provenance
+block from `info()`: reads still worked, because `url` was in the list, but
+`archivefs stat` and `ls --json` lost the accession, view and S3 key. Nobody would
+have looked for that in `chiro.py`.
+
+**Decision.** Extend the existing `Backend` dataclass rather than adding a parallel
+`Profile` type, and derive the scattered tables from it. `Backend` was already the
+right shape — it was just restricted to *packaging* facts. New fields: `config`
+(option name → type), `dvc_wrapper`, `published_checksum`, `immutability_basis`,
+`expands_containers`. `_EXTRA_CONFIG_KEYS`, `_BOOL_KEYS`, `_WRAPPERS` and
+`DVC_PROTOCOLS` are gone or derived; `chiro.py` reads `PASSTHROUGH_INFO_KEYS`, which
+is built from `PROTOCOLS` so the omission above cannot recur.
+
+**Two constraints shaped it**, and both are recorded in the module docstring because
+they are what stops this becoming a junk drawer:
+
+1. **A profile declares *what*, never *how*.** No field holds a callable; behaviour
+   stays in the fsspec subclass. This is why `credentials` is *not* a profile field
+   even though it looks like one — the backends' `Credential` declarations carry env
+   vars, file paths and help text, and a second copy would drift on the one topic
+   where drift is a security bug.
+2. **`registry.py` must stay importable with no backend installed**, or `archivefs
+   info` cannot report a missing extra without importing the thing that is missing.
+   So every field is inert data.
+
+**`_BOOL_KEYS` was the argument for doing this at all.** It existed only because DVC
+config is INI, so `extract_zips = false` arrives as the string `"false"` — truthy —
+and ZIPs get expanded against an explicit instruction. That is a fact about a key,
+recorded in a different structure from the key. Now the type sits next to the name
+(`"extract_zips": bool`) and `_remote_schema` maps it to DVC's `Bool`.
+
+**Where a profile cannot tell the truth, it lies safe.** BIA is *mixed*: derived
+OME-Zarr objects carry md5s, submitted files carry none. A per-protocol field cannot
+say "sometimes", so `bia` records the value that is safe for the weaker view —
+`published_checksum=None`, `immutability_basis=None`. The alternative, a per-view
+profile, is a real design and not one anything needs yet.
+
+**The field name changed under review.** It was `version_token`, and ruff's
+flake8-bandit flagged every assignment as a possible hardcoded password. A false
+positive, but a fair one: in this codebase "token" means *credential*, and a field
+holding a one-line description of how immutability is established should not borrow
+the word. `immutability_basis` says what it is, and `is not None` is the gate.
+
+**What it buys, concretely:** the dangerous switch in D6/D17's correction is one
+reviewable field instead of an `if` chain in the DVC adaptor; `archivefs info`
+reports capabilities rather than only installed-or-not; and the invariants are
+tests — no secret credential may be a config option (compared against the backends'
+own declarations, not a comment), no archive may claim an `immutability_basis`
+without a published checksum to build it from, no two profiles may share a
+`dvc_wrapper` name, and a deferred backend advertises nothing.
+
+**Cost to change my mind:** the fields are additive and nothing outside `registry.py`
+constructs a `Backend`, so splitting capabilities into their own `profiles.py` later
+is a move, not a rewrite.
