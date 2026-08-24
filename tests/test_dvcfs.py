@@ -184,8 +184,12 @@ def test_not_version_aware_even_when_dvc_asks():
     * A version-aware filesystem must also provide `version_path`; without it
       `dvc import-url` dies with `object has no attribute 'version_path'`.
 
-    Setting it True does *not* buy the thing it looks like it should — pulling a
-    completed import from the source — which was measured and rejected in D17.
+    **This pins a decision, not a fact about DVC.** Setting it True *does* buy the
+    thing it looks like it should — pulling a completed import from the archive, an
+    expanded ZIP included — provided each entry also carries a `version_id`, which the
+    D17 experiment omitted. See the corrections in D6/D17/D20 and issue #1. Until that
+    lands the wrappers are hard-False, and this test says so; when it lands, replace
+    this test rather than deleting it, because `push: false` above stays true.
     """
     fs = dvcfs.ZenodoDVCFileSystem(url="zenodo://1486184", version_aware=True)
     assert fs.version_aware is False

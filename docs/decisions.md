@@ -236,7 +236,18 @@ refused outright — see D11.)
 
 ---
 
-## D6 — 🩹 The archive version token is **not** DVC's `version_id`
+## D6 — 🩹 A **record-level DOI** is not DVC's `version_id` — but a per-entry token is
+
+> **Superseded 2026-08-24 — the conclusion below was too broad, and it is the root of
+> D17 and D20 as well.** What this entry got right: a *version DOI* is the wrong value
+> to put in `version_id`. What it got wrong: concluding from that that the whole
+> `version_aware` mechanism is unusable for us. It is usable, it is the intended
+> escape hatch for exactly our situation, and turning it on is what makes an import
+> pullable by a reviewer with no DVC remote — including an expanded ZIP, which D20
+> says is impossible. Measured working end to end; not yet implemented. Tracked in
+> [issue #1](https://github.com/swarbricklab/archivefs/issues/1), gated on
+> [issue #2](https://github.com/swarbricklab/archivefs/issues/2). Read both before
+> acting on anything below.
 
 **Found by breakage.** Emitting `version_id: 10.5281/zenodo.1486184` in `info()`
 made a beautiful `.dvc` file — and then `dvc pull` failed with
@@ -244,9 +255,9 @@ made a beautiful `.dvc` file — and then `dvc pull` failed with
 *any* `version_id` in a `Meta` as "this is a cloud object version", flips the
 filesystem into `version_aware` mode, and expects the S3/GCS/Azure versioning API.
 
-**Decision.** The token lives under our own key, `archive_version`, plus inside the
-per-archive metadata block (`zenodo.doi`, and so on). The DVC wrapper forces
-`version_aware = False` and provides a defensive no-op `coalesce_version` so a
+**Decision (as shipped).** The token lives under our own key, `archive_version`, plus
+inside the per-archive metadata block (`zenodo.doi`, and so on). The DVC wrapper
+forces `version_aware = False` and provides a defensive no-op `coalesce_version` so a
 `.dvc` written before this change does not crash.
 
 **What is lost:** the version DOI no longer appears in the committed `.dvc`. In
@@ -254,9 +265,34 @@ practice the pin is the `md5`, and for a *version* URL the path itself names the
 immutable record. It matters only when the URL is a **concept** DOI, where the
 `.dvc` cannot record which version was resolved.
 
-**Better answer, not built:** implement real version-awareness for Zenodo, where a
-version DOI genuinely identifies a different record. That is a proper feature with
-`dvc update` semantics to think through — [`ideas.md`](ideas.md).
+### Where the reasoning went wrong
+
+**A DOI is a *record* fact; `version_id` is a *per-entry* field.** Putting the record's
+DOI on every member said "all these files are the same object version", which is not
+what DVC asks. The missing move was not to abandon `version_id` but to give each entry
+a token that identifies *that entry*: the published file md5 for a plain Zenodo file,
+and `(container md5, member CRC32)` for a member inside a ZIP. Both are honest — they
+name exactly one byte-string inside exactly one immutable record.
+
+**`version_id` is not a checksum field**, which is what makes this legitimate rather
+than a fudge. A ZIP member's `md5` can stay `None` — so D8's rule, restated in
+`geo.py`, *never substitute a token that is not a content checksum*, is untouched —
+while `version_id` carries the immutability token DVC actually wanted.
+
+**The API surface DVC then demands is one method, not a family.** The concrete failure
+is `AttributeError: version_path` from `dvc/dependency/base.py:53`. Identity is the
+right implementation: a Zenodo record id already pins the version, so
+`version_path(path, version_id) == path`. `coalesce_version` was the symptom this
+entry generalised from, and the no-op it already has is also correct.
+
+**What it costs**, and this is real: DVC sets `can_push = False` for a version-aware
+dependency (`dvc/repo/imp_url.py`), so `push: false` lands on every out. Accepted — if
+the bytes can be pulled from Zenodo again, a second hosted copy is not needed — but it
+removes the DVC-remote backup route, which D17's last paragraph relies on.
+
+**The concept-DOI gap this entry named is still open** and is now the *only* thing
+`archive_version` is carrying that `version_id` could not: which version a concept DOI
+resolved to. That remains a `dvc update`-semantics question, not a storage one.
 
 ---
 
@@ -797,6 +833,15 @@ the thing that motivated it.
 
 ## D17 — ⚠️ **`dvc pull` can only reach the archive for a *partial* import**
 
+> **Superseded 2026-08-24 — the measurements below all stand; the conclusion drawn
+> from them does not.** "`--no-download` then `dvc pull`" is the best route *available
+> today*, but it is not the only possible one, and the reason this entry thought
+> otherwise is a flaw in one experiment — see "Why the `version_aware` attempt failed"
+> below, which replaces the paragraph that closed it. In particular **the tripwire at
+> the end of this entry is now wrong in its reasoning**, and the test it describes is
+> pinning a decision rather than a fact. Tracked in
+> [issue #1](https://github.com/swarbricklab/archivefs/issues/1).
+
 **The requirement this threatens.** The project exists so a reviewer or reproducer can
 clone an analysis repo and pull the raw data **from the archive**, as tracked, without
 the authors having to re-host a copy on a DVC remote. Anything that quietly requires
@@ -838,13 +883,63 @@ The second condition is empirical: rows 5 and 6 differ only in `deps.checksum`, 
 only row 6 works. Without it the fetch reports "Everything is up to date" and
 transfers nothing.
 
-**`version_aware = True` does not solve it, and makes things worse.** That third
-disjunct above looks like the answer, so it was tried: set `version_aware` and add the
-`version_path` shim DVC then demands (a no-op is semantically right for us — a
-published record is immutable, so the path *is* the version). Result: full download
+### Why the `version_aware` attempt failed, and what fixes it
+
+That third disjunct above looks like the answer, so it was tried: set `version_aware`
+and add the `version_path` shim DVC then demands (a no-op is semantically right for us
+— a published record is immutable, so the path *is* the version). Result: full download
 still could not be pulled in a fresh clone, for zenodo *or* geo, **and** DVC wrote
 `push: false` into the `.dvc` (`dvc/repo/imp_url.py` sets `can_push = False` for a
-version-aware dependency), which would break the one workflow that does work. Closed.
+version-aware dependency). This entry recorded that as "closed".
+
+**It was not closed; the experiment was incomplete.** Flipping the flag restores the
+source as a fallback storage, but a second gate then throws the work away.
+`dvc/repo/fetch.py`, `_log_unversioned`:
+
+```python
+if entry.meta and not entry.meta.isdir and entry.meta.version_id is None:
+    unversioned.append(...)          # dropped from the fetch
+else:
+    index[key] = entry
+```
+
+Once a `FileStorage` remote is version-aware, **every entry whose `Meta` carries no
+`version_id` is silently removed from the fetch** — a `logger.warning`, not an error.
+The attempt above set the flag but never emitted a `version_id`, so every entry was
+dropped, nothing was fetched, and checkout failed. The observed symptom is identical to
+"the fallback was not registered", which is why it was misread. *(Mechanism read from
+DVC 3.64.2's source, not re-measured — the re-measurement is the corrected experiment
+below, which succeeds.)*
+
+**With a per-entry token it works.** Adding the third ingredient — a `version_id` on
+each entry, emitted from `_zip_info` and from `info()` — makes a **completed**
+`import-url` pullable in a fresh clone with no remote, no cache and no manifest, for a
+plain file *and* for an expanded ZIP (which D20 says is impossible). DVC writes the
+per-member checksum map inline into the committed `.dvc` as a `files:` list, git-tracked
+and travelling with the clone:
+
+```yaml
+deps:
+- path: zenodo://1486184/github-mark.zip
+  fs_config: {extract_zips: 'true'}
+  files:
+  - relpath: github-mark.svg
+    md5: 07883e93734b98cae0f7b9c55d287250
+    version_id: 49f6a914ea33912471512ac9228c6923:b8576d45
+outs:
+- md5: fed36ce076379aa131932699d4879eb5.dir
+  push: false
+```
+
+So **the row of the table above that says a full download cannot be pulled is a
+statement about our filesystem, not about DVC.** Every row still reproduces as written;
+what changes is that the constraint is ours to lift. D6 has the corrected reasoning
+about why a DOI was the wrong token and a per-entry one is the right one.
+
+**`push: false` is the price**, and it is genuinely a loss — see the closing paragraphs
+of this entry, which depend on `dvc push` working. Accepted on the grounds that an
+archive we can re-pull from does not need a second hosted copy. That trade is the
+subject of issue #1, not settled here.
 
 **What does work, and is now the recommended pattern:** `--no-download` **followed by
 `dvc pull`**.
@@ -873,16 +968,23 @@ clone pulls it, while `import` + `push` reports "Everything is up to date" and p
 nothing. That works for every archive regardless of checksums, but it means hosting a
 copy, which is what we are trying to avoid.
 
-**Tripwire.** `can_push` is only forced off for a version-aware dependency, so our
-hard `version_aware = False` (D6) is what keeps `dvc push` working. A future change
-that makes archivefs version-aware would silently stop `dvc push` pushing archive data
-and break every collaborator's pull. The test pinning `version_aware is False` now
-says so.
+**Tripwire, and it cuts both ways.** `can_push` is only forced off for a version-aware
+dependency, so our hard `version_aware = False` (D6) is what keeps `dvc push` working.
+Turning version-awareness on therefore **does** stop `dvc push` pushing archive data —
+that part of the warning is accurate and measured. What the warning gets wrong is
+calling that a reason not to do it: it trades a route that requires hosting a second
+copy for one that does not, which is the trade this project exists to make. Read it as
+"this is the cost", not "do not go here". The test pinning `version_aware is False`
+pins a *decision*, not a fact about DVC, and it should be rewritten to say which — an
+unlabelled pin of a reversible choice reads like a discovered constraint, and this one
+misled its own author for three days.
 
-**Where this should go next.** The gap is upstream: DVC has no way to say "this
-dependency's source is immutable and re-fetchable, use it as a fallback even for a
-completed import". That is a feature request against DVC, and a natural companion to
-the storage-backend plugin hook (D4) — see [`ideas.md`](ideas.md).
+**Where this should go next.** Not upstream. This entry proposed a DVC feature request
+— "let a dependency declare its source immutable and re-fetchable, and use it as a
+fallback even for a completed import" — on the belief that no existing mechanism could
+express it. `dep.fs.version_aware` in the disjunct above *is* that mechanism; it just
+also requires per-entry tokens, which we were not supplying. See `ideas.md` #0, now
+downgraded, and issue #1 for the work that replaces it.
 
 ---
 
@@ -994,7 +1096,7 @@ has* (D13) — extended to the case where the partial answer is "none at all".
 
 ---
 
-## D20 — 🩹 an **expanded** ZIP cannot be pulled; import zips opaquely if a reviewer must
+## D20 — 🩹 an **expanded** ZIP cannot be pulled *as shipped*; two corrections follow
 
 **Found by checking a report that `dvc import-url` "downloaded ZIP files without
 expanding them".** It had not: `extract_zips` is off by default, exactly as
@@ -1054,8 +1156,28 @@ DVC that fixes this fails the negative test and tells us to update this entry.
 > So the trade-off below is real **today**, but it is not inherent, and the negative
 > test pins our behaviour rather than DVC's. See `ideas.md` #0d.
 
-**The guidance that follows, and it is a real trade-off.** Combining the D17 reviewer
-route with ZIP expansion is not currently possible:
+> **Corrected again 2026-08-24 — right that it is our gap, wrong about the fix.** The
+> block above concludes that a ZIP member needs an **md5** from somewhere, and that a
+> `.chiro` sidecar must therefore supply it. That framing is what made the fix look
+> like "a few days plus a manifest format", and it also created the dead end the block
+> itself flags: the only way to *compute* a member md5 is to stream the archive, which
+> destroys the download-free listing.
+>
+> There is no need for a member md5 at all. DVC's `version_id` is **not** a checksum
+> field, and populating it is enough to make the fetch work — so `md5` stays `None`,
+> `geo.py`'s rule stands, nothing is streamed inside `info()`, and no manifest is
+> involved. `(container md5, member CRC32)` is available from the central directory for
+> free and names exactly one member of exactly one immutable archive. Measured: a
+> completed expanded-ZIP import then pulls in a fresh clone with no remote and no cache.
+> The prerequisite is `version_aware = True`, which D6 and D17 wrongly ruled out; see
+> both, and [issue #1](https://github.com/swarbricklab/archivefs/issues/1).
+>
+> The two negative tests below therefore pin **our current behaviour**, and inverting
+> them is part of issue #1 rather than something to wait for.
+
+**The guidance that follows.** ⚠️ **Superseded as advice, still accurate as
+description.** Combining the D17 reviewer route with ZIP expansion is not possible
+*with the code as it ships today*:
 
 * **Expansion, no reviewer route.** Full `dvc import-url --fs-config
   extract_zips=true`. Bytes land at import; anyone else needs a DVC remote you have
@@ -1068,6 +1190,13 @@ route with ZIP expansion is not currently possible:
 The second is the better default for a published analysis, and it is what D9 already
 implied — "if you want a genuinely download-free pin, import the ZIP" — now with the
 reviewer consequence spelled out.
+
+**Do not read this as an architectural recommendation**, which is how it was written and
+how it has since been quoted. Our first real user wants a Zenodo ZIP to arrive as a
+directory, and told us so; on Zenodo a ZIP is the *only* way a deposit can express
+directory structure at all (a flat namespace — 55 of 5592 keys contain a `/`, all from
+the GitHub-release integration). "Import the ZIP opaquely and unzip it in a stage" asks
+every user to write the same uninteresting stage, and issue #1 removes the need for it.
 
 ## D21 — 🩹 a listing and an `info()` of the same expanded ZIP must agree; the CLI takes no chained URLs
 

@@ -12,30 +12,31 @@ Companion documents: [`decisions.md`](decisions.md) (what I decided and why),
 
 ## Do these next, probably
 
-### 0. Ask DVC for a re-fetchable-source flag, and send the PR
-**Effort: a day for the request plus a PR. Value: this is the project's core promise.**
+### 0. ~~Ask DVC for a re-fetchable-source flag~~ — the mechanism already exists
+**Effort: none. Value: none. Withdrawn 2026-08-24, and worth reading as a cautionary
+tale about diagnosing a gap as upstream.**
 
-[`decisions.md` D17](decisions.md) measures the gap. A *completed* `dvc import-url`
-records `outs.md5`, and DVC then refuses to treat the source URL as a place the bytes
-could come from — `_load_storage_from_import` registers the source as a fallback remote
-only when `not out.hash_info`. So the author who downloads the data and tracks its
-checksum, which is the normal and desirable thing to do, produces a repo that **no
-reviewer can pull from the archive**. They need a DVC remote hosting a second copy of
-already-published data, which is precisely what archivefs exists to avoid.
+The ask was: *"let a filesystem or dependency declare this source is immutable and
+re-fetchable; use it as a fallback storage even for a completed import"*. It asserted
+that `version_aware` "is not it — it was tried (D17): it does not restore the
+fallback".
 
-The workaround (`--no-download` then `dvc pull`) works and is now documented, but it is
-a shape you have to know about, and it does not survive someone doing the obvious thing.
+**`version_aware` is exactly it.** It is the third disjunct in
+`_load_storage_from_import`, and it does restore the fallback. The D17 experiment that
+seemed to disprove this never emitted a per-entry `version_id`, so DVC's
+`_log_unversioned` silently dropped every entry from the fetch afterwards — a second
+gate, downstream of the one being tested, producing a symptom indistinguishable from
+the first gate not opening. Supply the tokens and a completed import is pullable from
+the archive in a fresh clone with no remote. See the corrections in D6, D17 and D20,
+and [issue #1](https://github.com/swarbricklab/archivefs/issues/1).
 
-What to ask for: a way for a filesystem or a dependency to declare *"this source is
-immutable and re-fetchable; use it as a fallback storage even for a completed import"*.
-`version_aware` is not it — it was tried (D17): it does not restore the fallback, and it
-sets `can_push = False`, breaking the DVC-remote route as well. Either a new
-`FileSystem` attribute (`immutable_source`?) alongside `version_aware` in that
-disjunct, or a per-stage `pull_from_source: true`.
+What survives of this entry: `can_push = False` is a real cost of the existing
+mechanism, and *if* we wanted the fallback **and** `dvc push`, that would be a genuine
+upstream ask — but it is a much smaller one than "there is no way to express this", and
+nobody has asked for both at once.
 
-Natural companion to the storage-backend plugin hook ([D4](decisions.md)) — both are
-"DVC needs one small seam for third-party filesystems", and both are better solved
-upstream than worked around here. Pitch them together.
+The storage-backend plugin hook (D4) is still a real upstream gap and should be pitched
+on its own. This entry existed partly to give it company; it does not need any.
 
 ### 0b. Authenticated reads for BioStudies, so a submitter can import their own unreleased study
 **Effort: unknown until the mechanism is confirmed — a day if it is a header. Value:
@@ -116,48 +117,57 @@ Three things to settle first, one of which is a real obstacle:
 Worth doing (b) and skipping (a): a half-measure that only works when you already know
 the answer is not worth the surface area.
 
-### 0d. Let a `.chiro` manifest supply ZIP-member checksums
-**Effort: a few days. Value: high — it unblocks expansion *and* the reviewer route.**
+### 0d. ~~Let a `.chiro` manifest supply ZIP-member checksums~~ — mostly obviated
+**Effort: was "a few days". Value: now low for ZIPs, unchanged for GEO/BIA. Rewritten
+2026-08-24.**
 
-Measured, not assumed: forcing a per-member md5 into `_zip_info` makes `dvc pull`
-materialise an expanded ZIP straight from Zenodo, in a fresh `git clone` with no DVC
-remote, and it does so for a stage written *before* the change, because the `.dvc`
-file is byte-identical either way
-([`evidence/zip-member-md5-pull-probe-2026-08-21.md`](evidence/zip-member-md5-pull-probe-2026-08-21.md)).
-So [D20](decisions.md) is our gap, not DVC's, and closing it is retroactive — stages
-committed today start working.
+This entry asked the right question — how does a ZIP member get something DVC will
+fetch against? — and answered it one field too far to the right. It assumed the answer
+had to be an **md5**, which forces a manifest, because the only way to *compute* a
+member md5 is to stream the container (which the entry itself, correctly, ruled out).
 
-Why this matters more than it sounds: Zenodo's file namespace is flat (of 5592 keys
-across 900 records, the only 55 containing a `/` are the GitHub-release integration),
-so **directory-structured data on Zenodo can only be a ZIP**. Expansion is not a
-convenience feature there; it is how you address a deposit's actual structure. And
-~80% of real Zenodo ZIPs are a single top-level directory
-([`evidence/zenodo-zip-shape-2026-08-21.md`](evidence/zenodo-zip-shape-2026-08-21.md)).
+**DVC's `version_id` is not a checksum field, and filling it is sufficient.** So `md5`
+stays `None`, `geo.py`'s rule stands, nothing is streamed inside `info()`, and there is
+no manifest. `(container md5, member CRC32)` comes from the central directory for free.
+Measured working; see [issue #1](https://github.com/swarbricklab/archivefs/issues/1) and
+the second correction in [D20](decisions.md).
 
-The shape of the work:
+There is a further reason not to invent a format here: with `version_aware` on, DVC
+writes a per-member `files:` list — `relpath`, `md5`, `size`, `version_id` — **inline
+into the committed `.dvc`**, git-tracked and travelling with the clone. That is a
+manifest, in a format DVC already reads, that we did not have to design.
 
-1. **Reach ZIP interiors from the chiro layer.** `_resolve_with_manifest` runs at
-   *record* level, filling the container's member cache; `_zip_info` builds member
-   entries independently and hard-sets `md5 = None`. Decide how a manifest addresses
-   a member — almost certainly the two-path model already in use, with `source` as
-   `archive.zip/outs/…`.
-2. **Do not compute md5 by streaming.** The probe did, deliberately, and it must not
-   ship: hashing a member inside `info()` turns a download-free listing into a full
-   download of the archive. `geo.py` states the rule — never substitute a token that
-   is not a content checksum — and ZIP members sit in exactly GEO's position.
-3. **Write the manifests** (#5 is the same machinery): for our own deposits, capture
-   the interior at deposit time. For third-party ZIPs, a manifest can only be
-   *observed* — one download, recorded once, reusable by everyone after.
-4. **Invert the negative test** in `test_dvc_integration.py` when it lands.
+**What still stands, unchanged:**
 
-Worth noting ZIP members are better placed than GEO files for verification: the
-central directory publishes a **CRC32** per member, download-free, and `_zip_info`
-already records it as `crc32`. DVC cannot consume CRC32 as a content hash, but
-archivefs can use it to catch a corrupt member without trusting the workspace hash.
+* **The motivation.** Zenodo's file namespace is flat (of 5592 keys across 900 records,
+  the only 55 containing a `/` are the GitHub-release integration), so
+  **directory-structured data on Zenodo can only be a ZIP**. Expansion is not a
+  convenience feature there; it is how you address a deposit's actual structure. And
+  ~80% of real Zenodo ZIPs are a single top-level directory
+  ([`evidence/zenodo-zip-shape-2026-08-21.md`](evidence/zenodo-zip-shape-2026-08-21.md)).
+* **Never stream to compute a hash in `info()`.** The rule the entry established is
+  right and is why the 2026-08-21 probe
+  ([`evidence/zip-member-md5-pull-probe-2026-08-21.md`](evidence/zip-member-md5-pull-probe-2026-08-21.md))
+  could not ship as-is.
+* **CRC32 is a real verification asset.** The central directory publishes one per
+  member, download-free, and `zipfile` checks it on **every read** — verified:
+  a corrupted member raises `BadZipFile: Bad CRC-32`, and `testzip()` names it. DVC
+  cannot consume CRC32 as a content hash, but we get member integrity for nothing.
+* **Invert the negative tests** in `test_dvc_integration.py` — now issue #1's job.
+* **The `extract_zips` default should only be revisited afterwards**, for the reason
+  given: flipping it while expansion costs the reviewer route would trade the project's
+  core promise for convenience.
 
-Only after this should the `extract_zips` default be reconsidered — flipping it while
-expansion still costs the reviewer route would trade away the project's core promise
-for convenience.
+**And manifests are not going away.** GEO and BIA-submitted files publish no checksum
+*and* no immutable token, so they cannot use `version_aware` at all — for them a
+`.chiro` sidecar remains the only route, exactly as D17's closing paragraph says. What
+changes is that ZIP members are no longer in that category.
+
+A note on integrity, since this entry was the place the argument lived: once a
+container's bytes match the md5 Zenodo publishes, **every member extracted from it is
+authenticated by that md5 by construction**. Per-member digests were never needed to
+*validate* an extraction — only to satisfy DVC's content-addressed *storage*. This
+entry conflated the two, and so did the design.
 
 ### 0e. Make `pip install 'archivefs[chiro]'` a command that can actually succeed
 **Effort: hours, once chirograph is published. Value: it is on the critical path to
@@ -212,6 +222,38 @@ So a default `pytest` run proves less than it appears to. Worth: a CI job that r
 everything, and a default-run summary that says plainly which capabilities were not
 exercised.
 
+### 0f. Per-archive capability profiles, so archive facts live in one place
+**Effort: two or three days. Value: high, and it gates #0/#0d's replacement.**
+**Tracked in [issue #2](https://github.com/swarbricklab/archivefs/issues/2).**
+
+Archive-specific knowledge is spread over at least six places: `registry.py`'s
+`PROTOCOLS`, **four** parallel protocol-keyed dicts in `dvcfs.py` (`_WRAPPERS`,
+`DVC_PROTOCOLS`, `_EXTRA_CONFIG_KEYS`, `_BOOL_KEYS`), `pyproject.toml`'s entry points,
+the backend class itself, a hardcoded key tuple in `chiro.py`, and hand-maintained
+capability tables in `docs/`. Adding an archive means touching all of them, and missing
+one fails in a way that does not point at what you forgot.
+
+`Backend` in `registry.py` is already the right shape — it is just restricted to
+*packaging* facts (`extra`, `requires`, `status`). The gap is **capabilities**.
+
+Two reasons this is not merely tidiness:
+
+* `_BOOL_KEYS` exists only because DVC config is INI, so every value arrives as a
+  string. Register `extract_zips` without a type and `extract_zips = false` reaches the
+  filesystem as `"false"` — truthy — expanding ZIPs **against an explicit instruction**.
+  The comment in `dvcfs.py` documents the trap; the design still invites it.
+* Issue #1 needs a new capability — *can this archive supply an immutable per-entry
+  token?* Zenodo and EGA can; GEO and BIA-submitted cannot. Getting it wrong does not
+  crash: `dvc/repo/fetch.py`'s `_log_unversioned` **silently drops** untokened files
+  from the fetch with a warning. A switch that dangerous belongs in one reviewable
+  declaration, not an `if` chain in the DVC adaptor.
+
+Deliberately *not* a plugin framework: a profile declares *what*, never *how*, and
+behaviour stays in the fsspec subclass. The main open question is whether capability
+facts can live in `registry.py` at all — it is deliberately importable with no backend
+dependency, and `archivefs info` must report a missing extra *without* importing the
+backend.
+
 ### 1. Report the EGA range-alignment bug upstream
 **Effort: an hour. Value: high, and not just to us.**
 
@@ -251,21 +293,28 @@ Worth pairing with a second, smaller report: `dvc_objects.fs.Registry.__getitem_
 falls back to `LocalFileSystem` for an unknown protocol instead of raising, which
 turns a typo into a silent local-path read.
 
-### 4. Zenodo version-aware imports (concept DOI → pinned version)
+### 4. Zenodo concept DOIs → a recorded, pinned version
 **Effort: a few days. Value: the strongest provenance story available anywhere.**
+**Narrowed 2026-08-24** — the storage half of this moved to
+[issue #1](https://github.com/swarbricklab/archivefs/issues/1); what is left is the
+part that is actually about *versions*.
 
-Zenodo is the one archive where DVC's version-awareness would be *honest*: a version
-DOI genuinely identifies a distinct, immutable record. Today
-([D6](decisions.md)) we sidestep it — the token lives under `archive_version` and the
-DVC wrapper forces `version_aware = False` — which means importing a **concept** DOI
-does not record which version was taken.
+Zenodo is the one archive where DVC's version-awareness is *honest*: a version DOI
+genuinely identifies a distinct, immutable record. The `version_aware` /
+`version_path` plumbing this entry called for is issue #1's job, done there for the
+reviewer-pull reason rather than the provenance one, and with `version_id` carrying a
+per-entry immutability token rather than a DOI.
 
-Done properly: implement `coalesce_version`/`version_path` so
-`zenodo://10.5281/zenodo.1486183` (concept) resolves to a version, records it, and
-`dvc update` moves it forward deliberately and visibly. The design doc's
-"`dvc update` against a concept DOI re-resolves and re-extracts" is exactly this.
-Needs care around what `dvc update` should do when a *new* version has different
-files.
+What remains distinctively here: importing a **concept** DOI still does not record
+which version was taken. `zenodo://10.5281/zenodo.1486183` should resolve to a version,
+record it, and let `dvc update` move it forward deliberately and visibly — the design
+doc's "`dvc update` against a concept DOI re-resolves and re-extracts". Needs care
+around what `dvc update` should do when a *new* version has different files, which is
+the genuinely hard part and the reason this is not a subtask of #1.
+
+Note the two want *different* things in `version_id`, and issue #1 picks one: a
+per-entry content token, not the record's DOI. A concept-DOI resolution therefore has
+to be recorded somewhere else — `archive_version` already exists for it.
 
 ### 5. A `chirograph`-writing path for our own deposits, driven from archivefs
 **Effort: small (chirograph does the work). Value: closes the GEO checksum gap for

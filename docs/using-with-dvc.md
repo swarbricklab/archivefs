@@ -60,6 +60,15 @@ actually want ([`cli-ls.md`](cli-ls.md)).
 
 This is the most important thing on this page, and it is not obvious.
 
+> **This whole section is a workaround, and a temporary one.** `--no-download` has
+> nothing to do with downloading; it is just the only user-facing switch that suppresses
+> `outs.md5`, which is what keeps the archive registered as a byte source. A properly
+> targeted fix is measured and pending —
+> [issue #1](https://github.com/swarbricklab/archivefs/issues/1) — after which a plain
+> `dvc import-url` is pullable by a reviewer and this extra step goes away for archives
+> that publish an immutable token (Zenodo, EGA). Everything below describes what
+> actually ships today.
+
 **A completed `dvc import-url` cannot be pulled from the archive by anyone else.** Once
 `outs.md5` is recorded, DVC stops treating the source URL as a place the bytes could
 come from — it assumes they are in your DVC remote. A reviewer who clones your repo
@@ -150,12 +159,15 @@ For a published analysis prefer the
 second and expand in the pipeline — the archive publishes the *container's* checksum,
 so the pin is download-free and anyone can pull it.
 
-This is a gap in archivefs, not in DVC. Forcing a per-member md5 in makes `dvc pull`
-materialise the expanded tree straight from Zenodo, in a fresh clone with no remote,
-without changing the `.dvc` file at all — so stages you commit today would start
-working retroactively once a `.chiro` manifest can supply member checksums
-([`evidence/zip-member-md5-pull-probe-2026-08-21.md`](evidence/zip-member-md5-pull-probe-2026-08-21.md),
-[`ideas.md`](ideas.md) #0d). Until then the two routes stay separate.
+This is a gap in archivefs, not in DVC, and the fix is known and small. A ZIP member
+does not need an md5 at all: DVC's `version_id` is not a checksum field, and filling it
+with `(container md5, member CRC32)` — both free from the central directory — is enough
+for `dvc pull` to materialise the expanded tree straight from Zenodo in a fresh clone
+with no remote. Measured working; no manifest, and nothing streamed to compute it.
+Tracked in [issue #1](https://github.com/swarbricklab/archivefs/issues/1).
+
+Until that lands the two routes stay separate. When it does, this whole limitation goes
+away and `extract_zips` becomes a candidate for defaulting on.
 
 ### The cost side of `--no-download`
 
