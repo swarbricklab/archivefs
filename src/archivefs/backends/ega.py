@@ -403,6 +403,14 @@ class EGAFileSystem(ArchiveFileSystem):
             "checksum": checksum if is_md5 else None,
             "md5": checksum if is_md5 else None,
             "checksum_type": checksum_type,
+            # The same value in the field DVC reads, so a completed `dvc import-url`
+            # of an EGA file stays pullable from EGA by an authorised reviewer with
+            # no DVC remote — which for controlled-access data is the only lawful
+            # route anyway, since re-hosting the bytes is what the DAC agreement
+            # forbids. `plainChecksum` is the strongest immutable statement EGA
+            # makes about a file (D1); the re-encryption stamp below is weaker and
+            # only sometimes present, so it stays where it is.
+            "version_id": checksum if is_md5 else None,
             "ega": {
                 "file_id": meta.get("fileId"),
                 "dataset_id": dataset,
@@ -418,9 +426,12 @@ class EGAFileSystem(ArchiveFileSystem):
         # re-encryption timestamp and changes if the object is replaced.
         stamp = re.search(r"\.(\d{10,})\.cip$", meta.get("fileName") or "")
         if stamp:
-            # Deliberately NOT called `version_id`: DVC reads that key as a cloud
-            # object version and switches on machinery we cannot honour (see
-            # docs/decisions.md D6).
+            # Kept under our own key rather than overwriting `version_id` above: a
+            # re-encryption stamp says when the *ciphertext* was last written, not
+            # which plaintext it decrypts to, so it is the weaker of the two and
+            # only sometimes present. D6 originally rejected `version_id` outright;
+            # the corrected reading is that the field wants the strongest per-entry
+            # immutable token, which here is the plaintext md5.
             info["archive_version"] = stamp.group(1)
         return info
 
