@@ -129,13 +129,68 @@ def test_register_rebuilds_the_validator_not_just_the_table():
 
 
 def test_dbgap_is_not_registered_with_dvc():
-    """It is deferred; advertising it to DVC would promise a backend that refuses."""
+    """It is deferred; advertising it to DVC would promise a backend that refuses.
+
+    Now a consequence of `dbgap`'s profile setting no `dvc_wrapper`, rather than of
+    remembering to leave it out of a second dict here.
+    """
     dvcfs.register()
     from dvc_objects.fs import known_implementations
 
     assert "dbgap" in PROTOCOLS
     assert "dbgap" not in dvcfs.DVC_PROTOCOLS
     assert "dbgap" not in known_implementations
+
+
+def test_the_dvc_tables_are_derived_from_the_profiles():
+    """These were four parallel protocol-keyed dicts, and they drifted.
+
+    Nothing here should be maintainable independently of `registry.PROTOCOLS`, so
+    assert the correspondence rather than the contents: a new archive with a
+    profile is registered by adding the profile, and one without a wrapper is
+    absent from DVC without a second decision being recorded anywhere.
+    """
+    from fsspec.registry import _import_class
+
+    expected = {
+        name for name, backend in PROTOCOLS.items() if backend.dvc_wrapper
+    }
+    assert set(dvcfs.DVC_PROTOCOLS) == expected
+
+    for name in expected:
+        backend = PROTOCOLS[name]
+        cls = _import_class(dvcfs.DVC_PROTOCOLS[name])
+        assert cls.__name__ == backend.dvc_wrapper
+        assert cls.protocol == name
+        # and the class it will build is the one *this* profile names — not a path
+        # recorded in a second place that could point elsewhere. Asserted through
+        # _WRAPPERS rather than by touching `.fs`, because instantiating the EGA
+        # filesystem resolves credentials and would fail here for the wrong reason.
+        assert dvcfs._WRAPPERS[backend.dvc_wrapper] == (name, backend.class_path)
+
+    # `_WRAPPERS` is keyed by wrapper *name*, so two profiles sharing one would
+    # silently collapse into a single class serving the wrong protocol.
+    wrappers = [b.dvc_wrapper for b in PROTOCOLS.values() if b.dvc_wrapper]
+    assert len(wrappers) == len(set(wrappers))
+
+
+def test_every_profile_option_reaches_dvcs_schema():
+    """A key in a profile that DVC does not accept is refused before we run.
+
+    So a profile option that fails to reach the schema is not a cosmetic problem:
+    the option simply cannot be used, and the error names DVC's config rather than
+    anything about archivefs.
+    """
+    dvcfs.register()
+    from dvc.config_schema import SCHEMA
+
+    for name, backend in PROTOCOLS.items():
+        if not backend.dvc_wrapper:
+            continue
+        for key, kind in backend.config.items():
+            value = "true" if kind is bool else "x"
+            validated = SCHEMA["remote"][str]({"url": f"{name}://x", key: value})
+            assert key in validated, f"{name}.{key} did not survive DVC validation"
 
 
 # --------------------------------------------------------------- the wrappers
@@ -232,7 +287,7 @@ def test_backend_options_are_accepted_by_the_dvc_config_schema():
 def test_dvc_itself_refuses_a_credential_in_remote_config(url, key):
     """The invariant is a config parse error, not a convention.
 
-    These keys are absent from _EXTRA_CONFIG_KEYS on purpose, so DVC's own
+    These keys are absent from every profile's `config` on purpose, so DVC's own
     validator rejects them — which covers `dvc remote modify`, `.dvc/config`,
     `.dvc/config.local` and `--fs-config` in one go, all before archivefs runs.
     Putting any of them back would make `--fs-config password=…` writable into
@@ -283,6 +338,9 @@ def test_boolean_config_values_are_coerced_not_passed_as_strings():
 
     Registered as a bare object, that string reached the filesystem and was
     truthy: ZIPs were presented as directories against the user's instruction.
+    The fix is that the profile records `extract_zips: bool` and `_remote_schema`
+    turns that into DVC's own `Bool` validator — so the type is declared next to
+    the key rather than in a second set this one has to stay in step with.
     """
     dvcfs.register()
     from dvc.config_schema import SCHEMA
