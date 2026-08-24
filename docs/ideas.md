@@ -38,6 +38,27 @@ nobody has asked for both at once.
 The storage-backend plugin hook (D4) is still a real upstream gap and should be pitched
 on its own. This entry existed partly to give it company; it does not need any.
 
+**One genuine upstream report did come out of implementing this, and it is small
+enough to send as a patch.** `dvc/repo/index.py`, `_load_storage_from_import`:
+
+```python
+if not out.hash_info or dep.fs.version_aware:
+    ...
+    storage_map.add_cache(FileStorage(key, fs_cache.fs, .../<protocol>/<token>))
+```
+
+For a **completed** version-aware import both disjuncts are live, so the stage's cache
+storage is pointed at the fs-cache — but a completed import has already written the
+bytes to the *object* cache under `files/md5/…`. The two disagree, and `dvc checkout`
+on a deleted file fails with `Is your cache up to date?` while the bytes sit in the
+cache directory. One `dvc pull` refills the fs-cache and it never recurs.
+
+Measured on both sides, because it matters that this is specific: the partial-import
+route (`--no-download` then `dvc pull`) populates the fs-cache directly and checkout
+works. Only *completed import plus version-awareness* hits it. The fix is presumably to
+register both storages for that case. Pinned by
+`test_checkout_after_a_completed_import_needs_one_pull_first`, and written up in D23.
+
 ### 0b. Authenticated reads for BioStudies, so a submitter can import their own unreleased study
 **Effort: unknown until the mechanism is confirmed — a day if it is a header. Value:
 high; it is the first thing a depositor tries.**
@@ -153,10 +174,15 @@ manifest, in a format DVC already reads, that we did not have to design.
   member, download-free, and `zipfile` checks it on **every read** — verified:
   a corrupted member raises `BadZipFile: Bad CRC-32`, and `testzip()` names it. DVC
   cannot consume CRC32 as a content hash, but we get member integrity for nothing.
-* **Invert the negative tests** in `test_dvc_integration.py` — now issue #1's job.
+* ~~**Invert the negative tests** in `test_dvc_integration.py`~~ — done; both are
+  inverted and pass against live Zenodo (D23).
 * **The `extract_zips` default should only be revisited afterwards**, for the reason
   given: flipping it while expansion costs the reviewer route would trade the project's
-  core promise for convenience.
+  core promise for convenience. **That "afterwards" has arrived** (D23) — expansion no
+  longer costs the reviewer route, so the only argument left for keeping it off is the
+  weak one this evidence undermined. It is now a live decision, and it changes the
+  meaning of existing `.dvc` files, so it wants its own entry rather than a default
+  flipped in passing.
 
 **And manifests are not going away.** GEO and BIA-submitted files publish no checksum
 *and* no immutable token, so they cannot use `version_aware` at all — for them a

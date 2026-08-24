@@ -227,32 +227,122 @@ def test_unstrip_protocol_round_trips():
     assert fs.unstrip_protocol("1486184/a.csv") == "zenodo://1486184/a.csv"
 
 
-def test_not_version_aware_even_when_dvc_asks():
-    """Our version tokens are DOIs, not cloud object versions (decisions.md D6).
+# -------------------------------------------------------- version-awareness
+#
+# Replaces `test_not_version_aware_even_when_dvc_asks`, which pinned the opposite
+# and said in its own docstring that it was pinning a decision rather than a fact.
+# The decision changed: see the corrections to decisions.md D6/D17/D20.
 
-    Two things depend on this staying False, and both fail *silently*:
 
-    * `dvc/repo/imp_url.py` sets `outs[0].can_push = False` for a version-aware
-      dependency. Flipping this on writes `push: false` into every `.dvc` and
-      `dvc push` then stops pushing archive data — so every collaborator's
-      `dvc pull` breaks, with no error at import time (decisions.md D17).
-    * A version-aware filesystem must also provide `version_path`; without it
-      `dvc import-url` dies with `object has no attribute 'version_path'`.
+@pytest.mark.parametrize(
+    ("protocol", "expected"),
+    [("zenodo", True), ("ega", True), ("geo", False), ("bia", False)],
+)
+def test_version_awareness_follows_the_archive_profile(protocol, expected):
+    """On where an immutable per-entry token exists, off where it does not.
 
-    **This pins a decision, not a fact about DVC.** Setting it True *does* buy the
-    thing it looks like it should — pulling a completed import from the archive, an
-    expanded ZIP included — provided each entry also carries a `version_id`, which the
-    D17 experiment omitted. See the corrections in D6/D17/D20 and issue #1. Until that
-    lands the wrappers are hard-False, and this test says so; when it lands, replace
-    this test rather than deleting it, because `push: false` above stays true.
+    This is the whole reviewer route: `dvc/repo/index.py` registers the source URL
+    as a fallback storage when `dep.fs.version_aware`, which is what lets a
+    *completed* `dvc import-url` be pulled by someone with no DVC remote.
+
+    Off for GEO and BIA is not a conservative default, it is a correctness
+    requirement. `dvc/repo/fetch.py`'s `_log_unversioned` removes untokened
+    entries from a fetch with only a warning, so switching those on would make
+    `dvc pull` report success having silently skipped files.
     """
-    fs = dvcfs.ZenodoDVCFileSystem(url="zenodo://1486184", version_aware=True)
+    from fsspec.registry import _import_class
+
+    cls = _import_class(dvcfs.DVC_PROTOCOLS[protocol])
+    fs = cls(url=f"{protocol}://x")
+    assert fs.version_aware is expected
+    # and it is the profile that decides, not config a user can pass
+    assert (PROTOCOLS[protocol].immutability_basis is not None) is expected
+
+
+def test_version_aware_cannot_be_switched_on_by_config():
+    """`--fs-config version_aware=true` must not reach an archive that cannot honour it.
+
+    It is filtered out of the config handed to the filesystem, and the property
+    ignores it regardless — two independent reasons, because the consequence of
+    getting it wrong is a silent partial fetch.
+    """
+    fs = dvcfs.GEODVCFileSystem(url="geo://GSE1", version_aware=True)
     assert fs.version_aware is False
-    # and an old .dvc carrying a version_id must not crash
+    assert "version_aware" not in fs.fs_args
+
+
+def test_version_path_is_the_identity():
+    """Not a shim: a published record is immutable and its id is in the path.
+
+    S3 needs `?versionId=` because a key is mutable. A Zenodo record id is not, so
+    "the path at this version" is the path. Its *absence* is what broke the first
+    attempt at this — a hard AttributeError from dvc/dependency/base.py, which
+    `dvc_data/index/checkout.py` also asserts on.
+    """
+    fs = dvcfs.ZenodoDVCFileSystem(url="zenodo://1486184")
+    assert fs.version_path("1486184/a.csv", "abc123") == "1486184/a.csv"
+    assert fs.version_path("1486184/a.csv", None) == "1486184/a.csv"
+    # nothing to reconcile, so whatever a caller arrives with it gets back
     assert fs.coalesce_version("1486184/a.csv", "10.5281/zenodo.1486184") == (
         "1486184/a.csv",
         "10.5281/zenodo.1486184",
     )
+
+
+def test_an_untokened_file_is_refused_rather_than_dropped():
+    """The dangerous case, made loud.
+
+    A Zenodo file whose published digest is not an md5 yields no token. DVC's
+    response would be to drop it from the fetch and log a warning, so `dvc pull`
+    exits 0 having not written the file. We refuse instead, and the message says
+    what to do rather than only what happened.
+    """
+    from archivefs.errors import NotSupportedError
+
+    fs = dvcfs.ZenodoDVCFileSystem(url="zenodo://1486184")
+    ok = {"name": "1486184/a.csv", "type": "file", "version_id": "abc"}
+    assert fs._check_versioned([ok]) == [ok]
+
+    bad = {"name": "1486184/b.csv", "type": "file", "version_id": None}
+    with pytest.raises(NotSupportedError, match="no immutable version token"):
+        fs._check_versioned([bad])
+    # directories legitimately carry none, and DVC ignores theirs
+    assert fs._check_versioned([{"name": "1486184", "type": "directory"}])
+
+
+def test_the_check_covers_walk_because_that_is_how_directories_are_built(monkeypatch):
+    """`dvc_data.index.build.safe_walk` calls the wrapper's walk with detail=True.
+
+    Validating `info` alone would cover a single-file import and miss every member
+    of a directory or an expanded ZIP — which is the case the whole change is for.
+    """
+    from archivefs.errors import NotSupportedError
+
+    fs = dvcfs.ZenodoDVCFileSystem(url="zenodo://1486184")
+    files = {"b.csv": {"name": "1486184/b.csv", "type": "file", "version_id": None}}
+    monkeypatch.setattr(
+        type(fs).__mro__[1],
+        "walk",
+        lambda self, path, **kw: iter([("1486184", {}, files)]),
+    )
+    with pytest.raises(NotSupportedError, match="no immutable version token"):
+        list(fs.walk("1486184", detail=True))
+
+
+def test_a_non_version_aware_archive_is_not_checked(monkeypatch):
+    """GEO publishes no digest, so every entry lacks a token — and that is fine.
+
+    The check must be scoped to archives that claimed they could produce one, or
+    it would refuse every GEO import instead of the manifest-less ones.
+    """
+    fs = dvcfs.GEODVCFileSystem(url="geo://GSE1")
+    files = {"a.txt": {"name": "GSE1/a.txt", "type": "file", "version_id": None}}
+    monkeypatch.setattr(
+        type(fs).__mro__[1],
+        "walk",
+        lambda self, path, **kw: iter([("GSE1", {}, files)]),
+    )
+    assert list(fs.walk("GSE1", detail=True)) == [("GSE1", {}, files)]
 
 
 def test_config_is_filtered_before_reaching_the_filesystem():

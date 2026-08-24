@@ -244,10 +244,9 @@ refused outright — see D11.)
 > `version_aware` mechanism is unusable for us. It is usable, it is the intended
 > escape hatch for exactly our situation, and turning it on is what makes an import
 > pullable by a reviewer with no DVC remote — including an expanded ZIP, which D20
-> says is impossible. Measured working end to end; not yet implemented. Tracked in
-> [issue #1](https://github.com/swarbricklab/archivefs/issues/1), gated on
-> [issue #2](https://github.com/swarbricklab/archivefs/issues/2). Read both before
-> acting on anything below.
+> says is impossible. **Now implemented — see D23**, which supersedes the decision
+> recorded here. The reasoning below is kept because it is where the wrong turn was
+> taken and the shape of the mistake is instructive.
 
 **Found by breakage.** Emitting `version_id: 10.5281/zenodo.1486184` in `info()`
 made a beautiful `.dvc` file — and then `dvc pull` failed with
@@ -838,9 +837,10 @@ the thing that motivated it.
 > today*, but it is not the only possible one, and the reason this entry thought
 > otherwise is a flaw in one experiment — see "Why the `version_aware` attempt failed"
 > below, which replaces the paragraph that closed it. In particular **the tripwire at
-> the end of this entry is now wrong in its reasoning**, and the test it describes is
-> pinning a decision rather than a fact. Tracked in
-> [issue #1](https://github.com/swarbricklab/archivefs/issues/1).
+> the end of this entry is now wrong in its reasoning**, and the test it describes was
+> pinning a decision rather than a fact. **Implemented — see D23**, which is where the
+> current guidance lives. `--no-download` is no longer required for `zenodo://` or
+> `ega://`.
 
 **The requirement this threatens.** The project exists so a reviewer or reproducer can
 clone an analysis repo and pull the raw data **from the archive**, as tracked, without
@@ -1174,6 +1174,10 @@ DVC that fixes this fails the negative test and tells us to update this entry.
 >
 > The two negative tests below therefore pin **our current behaviour**, and inverting
 > them is part of issue #1 rather than something to wait for.
+>
+> **Both were inverted on 2026-08-24; see D23.** A completed expanded-ZIP import now
+> pulls in a fresh clone with no remote, verified live, and `--no-download` combined
+> with expansion is no longer a trap either — it is merely pointless.
 
 **The guidance that follows.** ⚠️ **Superseded as advice, still accurate as
 description.** Combining the D17 reviewer route with ZIP expansion is not possible
@@ -1314,3 +1318,89 @@ without a published checksum to build it from, no two profiles may share a
 **Cost to change my mind:** the fields are additive and nothing outside `registry.py`
 constructs a `Backend`, so splitting capabilities into their own `profiles.py` later
 is a move, not a rewrite.
+
+---
+
+## D23 — ✅ version-aware imports: a **completed** `dvc import-url` is pullable from the archive
+
+**Supersedes D6, D17 and D20**, and closes the gap `ideas.md` #0 asked DVC to close.
+Implemented for `zenodo://` and `ega://`; `geo://` and `bia://` are deliberately
+unchanged. Verified against the live archives with DVC 3.64.2 — 20 end-to-end tests,
+including a `git clone` with no DVC remote.
+
+**What now works.** The plain thing, with no flags:
+
+```console
+$ dvc import-url --fs-config extract_zips=true -- zenodo://<rec>/dir.zip tree
+$ git add -A && git commit -m "import"
+# …someone else, fresh clone, no remote, no cache, no manifest:
+$ dvc pull
+A       tree/
+2 files fetched and 2 files added
+```
+
+This is `design.md`'s line 196 as originally intended, and the first customer's actual
+request: *"`dvc import-url zenodo://record/dir.zip` such that pulling unzips it to
+`outs.path`."*
+
+**Three changes, no upstream patch.**
+
+1. `version_aware` is derived from the archive profile — `immutability_basis is not
+   None` (D22) — instead of hard `False`.
+2. `version_path` is the identity. Not a shim: a published record is immutable and its
+   id is already in the path, so "the path at this version" *is* the path. S3 needs
+   `?versionId=` because a key is mutable; a Zenodo record id is not.
+3. Each entry carries a `version_id`. Zenodo files use the published md5; ZIP members
+   use `container md5 : member CRC32`, both free from the central directory; EGA uses
+   `plainChecksum`.
+
+**Why a ZIP member may carry this while `md5` stays `None`.** `version_id` is not a
+checksum field. D20's correction spells it out: the container's md5 authenticates every
+member extracted from it, and the CRC32 says which member, so the pair names one byte
+sequence inside one immutable record — download-free. `md5` remains the honest
+post-extraction hash, so `geo.py`'s rule stands and nothing is streamed inside
+`info()`. **No manifest is involved**, which is why `ideas.md` #0d shrank.
+
+**The silent failure this had to avoid.** `dvc/repo/fetch.py`'s `_log_unversioned`
+removes every entry whose `Meta` has no `version_id` from the fetch and logs a
+*warning*. A blanket switch would therefore make `dvc pull` exit 0 having quietly
+skipped files — GEO publishes no digest at all, so every GEO file would qualify. Hence
+the per-archive gate, and hence `_check_versioned` in the DVC wrapper, which refuses
+such an entry outright. It hooks `info` **and `walk`**: DVC builds a directory index
+through `dvc_data.index.build.safe_walk`, so checking `info` alone would have covered a
+single-file import and missed every member of a directory.
+
+### What it costs, measured
+
+**1. `push: false` on every out.** `dvc/repo/imp_url.py` forces `can_push = False` for a
+version-aware dependency, so the DVC-remote route in D17's closing paragraph is gone.
+Accepted deliberately: if the bytes can be re-pulled from Zenodo, a second hosted copy
+is not needed. Note this is a *trade*, not a free win — a repo whose archive record is
+later restricted or withdrawn no longer has a fallback.
+
+**2. `dvc checkout` needs one `dvc pull` first.** ⚠️ The one genuinely unpleasant
+finding, and it was not predicted. A completed import writes the bytes to
+`cache/files/md5/…`, but `_load_storage_from_import` points a version-aware stage's
+*cache* storage at `cache/fs/<protocol>/<token>`. They disagree, so restoring a deleted
+file with `dvc checkout` fails with `Is your cache up to date?` even though the bytes
+are cached. One `dvc pull` fills the fs-cache and every later checkout works — so the
+cost is **one extra archive fetch per stage, the first time you restore from cache**.
+
+Measured on both branches, because it matters whether this is new: it is. The old
+recommended route (`--no-download` then `dvc pull`) populates the fs-cache directly and
+checkout works there. This is specific to *completed import* plus version-awareness.
+Pinned by a test, and a candidate upstream fix — register both cache storages for that
+case — is in `ideas.md`.
+
+**3. `--no-download` plus expansion is no longer a trap, but is still pointless.** It
+completes and pulls now, but DVC still streams every member to compute the `files:`
+md5s, so it costs the same transfer as a full import and keeps none of the bytes.
+
+**What is still not done.** The `extract_zips` default stays **off**. The reviewer
+argument for keeping it off has gone, so what remains is only the weaker one — a ZIP
+that is genuinely one archival unit — which the Zenodo survey found no instance of.
+Flipping it is now a live question rather than a blocked one, and it would change the
+meaning of existing `.dvc` files, so it wants its own decision.
+
+**Cost to change my mind:** set `immutability_basis=None` on a profile and that archive
+reverts entirely, tests included. The gate is one field.

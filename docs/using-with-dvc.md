@@ -56,45 +56,53 @@ S-BIAD599-annotation-representative-512-512.png
 `archivefs ls -l` shows the same thing plus checksums, which is usually what you
 actually want ([`cli-ls.md`](cli-ls.md)).
 
-## If a reviewer must be able to pull from the archive, use `--no-download` then `dvc pull`
+## A reviewer can pull from the archive — for `zenodo://` and `ega://`, with no extra step
 
-This is the most important thing on this page, and it is not obvious.
+This is the most important thing on this page.
 
-> **This whole section is a workaround, and a temporary one.** `--no-download` has
-> nothing to do with downloading; it is just the only user-facing switch that suppresses
-> `outs.md5`, which is what keeps the archive registered as a byte source. A properly
-> targeted fix is measured and pending —
-> [issue #1](https://github.com/swarbricklab/archivefs/issues/1) — after which a plain
-> `dvc import-url` is pullable by a reviewer and this extra step goes away for archives
-> that publish an immutable token (Zenodo, EGA). Everything below describes what
-> actually ships today.
-
-**A completed `dvc import-url` cannot be pulled from the archive by anyone else.** Once
-`outs.md5` is recorded, DVC stops treating the source URL as a place the bytes could
-come from — it assumes they are in your DVC remote. A reviewer who clones your repo
-with no remote configured gets `Checkout failed … Is your cache up to date?`, even
-though the checksum is sitting right there in the committed `.dvc`. The problem is not
-verification, it is that there is no byte source. Full measurements:
-[`decisions.md`](decisions.md) D17.
-
-The fix costs one extra command:
+**Just import.** A plain `dvc import-url` of a Zenodo or EGA path records everything a
+reviewer needs, and someone who clones your repo with **no DVC remote, no cache and no
+manifest** can materialise the data straight from the archive:
 
 ```console
-$ dvc import-url --no-download zenodo://1486184/github-mark.zip logo.zip
-$ dvc pull                       # you get the bytes, locally, verified
-$ git diff logo.zip.dvc          # unchanged: still pullable from the archive
+$ dvc import-url zenodo://1486184/github-mark.zip logo.zip
+$ git add -A && git commit -m "import the logo"
+# …a reviewer, in a fresh clone, with nothing configured:
+$ dvc pull
+A       logo.zip
+1 file fetched and 1 file added
 ```
 
-`--no-download` does not mean "do without the data" — it means "do not record an out
-hash". Pulling afterwards gives you the file in your workspace and cache while leaving
-the committed `.dvc` in the shape a reviewer can use. Verified: a clone with no remote
-anywhere runs `dvc pull` and gets the right bytes.
+This works because those archives publish something immutable per file, so archivefs
+records it in the `.dvc` and DVC keeps the archive registered as a place the bytes can
+come from. `decisions.md` D23 has the mechanism.
 
-**It also needs the archive to publish a checksum.** `geo://` and `bia://` submitted
-files publish none, so a reviewer route requires a `.chiro` manifest to supply one. For
-those two, a manifest is not a nicety — without it there is no way for anyone else to
-pull from the source. Commit the manifest beside the `.dvc` and name it relatively, so
-it travels with the clone and nothing has to be hosted:
+> **If you have used archivefs before, you may remember needing `--no-download`.** You
+> do not any more, for these two archives. That flag never had anything to do with
+> downloading — it was the only switch that suppressed `outs.md5`, which was what kept
+> the archive usable as a byte source. It still works, and it is still required for
+> `geo://` and `bia://` (below), but for Zenodo and EGA it now buys nothing.
+
+**Two costs, both worth knowing before you commit a hundred stages.**
+
+`push: false` is written into every out. `dvc push` will no longer upload archive data
+to a DVC remote, because DVC disables it for this kind of dependency. That is the
+intended trade — the archive *is* the remote — but it means a record that is later
+restricted or withdrawn leaves you with no fallback copy. If you need one, push the
+bytes somewhere yourself, outside DVC.
+
+`dvc checkout` needs one `dvc pull` first. If you delete a workspace file and try to
+restore it, checkout fails with `Is your cache up to date?` even though the bytes are in
+your cache — DVC looks in a different cache location for this kind of stage. One
+`dvc pull` fixes it permanently for that stage, at the price of one refetch. Ugly, and
+tracked as an upstream report; see D23 for the measurement.
+
+**`geo://` and `bia://` submitted files still need `--no-download` and a manifest**, and
+for them the advice below is unchanged. They publish no checksum, so nothing immutable
+can be recorded and a `.chiro` manifest has to supply it. For those two a manifest is
+not a nicety — without one there is no way for anyone else to pull from the source.
+Commit it beside the `.dvc` and name it relatively, so it travels with the clone and
+nothing has to be hosted:
 
 ```console
 $ cp …/GSE176078.chiro.json .
@@ -111,17 +119,22 @@ the checksums are offered as evidence.
 
 | form | bytes now | `.dvc` written | reviewer can pull from archive | use when |
 |---|---|---|---|---|
-| `dvc import-url --no-download URL out` then `dvc pull` | yes | yes | **yes**, if a checksum is published | you want the data *and* a reproducible repo |
-| `dvc import-url URL out` | yes | yes | no — needs `dvc push` to a remote | the data is only for you, or you host a remote |
+| `dvc import-url URL out` | yes | yes | **yes** for `zenodo`/`ega`; no otherwise | the normal case — start here |
+| `dvc import-url --no-download URL out` then `dvc pull` | yes | yes | **yes**, if a checksum is published | `geo`/`bia`, or you want `dvc push` to keep working |
 | `dvc import-url --no-download URL out` | *usually* not | yes | as above | you want the pin now, the data later |
 | `dvc import-url --no-exec URL out` | no | yes, **without checksums** | no | you only want the wiring |
 
-`dvc push` does work for `import-url` stages and covers every archive regardless of
-checksums — unlike `dvc import` from another DVC repo, which pushes nothing. But it
-means hosting a copy of data that is already published, which is usually the thing you
-were trying to avoid.
+Row 1 is the change: it used to be the row that trapped people. Note the second row is
+not obsolete — `--no-download` leaves the dependency non-version-aware, which is the
+only way to keep `dvc push` uploading archive data. Pick it if you want a hosted backup
+copy as well as the archive.
 
-### ZIPs: expansion and the reviewer route cannot yet be combined
+`dvc push` otherwise does work for `import-url` stages and covers every archive
+regardless of checksums — unlike `dvc import` from another DVC repo, which pushes
+nothing. But it means hosting a copy of data that is already published, which is usually
+the thing you were trying to avoid.
+
+### ZIPs: expansion and the reviewer route now combine
 
 `extract_zips=true` presents a Zenodo `.zip` as a directory. It is **off by default**,
 so a plain import gives you the `.zip` file — expected rather than a bug.
@@ -130,46 +143,39 @@ so a plain import gives you the `.zip` file — expected rather than a bug.
 turns out to be unevidenced: of 40 real ZIPs inspected, ~80% are a single top-level
 directory and none was a ZIP that must stay zipped —
 [`evidence/zenodo-zip-shape-2026-08-21.md`](evidence/zenodo-zip-shape-2026-08-21.md).
-What keeps it off is the limitation below.)
+The reason that used to keep it off — that expansion cost you the reviewer route — is
+gone, so the default is now a live question rather than a settled one.)
 
-You cannot currently have both expansion and a reviewer-pullable stage:
+**You can have both.** Import with expansion on, commit, and a reviewer clones and
+pulls the unzipped tree with no remote and no manifest:
 
 ```console
-# expansion — works, but only you can materialise it
-# (worked example: "Importing a ZIP member as a directory" below)
 $ dvc import-url --fs-config extract_zips=true -- zenodo://<rec>/archive.zip tree
-
-# reviewer route — works, but the ZIP stays opaque
-$ dvc import-url --no-download zenodo://<rec>/archive.zip archive.zip && dvc pull
+$ git add -A && git commit -m "import the tree"
+# …fresh clone, nothing configured:
+$ dvc pull
+A       tree/
 ```
 
-Combining them writes a stage that **cannot be pulled at all**, not even locally: a
-ZIP member publishes no md5, so `info()` reports none and DVC has nothing to fetch
-against ([`decisions.md`](decisions.md) D20).
+A ZIP member publishes no md5, and it does not need one. DVC's `version_id` is not a
+checksum field, so archivefs fills it with `container md5 : member CRC32` — both free
+from the ZIP's central directory — and DVC has something to fetch against. The `md5`
+field stays the honest post-extraction hash, so nothing is streamed to invent a digest
+and no manifest is involved. `decisions.md` D20 (corrected twice) and D23 have the
+argument; the two costs in the section above apply here too.
 
-Worse, the broken combination is not cheap. Because members report no md5, DVC computes
-one the only way left to it — by streaming them. Counting bytes through `_open` for
-`--no-download` on `zenodo://1486184/github-mark.zip`: **0 bytes** with expansion off,
-**2038** with it on, which is every member read twice. The cost table below says
-`zenodo://` is "metadata only", and that holds *only while expansion is off*; with it on
-you pay the archive's full uncompressed size for a stage that then cannot be pulled. On
-a 1.4 GB `spaceranger` bundle that is a long silent download ending in a broken stage.
-
-For a published analysis prefer the
-second and expand in the pipeline — the archive publishes the *container's* checksum,
-so the pin is download-free and anyone can pull it.
-
-This is a gap in archivefs, not in DVC, and the fix is known and small. A ZIP member
-does not need an md5 at all: DVC's `version_id` is not a checksum field, and filling it
-with `(container md5, member CRC32)` — both free from the central directory — is enough
-for `dvc pull` to materialise the expanded tree straight from Zenodo in a fresh clone
-with no remote. Measured working; no manifest, and nothing streamed to compute it.
-Tracked in [issue #1](https://github.com/swarbricklab/archivefs/issues/1).
-
-Until that lands the two routes stay separate. When it does, this whole limitation goes
-away and `extract_zips` becomes a candidate for defaulting on.
+**`--no-download` with expansion is no longer broken, but it is still pointless.** It
+used to write a stage nobody could materialise. Now it completes and pulls — but DVC
+still streams every member to compute the per-member md5s, so it costs the same
+transfer as a full import and keeps none of the bytes. Counting bytes through `_open`
+for `--no-download` on `zenodo://1486184/github-mark.zip`: **0** with expansion off,
+**2038** with it on. On a 1.4 GB `spaceranger` bundle that is a long download for
+nothing. Leave the flag off.
 
 ### The cost side of `--no-download`
+
+Only relevant for `geo://` and `bia://` now — for `zenodo://` and `ega://` you should
+not be passing the flag at all.
 
 `--no-download` records a **correct** checksum, and where the archive publishes none,
 DVC computes it by streaming the whole file. On a 120 MB BIA submitted file that is 83 s
@@ -177,7 +183,7 @@ of transfer for a stage that keeps no bytes, and you transfer it again on `dvc p
 
 | archive | publishes checksums? | `--no-download` cost |
 |---|---|---|
-| `zenodo://` | ✅ MD5 in record metadata | metadata only — but **full transfer** with `extract_zips=true`, see above |
+| `zenodo://` | ✅ MD5 in record metadata | metadata only — but **full transfer** with `extract_zips=true`, and no reason to pass the flag |
 | `ega://` | ✅ MD5 of the decrypted bytes | metadata only |
 | `bia://` derived (OME-Zarr) | ✅ MD5 from S3 ETag | metadata only |
 | `bia://` submitted | ❌ | **full transfer** |
@@ -190,11 +196,12 @@ $ archivefs stat geo://GSE176078/GSE176078_RAW.tar | grep '"md5"'
   "md5": null,
 ```
 
-`null` means you have a decision to make, and it is the one from the top of this page:
-supply a `.chiro` manifest and keep the reviewer route (the checksum then comes from
-metadata, so `--no-download` is cheap *and* pullable), or drop `--no-download` to save
-one transfer and accept that only a DVC remote will get the data to anyone else.
-Background: [`decisions.md`](decisions.md) D14 for the cost, D17 for the reviewer route.
+`null` means you have a decision to make, and for these two archives it is still the
+one from the top of this page: supply a `.chiro` manifest and keep the reviewer route
+(the checksum then comes from metadata, so `--no-download` is cheap *and* pullable), or
+drop `--no-download` to save one transfer and accept that only a DVC remote will get the
+data to anyone else. Background: [`decisions.md`](decisions.md) D14 for the cost, D17
+and D23 for the reviewer route.
 
 ## Passing storage options with `--fs-config`
 
@@ -262,26 +269,39 @@ github-mark.svg  md5sum
 [`--fs-config`](#passing-storage-options-with---fs-config) above.
 
 The dependency stays the ZIP; the out is the extracted tree, hashed from the extracted
-bytes:
+bytes. Every member is recorded individually, which is what a clone fetches against:
 
 ```yaml
 deps:
-- md5: fed36ce076379aa131932699d4879eb5.dir
-  path: zenodo://1486184/github-mark.zip
+- path: zenodo://1486184/github-mark.zip
   fs_config:
     extract_zips: 'true'
+  files:
+  - relpath: github-mark.svg
+    md5: 07883e93734b98cae0f7b9c55d287250
+    size: 968
+    version_id: 49f6a914ea33912471512ac9228c6923:b8576d45
+  - relpath: md5sum
+    md5: a56eeebc168c8f1798d0fa5f0dc68d68
+    size: 51
+    version_id: 49f6a914ea33912471512ac9228c6923:d8e7c813
 outs:
 - md5: fed36ce076379aa131932699d4879eb5.dir
   path: mark
+  push: false
 ```
 
-`fs_config` is committed and read back when the stage loads, so a clone expands the same
-way without being told to.
+`md5` is the hash of the extracted bytes; `version_id` is `container md5 : member
+CRC32`, which identifies the member inside the immutable record without anyone
+downloading it. `fs_config` is committed and read back when the stage loads, so a clone
+expands the same way without being told to — and can pull from Zenodo, with no remote.
 
-**Do not add `--no-download` to this form.** The combination is both broken and
-expensive, and neither is obvious from the output — see
-[ZIPs](#zips-expansion-and-the-reviewer-route-cannot-yet-be-combined) above. Today,
-getting an expanded tree to someone else means `dvc push` to a DVC remote.
+Note `push: false`: `dvc push` will not upload this data. See the two costs listed under
+the reviewer section above.
+
+**Do not add `--no-download` to this form.** It is no longer broken, but it streams
+every member to compute those md5s and keeps none of the bytes — the same transfer as a
+plain import, for nothing.
 
 ## Importing a whole record
 
@@ -336,10 +356,13 @@ Cloning your repo and running `dvc pull` requires, in their environment:
      path: bulk.txt.gz        # no `md5:` here → pullable from the archive
    ```
 
-   An `md5:` under `outs` means a completed import, and a reviewer without your cache
-   or a remote will get `Checkout failed … Is your cache up to date?`. Fix it by
-   re-importing with `--no-download` and then `dvc pull` — you keep the data, they gain
-   the route. [`decisions.md`](decisions.md) D17.
+   For `geo://` and `bia://` submitted files, an `md5:` under `outs` means a completed
+   import, and a reviewer without your cache or a remote will get
+   `Checkout failed … Is your cache up to date?`. Fix it by re-importing with
+   `--no-download` and then `dvc pull` — you keep the data, they gain the route.
+   For `zenodo://` and `ega://` this check no longer applies: a completed import is
+   pullable, and the tell is a `version_id` on the dep rather than an absent `outs.md5`.
+   [`decisions.md`](decisions.md) D17 and D23.
 
 ## Troubleshooting
 

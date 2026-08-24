@@ -129,14 +129,22 @@ def test_pull_materialises_the_recorded_bytes(repo):
     assert hashlib.md5(payload).hexdigest() == ZENODO_MD5  # noqa: S324
 
 
-def test_directory_import_builds_a_dir_manifest(repo):
+def test_directory_import_builds_a_per_member_manifest(repo):
+    """A record-level import records the members inline, one entry each.
+
+    This used to assert a single `.dir` hash on the dep. A version-aware dependency
+    writes a `files:` list instead — `relpath`, `md5`, `size`, `version_id` per
+    member — which is a strictly more useful thing to have committed, and is what
+    a reviewer's `dvc pull` fetches against.
+    """
     root, run = repo
     result = run("import-url", "--no-download", "zenodo://1486184", "record")
     assert result.returncode == 0, result.stderr
     spec = yaml.safe_load((root / "record.dvc").read_text())
     dep = spec["deps"][0]
-    assert dep["md5"].endswith(".dir")
-    assert dep["nfiles"] == 1
+    assert "md5" not in dep  # no .dir hash any more
+    assert [entry["relpath"] for entry in dep["files"]] == ["github-mark.zip"]
+    assert dep["files"][0]["version_id"] == ZENODO_MD5
 
     assert run("pull", "record.dvc").returncode == 0
     assert (root / "record" / "github-mark.zip").exists()
@@ -229,8 +237,16 @@ def test_zip_transparency_through_fs_config(repo):
     )
     assert result.returncode == 0, result.stderr
     spec = yaml.safe_load((root / "tree.dvc").read_text())
-    assert spec["deps"][0]["md5"].endswith(".dir")
-    assert spec["deps"][0]["nfiles"] == 2
+    # The dep records a per-member `files:` list rather than one `.dir` hash, which
+    # is what a version-aware dependency writes. That list is the thing that makes
+    # the stage pullable from Zenodo by someone with no remote — see the reviewer
+    # tests below — and it is git-tracked, so it travels with the clone.
+    members = {entry["relpath"]: entry for entry in spec["deps"][0]["files"]}
+    assert sorted(members) == ["github-mark.svg", "md5sum"]
+    assert members["github-mark.svg"]["md5"] == "07883e93734b98cae0f7b9c55d287250"
+    # container md5 + member CRC32: not a checksum field, so `md5` above stays the
+    # honest post-extraction hash and nothing had to be streamed to invent one
+    assert members["github-mark.svg"]["version_id"] == f"{ZENODO_MD5}:b8576d45"
 
     extracted = sorted(p.name for p in (root / "tree").iterdir())
     assert extracted == ["github-mark.svg", "md5sum"]
@@ -359,44 +375,111 @@ def test_partial_import_is_pullable_from_the_archive_by_a_reviewer(repo):
     assert hashlib.md5((clone / "logo.zip").read_bytes()).hexdigest() == ZENODO_MD5  # noqa: S324
 
 
-def test_completed_import_is_not_pullable_without_a_remote(repo):
-    """The trap, pinned so we notice if DVC ever changes it.
+def test_a_completed_import_is_also_pullable_by_a_reviewer(repo):
+    """The plain `dvc import-url` — no flags — is now pullable from the archive.
 
-    A full `dvc import-url` records `outs.md5`, and DVC then stops offering the
-    source as a fallback — so a reviewer with no remote cannot get the bytes even
-    though the checksum is in the committed file. If this test ever *fails*, the
-    upstream gap in ideas.md #0 has been closed and the docs should say so.
+    This replaces a test that asserted the opposite, and the inversion is the whole
+    point of the change: recording `outs.md5` used to make DVC stop offering the
+    archive as a byte source, so the author who did the normal thing produced a repo
+    nobody else could pull. `version_aware` puts the source back in
+    `_load_storage_from_import`'s disjunct, and the per-entry `version_id` is what
+    stops `_log_unversioned` throwing the entries away again.
+
+    So `--no-download` is no longer needed for Zenodo. The test above it still
+    passes, because that route keeps working — it is just not required any more.
     """
     root, run = repo
     dvc_bin = Path(sys.executable).with_name("dvc")
     assert run("import-url", ZENODO_FILE, "logo.zip").returncode == 0
-    assert yaml.safe_load((root / "logo.zip.dvc").read_text())["outs"][0]["md5"]
+    spec = yaml.safe_load((root / "logo.zip.dvc").read_text())
+    assert spec["outs"][0]["md5"] == ZENODO_MD5
+    # the price, and it is not optional: dvc/repo/imp_url.py forces can_push off
+    # for a version-aware dependency, so the DVC-remote backup route is gone
+    assert spec["outs"][0]["push"] is False
+    assert spec["deps"][0]["version_id"] == ZENODO_MD5
 
     _commit_all(root)
     clone, result = _clone_and_pull(root, "reviewer-full", dvc_bin)
-    assert result.returncode != 0
-    assert not (clone / "logo.zip").exists()
+    assert result.returncode == 0, result.stderr
+    assert hashlib.md5((clone / "logo.zip").read_bytes()).hexdigest() == ZENODO_MD5  # noqa: S324
 
 
-def test_an_expanded_zip_import_must_not_use_no_download(repo):
-    """`--no-download` + extract_zips writes a stage that cannot be pulled.
+def test_checkout_after_a_completed_import_needs_one_pull_first(repo):
+    """⚠️ The cost of version-awareness, measured and pinned rather than glossed.
 
-    Not even locally: fetch transfers nothing and checkout fails with
-    `CheckoutError`. A zip member publishes no md5 (D9 — member integrity is
-    CRC32 plus the workspace hash at extraction), so the recorded .dir has no
-    per-member checksum for DVC to fetch against, and the source-fallback that
-    makes a plain partial import pullable (D17) has nothing to work with.
+    A completed `import-url` writes the bytes to the object cache
+    (`cache/files/md5/…`), but `dvc/repo/index.py`'s `_load_storage_from_import`
+    points a version-aware stage's *cache* storage at `cache/fs/<protocol>/<token>`
+    instead. The two disagree, so `dvc checkout` on a deleted file cannot find the
+    copy the import just downloaded:
 
-    Pinned so we notice if *our* behaviour changes — not DVC's. A probe that forced
-    a per-member md5 in made `dvc pull` materialise this exact stage, from a fresh
-    clone with no remote, without altering the .dvc file at all
-    (evidence/zip-member-md5-pull-probe-2026-08-21.md). So this test guards the
-    consequence of `_zip_info` reporting `md5 = None`, and it should start failing
-    the day a .chiro manifest can supply ZIP-member checksums (ideas.md #0d) — at
-    which point invert it rather than delete it.
+        ERROR: Checkout failed … Is your cache up to date?
 
-    A full import (no --no-download) works and is what decisions.md D20 tells
-    people to use meanwhile.
+    One `dvc pull` fills the fs-cache — refetching from the archive — and every
+    later checkout works. So the cost is exactly *one extra archive fetch per
+    stage, the first time you restore from cache*, not "checkout is broken".
+
+    Two things this is not. It is not caused by `push: false`. And it is not a
+    pre-existing cost of the old recommended route: `--no-download` then `dvc pull`
+    populates the fs-cache directly, so checkout works there — measured on both
+    branches. This one is specific to *completed* import plus version-awareness.
+
+    A candidate upstream fix (register both cache storages for that case) is in
+    ideas.md; until then this test documents the behaviour so nobody rediscovers it
+    as a mystery. Invert it if DVC changes.
+    """
+    root, run = repo
+    assert run("import-url", ZENODO_FILE, "logo.zip").returncode == 0
+    assert (root / ".dvc" / "cache" / "files").exists()  # the bytes *are* cached
+    (root / "logo.zip").unlink()
+
+    assert run("checkout", "--force").returncode != 0  # ...but not where DVC looks
+    assert run("pull").returncode == 0
+    assert hashlib.md5((root / "logo.zip").read_bytes()).hexdigest() == ZENODO_MD5  # noqa: S324
+
+    # and from here on checkout is fine, which is what localises the cost
+    (root / "logo.zip").unlink()
+    assert run("checkout", "--force").returncode == 0
+    assert hashlib.md5((root / "logo.zip").read_bytes()).hexdigest() == ZENODO_MD5  # noqa: S324
+
+
+def test_geo_gets_no_version_token_and_so_stays_unpullable(repo):
+    """The gate, from the other side — and the reason it must be per-archive.
+
+    GEO publishes no digest (D8), so no immutable token can be built and
+    `version_aware` stays off. A completed GEO import is therefore *still* not
+    pullable without a remote or a manifest, which is correct: the alternative is
+    `_log_unversioned` dropping the files from the fetch and `dvc pull` exiting 0
+    having written nothing.
+
+    Pinned because a well-meaning change that switched `version_aware` on globally
+    would turn a loud failure into a silent one, and this test is the tripwire.
+    """
+    root, run = repo
+    result = run(
+        "import-url",
+        "geo://GSE176078/GSE176078_Wu_etal_2021_bulkRNAseq_raw_counts.txt.gz",
+        "bulk.txt.gz",
+    )
+    assert result.returncode == 0, result.stderr
+    spec = yaml.safe_load((root / "bulk.txt.gz.dvc").read_text())
+    # no push:false, because the dependency is not version-aware
+    assert "push" not in spec["outs"][0]
+    assert "version_id" not in spec["deps"][0]
+
+
+def test_an_expanded_zip_partial_import_is_pullable_too(repo):
+    """Inverted. This asserted the stage "cannot be materialised at all".
+
+    It could not, and the diagnosis in D20 was right that the cause was ours — but
+    the fix it proposed (a `.chiro` manifest supplying per-member md5s) was aimed one
+    field too far right. `version_id` is not a checksum, so filling it is enough for
+    DVC to fetch against, and `md5` stays the honest post-extraction hash.
+
+    `--no-download` is kept here only to pin that the combination is no longer a
+    trap. It buys nothing: DVC still streams every member to compute the `files:`
+    md5s, so this costs the same transfer as a full import and keeps none of the
+    bytes. Prefer the full import below.
     """
     root, run = repo
     assert run(
@@ -404,14 +487,24 @@ def test_an_expanded_zip_import_must_not_use_no_download(repo):
         ZENODO_FILE, "tree",
     ).returncode == 0
     spec = yaml.safe_load((root / "tree.dvc").read_text())
-    assert spec["deps"][0]["md5"].endswith(".dir")  # the stage looks fine...
-    assert run("pull").returncode != 0             # ...and cannot be materialised
-    assert not (root / "tree").exists()
+    assert len(spec["deps"][0]["files"]) == 2
+    assert run("pull").returncode == 0
+    assert sorted(p.name for p in (root / "tree").iterdir()) == [
+        "github-mark.svg",
+        "md5sum",
+    ]
 
 
-def test_an_expanded_zip_full_import_does_work(repo):
-    """The supported form: no --no-download, bytes land at import time."""
+def test_an_expanded_zip_is_pullable_by_a_reviewer_with_no_remote(repo):
+    """The customer's requirement, end to end.
+
+    `dvc import-url zenodo://…/dir.zip out` with expansion on, committed, cloned by
+    someone with no DVC remote, no cache and no manifest — and `dvc pull` gives them
+    the unzipped tree. This is what D20 said was impossible and what design.md:196
+    intended all along.
+    """
     root, run = repo
+    dvc_bin = Path(sys.executable).with_name("dvc")
     result = run(
         "import-url", "--fs-config", "extract_zips=true", "--", ZENODO_FILE, "tree"
     )
@@ -426,3 +519,11 @@ def test_an_expanded_zip_full_import_does_work(repo):
     # back — so pin it here rather than leave the promise resting on a doc sentence.
     spec = yaml.safe_load((root / "tree.dvc").read_text())
     assert spec["deps"][0]["fs_config"] == {"extract_zips": "true"}
+    assert spec["outs"][0]["push"] is False
+
+    _commit_all(root)
+    clone, result = _clone_and_pull(root, "reviewer-zip", dvc_bin)
+    assert result.returncode == 0, result.stderr
+    assert hashlib.md5((clone / "tree" / "github-mark.svg").read_bytes()).hexdigest() == (  # noqa: S324
+        "07883e93734b98cae0f7b9c55d287250"
+    )

@@ -101,17 +101,98 @@ def _make_dvc_class(name: str, protocol: str, fsspec_class_path: str) -> type:
         return f"{protocol}://{path}"
 
     def version_aware(self: Any) -> bool:
-        # Hard False. DVC turns this on whenever a Meta carries a version_id and
-        # then expects cloud-object-versioning methods (coalesce_version and
-        # friends) that only S3/GCS/Azure implement. archivefs' version tokens are
-        # DOIs and re-encryption stamps, not object versions, so they live under
-        # `archive_version` in info() and this stays off. docs/decisions.md D6.
-        return False
+        # On for any archive whose profile declares an immutability basis, off for
+        # the rest. This is the whole reviewer route: `dvc/repo/index.py`, in
+        # `_load_storage_from_import`, registers the source URL as a fallback
+        # storage only when
+        #
+        #     out.stage.is_repo_import or not out.hash_info or dep.fs.version_aware
+        #
+        # so with this off, a *completed* `dvc import-url` — the normal thing to do
+        # — records `outs.md5` and DVC then refuses to treat the archive as a place
+        # the bytes could come from. That is what forced `--no-download`, a flag
+        # whose name has nothing to do with what it does.
+        #
+        # It must be gated per-archive rather than switched on globally, because
+        # `dvc/repo/fetch.py`'s `_log_unversioned` *silently drops* every entry
+        # whose Meta carries no `version_id` — a warning, not an error. GEO and
+        # BIA-submitted publish nothing immutable to build a token from, so they
+        # would quietly lose files. `_check_versioned` below turns the same
+        # condition into a refusal for the archives that are on.
+        #
+        # docs/decisions.md D6 and D17 have the corrected reasoning, including why
+        # the earlier attempt at this appeared to fail.
+        return PROTOCOLS[protocol].immutability_basis is not None
+
+    def version_path(self: Any, path: str, version_id: str | None) -> str:
+        # Identity, and that is not a shim standing in for something better: a
+        # published record is immutable and its id is already in the path, so
+        # "the path at this version" *is* the path. S3 answers this with a
+        # ?versionId= query because an S3 key is mutable; a Zenodo record id or an
+        # EGA accession is not.
+        #
+        # Its absence is a hard AttributeError from `dvc/dependency/base.py`, and
+        # `dvc_data/index/checkout.py` asserts on it, which is the concrete failure
+        # D6 generalised from.
+        return path
 
     def coalesce_version(self: Any, path: str, version_id: str | None) -> tuple:
-        # Defensive: a .dvc written before D6 may still carry a version_id, and
-        # crashing on someone's existing file would be rude.
+        # Nothing to reconcile: there is one version of a given path, so whatever
+        # version_id a caller arrives with is the one it gets back. Written
+        # defensively for pre-D6 `.dvc` files; now load-bearing, since
+        # `dvc/output.py` calls it for every out of a version-aware dependency.
         return path, version_id
+
+    def _check_versioned(self: Any, entries: Any) -> Any:
+        """Refuse to hand DVC a file entry with no version token.
+
+        The failure this prevents is silent. Once a version-aware ``FileStorage``
+        remote is in play, ``_log_unversioned`` removes untokened entries from the
+        fetch and logs a warning; ``dvc pull`` then reports success having quietly
+        skipped files. A Zenodo file whose published digest is not an md5 is a real
+        instance — the profile says "this archive can produce a token", and this is
+        where that claim gets checked per entry rather than trusted.
+        """
+        from archivefs.errors import NotSupportedError
+
+        materialised = list(entries)
+        for entry in materialised:
+            if not isinstance(entry, dict) or entry.get("type") != "file":
+                continue
+            if entry.get("version_id"):
+                continue
+            name = entry.get("name", "?")
+            msg = (
+                f"{protocol}://{name} carries no immutable version token, so DVC "
+                f"would drop it from a fetch and report success. Expected one "
+                f"from: {PROTOCOLS[protocol].immutability_basis}. Import the "
+                f"containing archive as a single file instead, or supply a "
+                f".chiro manifest."
+            )
+            raise NotSupportedError(msg)
+        return materialised
+
+    def info(self: Any, path: Any, *args: Any, **kwargs: Any) -> Any:
+        # `path` may be a *list* — DVC's base batches info() across a thread pool —
+        # so delegate rather than reimplement, and normalise before checking.
+        entry = base.info(self, path, *args, **kwargs)
+        if self.version_aware:
+            self._check_versioned([entry] if isinstance(entry, dict) else entry)
+        return entry
+
+    def walk(self: Any, path: str, **kwargs: Any) -> Any:
+        # The important one. DVC builds a directory index through
+        # `dvc_data.index.build.safe_walk`, which calls *this* method with
+        # detail=True; checking only `info` would validate a single-file import and
+        # miss every member of a directory or expanded ZIP.
+        #
+        # `ls` is deliberately not overridden. Nothing builds a `Meta` from it —
+        # DVC reaches for `self.fs.ls` directly in `isdir`, bypassing the wrapper —
+        # so an override there would add a failure mode without adding coverage.
+        for root, dirs, files in base.walk(self, path, **kwargs):
+            if self.version_aware and isinstance(files, dict):
+                self._check_versioned(files.values())
+            yield root, dirs, files
 
     def _get_kwargs_from_urls(urlpath: str) -> dict:
         # DVC's default runs fsspec's infer_storage_options, which reads an
@@ -134,7 +215,11 @@ def _make_dvc_class(name: str, protocol: str, fsspec_class_path: str) -> type:
             "_get_kwargs_from_urls": staticmethod(_get_kwargs_from_urls),
             "unstrip_protocol": unstrip_protocol,
             "version_aware": property(version_aware),
+            "version_path": version_path,
             "coalesce_version": coalesce_version,
+            "_check_versioned": _check_versioned,
+            "info": info,
+            "walk": walk,
             "fs": cached_property(fs),
             "__doc__": f"DVC wrapper around archivefs' {protocol}:// filesystem.",
         },

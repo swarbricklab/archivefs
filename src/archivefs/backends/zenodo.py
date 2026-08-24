@@ -305,9 +305,21 @@ class ZenodoFileSystem(ArchiveFileSystem):
                 "checksum_type": algorithm.upper() if digest else None,
                 # The version DOI is an immutable token for this exact byte
                 # sequence — the load-bearing part of the ZIP integrity argument.
-                # Named `archive_version`, not `version_id`: DVC reads the latter
-                # as a cloud object version (docs/decisions.md D6).
                 "archive_version": provenance["doi"],
+                # And the same fact in the field DVC reads, which is what lets a
+                # *completed* `dvc import-url` stay pullable from Zenodo by someone
+                # with no DVC remote (decisions.md D17, corrected).
+                #
+                # The md5 rather than the DOI, even though "which version" is what
+                # the field is named for: `version_id` also drives `dvc update`'s
+                # change detection, and a token derived from the bytes cannot miss
+                # a change that a re-used identifier would. The DOI is not lost —
+                # it is right above, and in the `zenodo` block.
+                #
+                # None when Zenodo published something other than an md5. That is
+                # not silently tolerated: the DVC wrapper refuses such an entry
+                # rather than let DVC drop it from a fetch with a warning.
+                "version_id": digest if is_md5 else None,
                 # The API's own link first (real records carry it under "self"),
                 # and a *quoted* fallback: a "#" or "?" in a filename would
                 # otherwise truncate the URL at what urlsplit reads as a fragment
@@ -458,6 +470,11 @@ class ZenodoFileSystem(ArchiveFileSystem):
             "md5": None,
             "checksum": None,
             "checksum_type": None,
+            # Same rule as the md5 above: the container's token identifies the ZIP
+            # file, and this entry is no longer presenting itself as that file.
+            # DVC ignores a directory's version_id anyway; dropping it keeps the
+            # entry from claiming an identity for something it will not write.
+            "version_id": None,
             "zenodo": {
                 **container["zenodo"],
                 "container": container["name"],
@@ -499,6 +516,20 @@ class ZenodoFileSystem(ArchiveFileSystem):
                 ),
             }
             info["archive_version"] = container["archive_version"]
+            # A member has no md5 and must not acquire one — computing it means
+            # streaming the archive, and `md5` must never hold anything that is not
+            # a content checksum (geo.py states the rule). `version_id` is *not* a
+            # checksum field, which is what makes this legitimate rather than a
+            # substitution: the container's md5 authenticates every member
+            # extracted from it, and the CRC32 says which member. Together they
+            # name exactly one byte sequence inside exactly one immutable record,
+            # download-free, and that is enough for DVC to fetch against — so an
+            # expanded ZIP no longer needs a manifest to be pullable
+            # (decisions.md D20, corrected twice; ideas.md #0d).
+            container_md5 = info["zenodo"]["container_md5"]
+            crc = info.get("crc32")
+            if container_md5 and crc is not None:
+                info["version_id"] = f"{container_md5}:{crc:08x}"
         return info
 
     # ---------------------------------------------------- read surface (+ZIP)
