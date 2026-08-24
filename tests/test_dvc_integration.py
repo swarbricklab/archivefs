@@ -420,3 +420,9 @@ def test_an_expanded_zip_full_import_does_work(repo):
         "github-mark.svg",
         "md5sum",
     ]
+    # docs/using-with-dvc.md tells people a clone expands the same way without being
+    # told to. That rests entirely on DVC round-tripping fs_config through the
+    # committed file — dvc/output.py dumps it, dvc/dependency/__init__.py reads it
+    # back — so pin it here rather than leave the promise resting on a doc sentence.
+    spec = yaml.safe_load((root / "tree.dvc").read_text())
+    assert spec["deps"][0]["fs_config"] == {"extract_zips": "true"}

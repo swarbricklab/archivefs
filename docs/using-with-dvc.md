@@ -127,6 +127,7 @@ You cannot currently have both expansion and a reviewer-pullable stage:
 
 ```console
 # expansion — works, but only you can materialise it
+# (worked example: "Importing a ZIP member as a directory" below)
 $ dvc import-url --fs-config extract_zips=true -- zenodo://<rec>/archive.zip tree
 
 # reviewer route — works, but the ZIP stays opaque
@@ -135,7 +136,17 @@ $ dvc import-url --no-download zenodo://<rec>/archive.zip archive.zip && dvc pul
 
 Combining them writes a stage that **cannot be pulled at all**, not even locally: a
 ZIP member publishes no md5, so `info()` reports none and DVC has nothing to fetch
-against ([`decisions.md`](decisions.md) D20). For a published analysis prefer the
+against ([`decisions.md`](decisions.md) D20).
+
+Worse, the broken combination is not cheap. Because members report no md5, DVC computes
+one the only way left to it — by streaming them. Counting bytes through `_open` for
+`--no-download` on `zenodo://1486184/github-mark.zip`: **0 bytes** with expansion off,
+**2038** with it on, which is every member read twice. The cost table below says
+`zenodo://` is "metadata only", and that holds *only while expansion is off*; with it on
+you pay the archive's full uncompressed size for a stage that then cannot be pulled. On
+a 1.4 GB `spaceranger` bundle that is a long silent download ending in a broken stage.
+
+For a published analysis prefer the
 second and expand in the pipeline — the archive publishes the *container's* checksum,
 so the pin is download-free and anyone can pull it.
 
@@ -154,7 +165,7 @@ of transfer for a stage that keeps no bytes, and you transfer it again on `dvc p
 
 | archive | publishes checksums? | `--no-download` cost |
 |---|---|---|
-| `zenodo://` | ✅ MD5 in record metadata | metadata only |
+| `zenodo://` | ✅ MD5 in record metadata | metadata only — but **full transfer** with `extract_zips=true`, see above |
 | `ega://` | ✅ MD5 of the decrypted bytes | metadata only |
 | `bia://` derived (OME-Zarr) | ✅ MD5 from S3 ETag | metadata only |
 | `bia://` submitted | ❌ | **full transfer** |
@@ -216,6 +227,49 @@ possible to put a secret there: DVC rejects `--fs-config password=…` outright.
 `dvc import-url` with `--fs-config` is the supported pattern, and it covers every
 storage option a remote could have carried. Rationale in
 [`decisions.md`](decisions.md) D15.
+
+## Importing a ZIP member as a directory
+
+Zenodo's file namespace is flat — a key is a name, not a path — so a deposit with
+directory structure has no way to express it *except* as a ZIP (of 5592 keys across 900
+records, the only 55 containing a `/` come from the GitHub-release integration:
+[`evidence/zenodo-zip-shape-2026-08-21.md`](evidence/zenodo-zip-shape-2026-08-21.md)).
+Real records are routinely mixed — flat images sitting beside `spaceranger_*.zip`
+bundles that are each one directory. So expansion is a per-import choice, not a property
+of the record, and `--fs-config` records it per dependency:
+
+```console
+$ dvc import-url --fs-config extract_zips=true -- \
+    zenodo://1486184/github-mark.zip mark
+Importing 'zenodo://1486184/github-mark.zip' -> 'mark'
+$ ls mark
+github-mark.svg  md5sum
+```
+
+`out` is positional — there is no `-o` — and the `--` is required for the reason under
+[`--fs-config`](#passing-storage-options-with---fs-config) above.
+
+The dependency stays the ZIP; the out is the extracted tree, hashed from the extracted
+bytes:
+
+```yaml
+deps:
+- md5: fed36ce076379aa131932699d4879eb5.dir
+  path: zenodo://1486184/github-mark.zip
+  fs_config:
+    extract_zips: 'true'
+outs:
+- md5: fed36ce076379aa131932699d4879eb5.dir
+  path: mark
+```
+
+`fs_config` is committed and read back when the stage loads, so a clone expands the same
+way without being told to.
+
+**Do not add `--no-download` to this form.** The combination is both broken and
+expensive, and neither is obvious from the output — see
+[ZIPs](#zips-expansion-and-the-reviewer-route-cannot-yet-be-combined) above. Today,
+getting an expanded tree to someone else means `dvc push` to a DVC remote.
 
 ## Importing a whole record
 
