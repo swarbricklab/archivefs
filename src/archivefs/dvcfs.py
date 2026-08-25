@@ -273,11 +273,20 @@ def _remote_schema(backend: Any) -> dict:
     The config keys and their types come from ``registry.py``; all this adds is
     DVC's own validator for each type. ``Bool`` is the one that matters — see the
     ``Backend.config`` docstring for why an untyped boolean silently expands ZIPs
-    against the user's instruction.
+    against the user's instruction. ``int`` has the same problem in a quieter
+    form: ``strip_components = 0`` would arrive as the string ``"0"`` and
+    ``int("0")`` is fine, but ``if not self.strip_components`` on ``"0"`` is not —
+    so the coercion happens here, where DVC can also reject a negative.
     """
     from dvc import config_schema
 
-    validators: dict[type, Any] = {bool: config_schema.Bool, str: object}
+    validators: dict[type, Any] = {
+        bool: config_schema.Bool,
+        int: config_schema.All(
+            config_schema.Coerce(int), config_schema.Range(0, min_included=True)
+        ),
+        str: object,
+    }
     return {
         key: validators.get(kind, object) for key, kind in backend.config.items()
     }

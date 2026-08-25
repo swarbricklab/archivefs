@@ -164,7 +164,12 @@ PROTOCOLS: dict[str, Backend] = {
         extra=None,
         summary="Zenodo records by id or DOI (public; token only for restricted)",
         requires=("requests",),
-        config={"extract_zips": bool, "api_url": str, "chiro": str},
+        config={
+            "extract_zips": bool,
+            "strip_components": int,
+            "api_url": str,
+            "chiro": str,
+        },
         dvc_wrapper="ZenodoDVCFileSystem",
         published_checksum="md5",
         # A published record is immutable, so the file md5 identifies the entry.

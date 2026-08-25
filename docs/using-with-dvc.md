@@ -268,6 +268,51 @@ github-mark.svg  md5sum
 `out` is positional — there is no `-o` — and the `--` is required for the reason under
 [`--fs-config`](#passing-storage-options-with---fs-config) above.
 
+### The wrapper directory is stripped, so you do not get `name/name/…`
+
+Depositors zip a *directory*, because `unzip` creates no wrapper of its own and a bare
+bag of files explodes into whatever directory the reader was standing in. ~80% of
+sampled Zenodo ZIPs are shaped that way. Left alone, the obvious import nests twice —
+and note the destination below is typed by hand, so no choice of name avoids it:
+
+```console
+$ dvc import-url --fs-config extract_zips=true -- \
+    zenodo://<rec>/pathology_annotations.zip pathology_annotations
+$ tree                       # what you would get without stripping
+└── pathology_annotations
+    └── pathology_annotations
+        ├── visium
+        ├── visium_hd
+        └── visium_lymph_nodes
+```
+
+So `strip_components` defaults to **1** and that redundant level is dropped. It is a
+maximum rather than a promise: a component comes off only while it is the archive's
+sole top-level entry *and* a directory, so a ZIP holding two real directories, a flat
+bag of files, or one big file is passed through untouched. `strip_components=0`
+presents the interior verbatim.
+
+```console
+$ dvc import-url --fs-config extract_zips=true strip_components=0 -- \
+    zenodo://<rec>/pathology_annotations.zip pathology_annotations
+```
+
+Pairs are separated by **spaces, not commas** — `--fs-config` is `nargs="*"`, so
+`a=1,b=2` parses as the single key `a` with the value `1,b=2`. That greediness is also
+why the `--` matters more here than with one option.
+
+Both settings are committed to `fs_config`, so a clone expands the same way. The
+resulting relpaths are written into the `files:` list below, which means the shape of
+your tree is recorded in git rather than recomputed from a rule that might change.
+
+macOS `__MACOSX/._*` resource forks — in 30% of sampled ZIPs — are hidden from
+listings, and therefore kept out of your workspace and out of the tracked directory
+hash. They stay readable if you name one explicitly. This is also what lets stripping
+fire at all on those archives: `outs/` plus `__MACOSX/` is *two* top-level entries.
+
+`archivefs ls -R -o extract_zips=true <url>` shows the tree you will get, before
+importing anything. Full rationale in [`decisions.md`](decisions.md) D24.
+
 The dependency stays the ZIP; the out is the extracted tree, hashed from the extracted
 bytes. Every member is recorded individually, which is what a clone fetches against:
 

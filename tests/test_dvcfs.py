@@ -188,9 +188,16 @@ def test_every_profile_option_reaches_dvcs_schema():
         if not backend.dvc_wrapper:
             continue
         for key, kind in backend.config.items():
-            value = "true" if kind is bool else "x"
+            # As DVC would hand it over: a config file is INI, so every value is
+            # a string on the way in, whatever the profile declares it to be.
+            value = {bool: "true", int: "1"}.get(kind, "x")
             validated = SCHEMA["remote"][str]({"url": f"{name}://x", key: value})
             assert key in validated, f"{name}.{key} did not survive DVC validation"
+            assert isinstance(validated[key], kind), (
+                f"{name}.{key} reached the filesystem as {type(validated[key])}, "
+                f"not {kind} — an INI string that is never coerced is the bug "
+                f"`Backend.config`'s types exist to prevent"
+            )
 
 
 # --------------------------------------------------------------- the wrappers
@@ -443,6 +450,35 @@ def test_boolean_config_values_are_coerced_not_passed_as_strings():
         {"url": "zenodo://1486184", "extract_zips": "true"}
     )
     assert validated["extract_zips"] is True
+
+
+def test_turning_stripping_off_through_config_actually_turns_it_off():
+    """`strip_components = 0` is the same INI trap wearing a different hat.
+
+    `int("0")` is falsy but the string `"0"` is not, so an uncoerced value would
+    read as "strip one level" from a user who had just written 0 — the failure
+    mode `extract_zips = false` had, in the one setting whose whole purpose is
+    to say *do not rearrange my tree*.
+    """
+    dvcfs.register()
+    from dvc.config_schema import SCHEMA
+
+    validated = SCHEMA["remote"][str](
+        {"url": "zenodo://1486184", "strip_components": "0"}
+    )
+    assert validated["strip_components"] == 0
+    assert not validated["strip_components"]
+
+
+def test_a_negative_strip_depth_is_refused_by_dvc():
+    """There is no sensible reading of -1, so it is a config error, not a clamp."""
+    import voluptuous
+
+    dvcfs.register()
+    from dvc.config_schema import SCHEMA
+
+    with pytest.raises(voluptuous.MultipleInvalid):
+        SCHEMA["remote"][str]({"url": "zenodo://1486184", "strip_components": "-1"})
 
 
 def test_the_module_imports_without_dvc_installed(tmp_path):

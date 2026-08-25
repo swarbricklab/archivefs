@@ -53,6 +53,20 @@ DOI_RE = re.compile(
 )
 RECORD_RE = re.compile(r"^\d+$")
 
+#: Path components that are packaging cruft rather than deposit content. macOS
+#: writes ``__MACOSX/._name`` resource forks into **30% of the Zenodo ZIPs
+#: surveyed** (``docs/evidence/zenodo-zip-shape-2026-08-21.md``). Two reasons to
+#: drop them and not merely tolerate them: nobody wants them in a workspace, and
+#: with ``version_aware`` on they would land in the committed ``files:`` list and
+#: in the tracked directory hash. They also mask the wrapper directory — a ZIP
+#: holding ``outs/`` plus ``__MACOSX/`` has *two* top-level entries, so without
+#: this the strip below would not fire on precisely the 30% that need it most.
+ZIP_CRUFT = frozenset({"__MACOSX"})
+
+
+def _is_cruft(interior: str) -> bool:
+    return any(part in ZIP_CRUFT for part in interior.split("/"))
+
 
 class ZenodoFileSystem(ArchiveFileSystem):
     """Read-only fsspec filesystem over Zenodo records.
@@ -67,11 +81,23 @@ class ZenodoFileSystem(ArchiveFileSystem):
         Override for the sandbox or a self-hosted InvenioRDM.
     extract_zips:
         Present ``*.zip`` members as directories, listing and reading their
-        interiors through fsspec's ``ZipFileSystem``. Off by default: some ZIPs
-        are genuine archival units and should not be sprayed across a workspace.
+        interiors through fsspec's ``ZipFileSystem``. Off by default — though not
+        for the reason once given here: "some ZIPs are genuine archival units" is
+        a sound worry in general and **unevidenced on Zenodo**, where none of 40
+        sampled ZIPs had to stay zipped
+        (``docs/evidence/zenodo-zip-shape-2026-08-21.md``). The default is now
+        simply undecided; see ``docs/decisions.md`` D24.
         The explicit per-URL form is the fsspec chain
         ``zip://::zenodo://record/archive.zip``; this flag is the per-remote
         default, and both run the same code underneath.
+    strip_components:
+        How many leading path components to drop from a ZIP's interior, and *at
+        most* — a component is only dropped while it is the archive's sole
+        top-level entry and a directory. Defaults to 1, which turns the near
+        universal ``archive.zip`` → ``archive/…`` wrapper into a workspace tree
+        with no redundant level. Set to 0 to present the interior verbatim.
+        See ``docs/decisions.md`` D24 for why this defaults on and why it checks
+        rather than stripping blindly as ``tar --strip-components`` does.
     zip_limits:
         A :class:`~archivefs.zipsafe.ZipLimits` overriding the zip-bomb bounds.
         Genomics deposits are large; raise them deliberately rather than
@@ -98,12 +124,14 @@ class ZenodoFileSystem(ArchiveFileSystem):
         self,
         api_url: str = DEFAULT_API_URL,
         extract_zips: bool = False,
+        strip_components: int = 1,
         zip_limits: Any = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self.api_url = api_url.rstrip("/")
         self.extract_zips = extract_zips
+        self.strip_components = int(strip_components)
         self.zip_limits = zip_limits
         self.token = self.creds.get("token")
         self.token_source = self.creds.source_of("token") if self.token else "anonymous"
@@ -111,6 +139,8 @@ class ZenodoFileSystem(ArchiveFileSystem):
         self._records: dict[str, dict] = {}
         #: zip member path -> ZipFileSystem, created lazily
         self._zip_views: dict[str, Any] = {}
+        #: zip member path -> the interior prefix `strip_components` removed
+        self._zip_prefixes: dict[str, str] = {}
 
     def invalidate_cache(self, path: str | None = None) -> None:
         """Also drop the record JSON and any open ZIP views.
@@ -123,6 +153,7 @@ class ZenodoFileSystem(ArchiveFileSystem):
         if path is None:
             self._records.clear()
             self._zip_views.clear()
+            self._zip_prefixes.clear()
             return
         container, _ = self._split(self._strip_protocol(path))
         record = self._records.pop(container, None)
@@ -144,6 +175,7 @@ class ZenodoFileSystem(ArchiveFileSystem):
                     self._drift.pop(alias, None)
         for zip_path in [p for p in self._zip_views if p.startswith(f"{container}/")]:
             self._zip_views.pop(zip_path, None)
+            self._zip_prefixes.pop(zip_path, None)
 
     # ------------------------------------------------------------------- auth
 
@@ -386,6 +418,87 @@ class ZenodoFileSystem(ArchiveFileSystem):
                 return f"{container}/{key}", member[len(key) + 1 :]
         return None
 
+    # -------------------------------------------------- the wrapper directory
+
+    def _zip_prefix(self, zip_path: str) -> str:
+        """The leading interior directories ``strip_components`` removes, or ``""``.
+
+        Depositors zip a *directory*, because ``unzip`` creates no wrapper of its
+        own and a bare bag of files detonates into whatever directory the reader
+        was standing in. So the convention is a service to everyone downloading
+        from the record page — and it means the obvious import,
+        ``pathology_annotations.zip`` into ``pathology_annotations/``, lands the
+        contents at ``pathology_annotations/pathology_annotations/…``. ~80% of
+        sampled Zenodo ZIPs are shaped this way
+        (``docs/evidence/zenodo-zip-shape-2026-08-21.md``), so the redundant level
+        is the common case, not the exception.
+
+        Unlike ``tar --strip-components``, this **checks before it strips**: a
+        component comes off only while it is the archive's sole top-level entry
+        *and* a directory. A ZIP that is a flat bag, or holds two real
+        directories, or wraps one file, is passed through untouched rather than
+        losing its first sibling. So the setting is a maximum, not a promise, and
+        the failure mode of asking for too much is "nothing happened".
+        """
+        if not self.strip_components:
+            return ""
+        if zip_path in self._zip_prefixes:
+            return self._zip_prefixes[zip_path]
+        view = self.zip_view(zip_path)
+        # Files only. A ZIP's directory entries are optional markers, not content:
+        # counting them as top-level entries would make the strip depend on which
+        # tool wrote the archive.
+        remaining = [
+            name
+            for name in view.zip.namelist()
+            if not name.endswith("/") and not _is_cruft(name)
+        ]
+        parts: list[str] = []
+        for _ in range(self.strip_components):
+            tops = {name.split("/", 1)[0] for name in remaining}
+            if len(tops) != 1:
+                break
+            top = tops.pop()
+            if not all(name.startswith(f"{top}/") for name in remaining):
+                break  # a lone *file* at this level, so there is no directory here
+            parts.append(top)
+            remaining = [name[len(top) + 1 :] for name in remaining]
+        prefix = "/".join(parts)
+        if prefix:
+            # Not a warning — this is the designed common case — but it must be
+            # visible, because it is the one thing about the resulting tree that
+            # the URL does not tell you. `dvc -v` shows it; the committed `files:`
+            # list records the result either way.
+            logger.info(
+                "%s: presenting its contents from %r (strip_components=%d); "
+                "pass strip_components=0 for the interior verbatim",
+                zip_path,
+                prefix,
+                self.strip_components,
+            )
+        self._zip_prefixes[zip_path] = prefix
+        return prefix
+
+    def _to_interior(self, zip_path: str, member: str) -> str:
+        """Workspace-relative path inside a ZIP -> the real interior path."""
+        prefix = self._zip_prefix(zip_path)
+        if not prefix:
+            return member
+        return f"{prefix}/{member}" if member else prefix
+
+    def _from_interior(self, zip_path: str, interior: str) -> str:
+        """The inverse of :meth:`_to_interior`, for building workspace names.
+
+        The two must stay exact inverses: ``_to_interior`` is what ``cat_file``
+        and ``_open`` fetch through, so a strip applied in one direction only
+        would list a tidy tree and then read the wrong member — or nothing.
+        ``test_stripping_is_symmetric_so_reads_follow_listings`` pins that.
+        """
+        prefix = self._zip_prefix(zip_path)
+        if prefix and interior.startswith(f"{prefix}/"):
+            return interior[len(prefix) + 1 :]
+        return interior
+
     def zip_view(self, zip_path: str):
         """A ``ZipFileSystem`` over one ZIP member, created lazily.
 
@@ -494,8 +607,8 @@ class ZenodoFileSystem(ArchiveFileSystem):
         except (FileNotFoundError, KeyError) as exc:
             msg = f"{interior!r} is not inside {zip_path}"
             raise ArchiveNotFoundError(msg) from exc
-        name = f"{zip_path}/{interior}" if interior else zip_path
-        info["name"] = name
+        member = self._from_interior(zip_path, interior)
+        info["name"] = f"{zip_path}/{member}" if member else zip_path
         if info.get("type") == "file":
             # Asymmetric but sound integrity contract (design.md): the container
             # is verified by Zenodo's MD5 on download, members carry only the
@@ -538,11 +651,16 @@ class ZenodoFileSystem(ArchiveFileSystem):
         path = self._strip_protocol(path)
         inside = self._zip_container(path) if path else None
         if inside:
-            zip_path, interior = inside
+            zip_path, member = inside
             view = self.zip_view(zip_path)
             entries = [
-                self._zip_info(zip_path, entry["name"].lstrip("/"))
-                for entry in view.ls(interior, detail=True)
+                self._zip_info(zip_path, name)
+                for entry in view.ls(self._to_interior(zip_path, member), detail=True)
+                # Cruft is hidden, never unreadable: a caller who names a
+                # `__MACOSX` path explicitly still gets it. Hiding is a listing
+                # decision, and `find`/`walk` inherit it, which is what keeps
+                # resource forks out of the tracked directory hash.
+                if not _is_cruft(name := entry["name"].lstrip("/"))
             ]
             return entries if detail else [e["name"] for e in entries]
 
@@ -565,10 +683,10 @@ class ZenodoFileSystem(ArchiveFileSystem):
         path = self._strip_protocol(path)
         inside = self._zip_container(path) if path else None
         if inside:
-            zip_path, interior = inside
-            if not interior:
+            zip_path, member = inside
+            if not member:
                 return self._container_as_directory(zip_path)
-            return self._zip_info(zip_path, interior)
+            return self._zip_info(zip_path, self._to_interior(zip_path, member))
         return super().info(path, **kwargs)
 
     def cat_file(
@@ -577,7 +695,8 @@ class ZenodoFileSystem(ArchiveFileSystem):
         path = self._strip_protocol(path)
         inside = self._zip_container(path)
         if inside and inside[1]:
-            zip_path, interior = inside
+            zip_path, member = inside
+            interior = self._to_interior(zip_path, member)
             return self.zip_view(zip_path).cat_file(interior)[start:end]
         return super().cat_file(path, start=start, end=end, **kwargs)
 
@@ -585,7 +704,8 @@ class ZenodoFileSystem(ArchiveFileSystem):
         path = self._strip_protocol(path)
         inside = self._zip_container(path) if "r" in mode else None
         if inside and inside[1]:
-            zip_path, interior = inside
+            zip_path, member = inside
+            interior = self._to_interior(zip_path, member)
             return self.zip_view(zip_path)._open(interior, mode=mode)
         return super()._open(path, mode=mode, **kwargs)
 
