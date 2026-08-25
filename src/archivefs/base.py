@@ -58,6 +58,12 @@ logger = logging.getLogger(__name__)
 
 __all__ = ["ArchiveFile", "ArchiveFileSystem"]
 
+#: Smallest piece worth issuing as its own parallel request. Below roughly this,
+#: the per-request round trip costs more than the extra connection wins — on the
+#: Zenodo measurement a whole 4 MiB block took 11.3 s, so the fixed overhead is
+#: seconds and slicing into kilobytes would be pure loss.
+MIN_PARALLEL_PIECE = 512 * 1024
+
 
 class ArchiveFileSystem(AbstractFileSystem):
     """Base for read-only, accession-addressed archive filesystems.
@@ -101,6 +107,7 @@ class ArchiveFileSystem(AbstractFileSystem):
         request_timeout: int = 300,
         transfer_timeout: int = 1800,
         chiro: str | bool = "auto",
+        max_concurrent_reads: int = 8,
         **kwargs: Any,
     ) -> None:
         # Anything a subclass declared as a credential is consumed here rather
@@ -113,6 +120,16 @@ class ArchiveFileSystem(AbstractFileSystem):
         self.request_timeout = request_timeout
         self.transfer_timeout = transfer_timeout
         self.chiro = chiro
+        #: Ceiling on *all* concurrent ranged reads through this filesystem.
+        #:
+        #: One bound, held here rather than at each call site, because the callers
+        #: multiply: `dvc_data.hashfile.build._hash_files` already runs up to
+        #: `HASH_JOBS` threads, and each one splitting a block across N connections
+        #: would put HASH_JOBS x N sockets on a free public service. Measured on
+        #: Zenodo, 8 is where the gain flattens: one 4 MiB block takes 11.3s as a
+        #: single request, 4.3s split four ways, 2.4s split eight.
+        self.max_concurrent_reads = max(1, int(max_concurrent_reads))
+        self._read_slots = threading.BoundedSemaphore(self.max_concurrent_reads)
         if block_size:
             self.blocksize = block_size
         self.creds = CredentialResolver(
@@ -638,11 +655,59 @@ class ArchiveFileSystem(AbstractFileSystem):
             end = min(end, size)
         if end <= start:
             return b""
+        with self._read_slots:
+            return self._fetch_range_locked(info, start, end)
+
+    def _fetch_range_locked(self, info: dict, start: int, end: int) -> bytes:
         alignment = self.range_alignment
         if alignment > 1 and start % alignment:
             aligned = start - (start % alignment)
             return self._fetch_checked(info, aligned, end)[start - aligned :]
         return self._fetch_checked(info, start, end)
+
+    def fetch_ranges(self, info: dict, spans: list[tuple[int, int]]) -> list[bytes]:
+        """Fetch several ranges of one object at once, in the order given.
+
+        Archives throttle **per connection**, not per client, so this is where the
+        throughput is. Measured on Zenodo, one 4 MiB block: 11.3 s as a single
+        request, 4.3 s split four ways, 2.4 s split eight — 4.7x for the same bytes.
+
+        Ordinary reads cannot exploit that on their own: a sequential reader asks
+        for one block at a time, so there is only ever one range in flight. This
+        method is the seam for a caller that knows it wants a contiguous run and can
+        cut it up (see ``zenodo._member_view``).
+
+        Concurrency is bounded by :attr:`max_concurrent_reads` inside
+        :meth:`_fetch_range`, not here, so splitting cannot multiply with a caller
+        that is already threaded.
+        """
+        if len(spans) < 2:
+            return [self._fetch_range(info, *span) for span in spans]
+        from concurrent.futures import ThreadPoolExecutor
+
+        workers = min(len(spans), self.max_concurrent_reads)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            # `map` preserves order and re-raises the first exception, so a failed
+            # sub-range fails the whole read rather than yielding a hole. Silently
+            # returning short data here would corrupt a member with no error.
+            return list(pool.map(lambda span: self._fetch_range(info, *span), spans))
+
+    def split_span(self, start: int, end: int) -> list[tuple[int, int]]:
+        """Cut ``[start, end)`` into pieces worth fetching in parallel.
+
+        Below one piece per slot there is nothing to gain, and very small pieces
+        make the per-request overhead dominate — so a short range is left whole.
+        """
+        length = end - start
+        pieces = self.max_concurrent_reads
+        if pieces < 2 or length < 2 * MIN_PARALLEL_PIECE:
+            return [(start, end)]
+        pieces = min(pieces, length // MIN_PARALLEL_PIECE)
+        step = -(-length // pieces)
+        return [
+            (offset, min(offset + step, end))
+            for offset in range(start, end, step)
+        ]
 
     def _fetch_checked(self, info: dict, start: int, end: int) -> bytes:
         if info.get("missing_upstream"):

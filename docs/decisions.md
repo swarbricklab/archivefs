@@ -1591,3 +1591,78 @@ authority when the declared size is stale.
 
 **Cost to change my mind:** the two views are two dict lookups and one method. Point
 `cat_file`/`_open` back at `zip_view` and the old behaviour returns exactly.
+
+## D26 — archives throttle **per connection**, so one block is fetched over several
+
+**Measured, three trials each, one 4 MiB block of a Zenodo object:**
+
+| | median | throughput |
+|---|---|---|
+| one request | 11.3 s | 0.37 MB/s |
+| split 4 ways | 4.3 s | 0.97 MB/s |
+| split 8 ways | **2.4 s** | **1.76 MB/s** |
+
+Consistent across trials (`12.7/11.3/11.3`, `4.7/3.8/4.3`, `3.2/2.3/2.4`), which
+matters because Zenodo's wall clock is otherwise unreliable — the same import varied
+323–611 s run to run. The limit is per *connection*, not per client.
+
+**Why the obvious hook does not work.** `MMapCache` (D25) takes a `multi_fetcher` for
+fetching several blocks at once, but it only ever passes more than one range when a
+single read spans several missing blocks. A sequential reader misses one block at a
+time, so there is never more than one range in flight and the hook does nothing. The
+parallelism has to come from splitting **within** a range.
+
+**Decision.** `fetch_ranges` fetches many spans of one object concurrently; `split_span`
+cuts one span into `max_concurrent_reads` pieces, with a floor
+(`MIN_PARALLEL_PIECE = 512 KiB`) below which a range is left whole — the fixed cost of a
+request here is *seconds*, so slicing into kilobytes would be pure loss. Zenodo's
+member view supplies a `multi_fetcher` that splits every range and rejoins the pieces.
+
+### The bound is one per filesystem, and that is the load-bearing part
+
+`dvc_data.hashfile.build._hash_files` already runs up to `HASH_JOBS` threads. Each one
+splitting a block eight ways independently would put 32 sockets on a free public
+archive from a single `dvc pull`. So the semaphore lives in `_fetch_range` — every path
+shares it, and splitting cannot multiply with a caller that is already threaded.
+`test_concurrency_is_bounded_no_matter_how_many_callers` drives six threads at a bound
+of four and watches the peak.
+
+**An honest cost: this caps reads that were previously unbounded.** DVC's transfer
+concurrency is `4 * cpu_count()`, so a many-file record import could previously have
+had far more than eight reads in flight, and now cannot. That is deliberate — 192
+concurrent connections to a free service is not something to ship on purpose, and it
+would be throttled anyway — but **the many-small-files case is not measured**, only
+argued. `max_concurrent_reads` is a storage option on every backend so it can be raised
+without a code change, and that is where to start if a record of many files gets slower.
+
+### What could have gone wrong, and what pins it
+
+A split range rejoined out of order, or short by a piece, yields a member that is
+confidently wrong rather than an error — then hashed, committed and trusted. So:
+
+* `fetch_ranges` uses `ThreadPoolExecutor.map`, which preserves order and re-raises the
+  first exception. A failed piece fails the read.
+  `test_a_failed_piece_fails_the_read_rather_than_leaving_a_hole` pins that, because the
+  alternative is silent truncation.
+* `test_split_pieces_reassemble_to_the_same_bytes` reads a whole archive with the bound
+  at 1 and at 8 and compares byte for byte, and
+  `test_splitting_actually_happened` exists so that test cannot pass by never splitting.
+* Verified live against a real 25 MB Zenodo archive: 26 members, md5 per member,
+  **identical serial and parallel**, twice — once before and once after the refactor
+  that moved the `multi_fetcher` into the cache options.
+
+End-to-end speedup on the same 26 members: **2.38x** and **3.51x** on two runs
+(52.5s/22.1s and 82.6s/23.5s). Quote the range, not a point — the serial baseline
+itself moved by 60% between runs. The 4.7x from the single-block table above is a
+micro-benchmark and should not be expected end to end, where central-directory reads
+and small members are not worth splitting.
+
+Alignment is not a special case: `_fetch_range` already aligns a range start down and
+slices, which is what EGA's 16-byte requirement needs, so piece boundaries can fall
+anywhere.
+
+**Not measured on EGA or BIA.** Only Zenodo's member view splits today; the bound
+applies everywhere, the splitting does not.
+
+**Cost to change my mind:** `max_concurrent_reads=1` restores single-request reads
+exactly, per filesystem, with no code change.

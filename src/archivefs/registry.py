@@ -150,6 +150,7 @@ PROTOCOLS: dict[str, Backend] = {
             "layout": str,
             "chiro": str,
             "api_url": str,
+            "max_concurrent_reads": int,
         },
         dvc_wrapper="EGADVCFileSystem",
         # `plainChecksum` is the md5 of the *decrypted* bytes, which is what lands
@@ -169,6 +170,7 @@ PROTOCOLS: dict[str, Backend] = {
             "strip_components": int,
             "api_url": str,
             "chiro": str,
+            "max_concurrent_reads": int,
         },
         dvc_wrapper="ZenodoDVCFileSystem",
         published_checksum="md5",
@@ -185,7 +187,12 @@ PROTOCOLS: dict[str, Backend] = {
         extra=None,
         summary="GEO supplementary/processed files over public HTTPS (anonymous)",
         requires=("requests",),
-        config={"view": str, "base_url": str, "chiro": str},
+        config={
+            "view": str,
+            "base_url": str,
+            "chiro": str,
+            "max_concurrent_reads": int,
+        },
         dvc_wrapper="GEODVCFileSystem",
         # GEO publishes no per-file digest at all (D8), so `info()["md5"]` is None
         # with a `checksum_source` saying why rather than an ETag standing in.
@@ -201,7 +208,13 @@ PROTOCOLS: dict[str, Backend] = {
             "conversions)"
         ),
         requires=("requests",),
-        config={"view": str, "api_url": str, "s3_url": str, "chiro": str},
+        config={
+            "view": str,
+            "api_url": str,
+            "s3_url": str,
+            "chiro": str,
+            "max_concurrent_reads": int,
+        },
         dvc_wrapper="BIADVCFileSystem",
         # Mixed, and recorded conservatively: the derived (OME-Zarr) view carries
         # md5s, submitted files carry none. A profile cannot say "sometimes", and

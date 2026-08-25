@@ -11,6 +11,7 @@ import hashlib
 import io
 import json
 import os
+import threading
 import zipfile
 from pathlib import Path
 
@@ -468,6 +469,128 @@ def test_invalidating_the_cache_releases_the_reading_view(zfs):
     assert zfs._member_views == {}
     # and it still works afterwards
     assert zfs.cat_file(f"{RECID}/archive.zip/README.md") == b"# a deposit\n"
+
+
+# --------------------------------------- parallel ranged reads (D26), and bounds
+
+
+BIG = {"a.bin": os.urandom(900_000), "b.bin": os.urandom(900_000)}
+
+
+def test_split_pieces_reassemble_to_the_same_bytes(zipped, fake_zenodo):
+    """The only test that really matters here: concurrency must not corrupt.
+
+    A range split across connections and rejoined in the wrong order — or short by
+    a piece — produces a member that is confidently wrong rather than an error. So
+    the same archive is read with splitting off and on and compared byte for byte.
+    """
+    serial = zipped(BIG, max_concurrent_reads=1)
+    expected = {
+        path[len(f"{RECID}/archive.zip") + 1 :]: serial.cat_file(path)
+        for path in sorted(serial.find(f"{RECID}/archive.zip"))
+    }
+    assert expected == BIG
+
+    parallel = zipped(BIG, max_concurrent_reads=8)
+    actual = {
+        path[len(f"{RECID}/archive.zip") + 1 :]: parallel.cat_file(path)
+        for path in sorted(parallel.find(f"{RECID}/archive.zip"))
+    }
+    assert actual == expected
+
+
+def test_the_reading_view_really_is_wired_for_parallel_fetches(zipped):
+    """A multi_fetcher that never got attached is *correct*, just slow.
+
+    Nothing else here can tell the difference: the fake server answers instantly,
+    so the byte-identical test passes either way and only wall clock against a real
+    archive would show it. That makes this the test that has to be explicit — it
+    caught nothing, but it is the reason a refactor of how the fetcher is attached
+    cannot quietly undo the whole point of the change.
+    """
+    fs = zipped(BIG, max_concurrent_reads=8)
+    view = fs._member_view(f"{RECID}/archive.zip")
+    assert view.zip.fp.cache.multi_fetcher is not None
+
+    seen: list[list[tuple[int, int]]] = []
+    real = fs._fetch_block_ranges
+    fs._fetch_block_ranges = lambda info, spans: (
+        seen.append(list(spans)) or real(info, spans)
+    )
+    fs._close_member_view(f"{RECID}/archive.zip")
+    fs.cat_file(f"{RECID}/archive.zip/a.bin")
+    assert seen, "the multi_fetcher was never called, so nothing ran in parallel"
+
+
+def test_splitting_actually_happened(zipped):
+    """Guard against the reassembly test passing because nothing was ever split."""
+    fs = zipped(BIG, max_concurrent_reads=8)
+    spans = fs.split_span(0, fs.blocksize)
+    assert len(spans) == 8, spans
+    assert spans[0][0] == 0
+    assert spans[-1][1] == fs.blocksize
+    # contiguous, no gaps and no overlap
+    assert all(a[1] == b[0] for a, b in zip(spans, spans[1:]))
+
+
+def test_a_range_too_small_to_split_is_left_whole(fs):
+    """Below the piece floor, extra connections cost more round trips than they win."""
+    assert fs.split_span(0, 1000) == [(0, 1000)]
+    assert fs.split_span(0, 600_000) == [(0, 600_000)]  # under 2x the floor
+    assert len(fs.split_span(0, 4 << 20)) == 8
+
+
+def test_concurrency_is_bounded_no_matter_how_many_callers(zipped):
+    """The bound is per filesystem, not per call site.
+
+    `dvc_data` already runs up to `HASH_JOBS` hash threads; if each split a block
+    eight ways independently, a free public archive would see 32 sockets from one
+    `dvc pull`. The semaphore lives in `_fetch_range` so every path shares it.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    fs = zipped(BIG, max_concurrent_reads=4)
+    peak = {"now": 0, "max": 0}
+    guard = threading.Lock()
+    real = fs._fetch_range_locked
+
+    def watched(info, start, end):
+        with guard:
+            peak["now"] += 1
+            peak["max"] = max(peak["max"], peak["now"])
+        try:
+            return real(info, start, end)
+        finally:
+            with guard:
+                peak["now"] -= 1
+
+    fs._fetch_range_locked = watched
+    members = sorted(fs.find(f"{RECID}/archive.zip"))
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        list(pool.map(fs.cat_file, members * 3))
+    assert peak["max"] <= 4, f"{peak['max']} concurrent reads against a bound of 4"
+
+
+def test_a_failed_piece_fails_the_read_rather_than_leaving_a_hole(zipped, monkeypatch):
+    """A dropped piece must raise, not silently short the member.
+
+    `ThreadPoolExecutor.map` re-raises, which is the behaviour relied on; this pins
+    it, because the alternative failure is a member that is quietly truncated and
+    then hashed and committed as correct.
+    """
+    fs = zipped(BIG, max_concurrent_reads=8)
+    real = fs._fetch_range_locked
+    calls = {"n": 0}
+
+    def flaky(info, start, end):
+        calls["n"] += 1
+        if calls["n"] == 3:
+            raise OSError("piece three is gone")
+        return real(info, start, end)
+
+    fs._fetch_range_locked = flaky
+    with pytest.raises(OSError, match="piece three is gone"):
+        fs.cat_file(f"{RECID}/archive.zip/a.bin")
 
 
 # ------------------------------------------------- the wrapper directory (D24)
