@@ -625,7 +625,17 @@ class ArchiveFileSystem(AbstractFileSystem):
     # --------------------------------------------------------------- transfer
 
     def _fetch_range(self, info: dict, start: int, end: int) -> bytes:
-        """Fetch ``[start, end)`` of ``info``'s bytes, checked and aligned."""
+        """Fetch ``[start, end)`` of ``info``'s bytes, checked and aligned.
+
+        ``end`` past the end of the object is clamped rather than requested. A
+        block-aligned reader asks for the block *containing* the last byte, so the
+        final read of almost every file overshoots; sending that overshoot to the
+        server buys nothing and — before this clamp — spent five retries deciding
+        that a correct response was a server fault.
+        """
+        size = info.get("size")
+        if size is not None:
+            end = min(end, size)
         if end <= start:
             return b""
         alignment = self.range_alignment
@@ -695,6 +705,20 @@ class ArchiveFileSystem(AbstractFileSystem):
                         want,
                     )
                     return b"".join(chunks)[start:end]
+                total = self._range_total(response)
+                if total is not None and start + got >= total:
+                    # The server served to the end of the object, which is correct
+                    # HTTP for a range that overshoots — not a short read.
+                    #
+                    # Judged against `Content-Range`'s own total rather than the
+                    # size in `info`, because the two cases that get here are
+                    # exactly the ones where `info` cannot be trusted: a reader
+                    # asking for the block *containing* the last byte (which
+                    # `_fetch_range` now clamps), and a declared size that is
+                    # stale. Treating either as a fault burnt `max_retries`
+                    # requests and then reported a server problem that did not
+                    # exist, advising the caller to reduce concurrency.
+                    return b"".join(chunks)
                 last_error = f"asked for {want} bytes, got {got}"
             finally:
                 response.close()
@@ -721,6 +745,17 @@ class ArchiveFileSystem(AbstractFileSystem):
         """The offset a ``206`` says it is serving from, if it says."""
         header = response.headers.get("Content-Range", "")
         match = re.match(r"\s*bytes\s+(\d+)-", header)
+        return int(match.group(1)) if match else None
+
+    @staticmethod
+    def _range_total(response: Any) -> int | None:
+        """The object's full length a ``206`` declares, if it declares one.
+
+        ``Content-Range: bytes 0-99/2048`` — the part after the slash. A server
+        may send ``*`` there when it does not know, hence the ``None``.
+        """
+        header = response.headers.get("Content-Range", "")
+        match = re.match(r"\s*bytes\s+\d+-\d+/(\d+)\s*$", header)
         return int(match.group(1)) if match else None
 
     def _size_of(self, info: dict) -> int:
