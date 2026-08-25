@@ -58,11 +58,29 @@ logger = logging.getLogger(__name__)
 
 __all__ = ["ArchiveFile", "ArchiveFileSystem"]
 
-#: Smallest piece worth issuing as its own parallel request. Below roughly this,
-#: the per-request round trip costs more than the extra connection wins — on the
-#: Zenodo measurement a whole 4 MiB block took 11.3 s, so the fixed overhead is
-#: seconds and slicing into kilobytes would be pure loss.
+#: Smallest piece worth issuing as its own parallel request.
+#:
+#: Not because a request is expensive: measured, the fixed cost of one is about
+#: **0.1 s** (`docs/evidence/zenodo-piece-size-2026-08-25.md` §2). D26 said "seconds",
+#: having read 11.3 s for a 4 MiB block as overhead when it was 4.2 MB at the 0.37
+#: MB/s a single connection sustains — a rate, not a price. This floor survives that
+#: correction on the measurement instead: throughput falls off below ~1 MiB pieces
+#: (512 KiB: 5.76 MB/s, 1 MiB: 8.93, 2 MiB: 9.70), so there is nothing to win by
+#: slicing finer, and a floor keeps a pathological `max_concurrent_reads` from
+#: shredding a range into kilobytes.
 MIN_PARALLEL_PIECE = 512 * 1024
+
+#: Piece size that measured fastest against Zenodo, at every connection count from 2
+#: to 8. See §1 of the same evidence note: 1.68x over the 512 KiB pieces we shipped.
+TARGET_PARALLEL_PIECE = 2 * 1024 * 1024
+
+#: Ceiling on the bytes in flight across all connections at once, which is the
+#: variable that actually predicts throughput — *however* you reach it. Sorting every
+#: measured cell by `connections x piece size` (§4) gives a peak at 16 MiB and a cliff
+#: past it: 8x2 MiB is 9.7-14.0 MB/s, while 8x4 MiB, 16x2 MiB and 8x8 MiB — 32, 32 and
+#: 64 MiB in flight — give 5.05, 4.08 and 2.49. Overshooting costs more than
+#: undershooting, so this is a ceiling and not a target.
+MAX_BYTES_IN_FLIGHT = 16 * 1024 * 1024
 
 
 class ArchiveFileSystem(AbstractFileSystem):
@@ -126,10 +144,18 @@ class ArchiveFileSystem(AbstractFileSystem):
         #: multiply: `dvc_data.hashfile.build._hash_files` already runs up to
         #: `HASH_JOBS` threads, and each one splitting a block across N connections
         #: would put HASH_JOBS x N sockets on a free public service. Measured on
-        #: Zenodo, 8 is where the gain flattens: one 4 MiB block takes 11.3s as a
-        #: single request, 4.3s split four ways, 2.4s split eight.
+        #: Zenodo, 8 is also the fastest setting and not merely the politest: at
+        #: 2 MiB pieces, 4 connections give 9.12 MB/s, 8 give 14.03, and 16 give
+        #: 4.08 — past 8 the extra bytes in flight cost more than the extra socket
+        #: wins. See :meth:`parallel_piece_size`.
         self.max_concurrent_reads = max(1, int(max_concurrent_reads))
         self._read_slots = threading.BoundedSemaphore(self.max_concurrent_reads)
+        #: Whether the caller chose a block size, as opposed to inheriting the class
+        #: default. :meth:`parallel_block_size` enlarges the latter and must not
+        #: touch the former — a caller who asks for small blocks is usually asking
+        #: for cheap small reads, and silently quadrupling them would be the exact
+        #: eager fetch D25 refused.
+        self._block_size_chosen = bool(block_size)
         if block_size:
             self.blocksize = block_size
         self.creds = CredentialResolver(
@@ -669,8 +695,9 @@ class ArchiveFileSystem(AbstractFileSystem):
         """Fetch several ranges of one object at once, in the order given.
 
         Archives throttle **per connection**, not per client, so this is where the
-        throughput is. Measured on Zenodo, one 4 MiB block: 11.3 s as a single
-        request, 4.3 s split four ways, 2.4 s split eight — 4.7x for the same bytes.
+        throughput is. Measured on Zenodo, one connection sustains ~0.30 MB/s
+        whatever size you ask it for, and eight carrying 2 MiB each sustain
+        9.7-14.0 MB/s together.
 
         Ordinary reads cannot exploit that on their own: a sequential reader asks
         for one block at a time, so there is only ever one range in flight. This
@@ -692,17 +719,86 @@ class ArchiveFileSystem(AbstractFileSystem):
             # returning short data here would corrupt a member with no error.
             return list(pool.map(lambda span: self._fetch_range(info, *span), spans))
 
+    def parallel_piece_size(self) -> int:
+        """Bytes per parallel request: the measured optimum, or less if that would
+        put more than :data:`MAX_BYTES_IN_FLIGHT` on the wire at once.
+
+        Divided by the connection bound rather than fixed, because the cliff is in
+        the *product*. At the default 8 connections this is the full 2 MiB; raise
+        `max_concurrent_reads` to 16 and it becomes 1 MiB, which keeps the bytes in
+        flight at the peak instead of walking into the measured collapse (16 x 2 MiB
+        is 4.08 MB/s against 8 x 2 MiB's 14.03 — *more* connections, less throughput).
+        """
+        share = MAX_BYTES_IN_FLIGHT // self.max_concurrent_reads
+        return max(MIN_PARALLEL_PIECE, min(TARGET_PARALLEL_PIECE, share))
+
+    def parallel_block_size(self, container_size: int | None = None) -> int:
+        """Block size for a cache whose misses are split across connections.
+
+        One block is one range is one round of parallel pieces, so a block that is
+        smaller than the bytes the path wants in flight leaves connections carrying
+        less than they could: the 4 MiB block we shipped became 8 x 512 KiB and ran
+        at 5.76 MB/s where 8 x 2 MiB runs at 9.70-14.03.
+
+        ``container_size`` bounds it to an eighth of the object, because a block is
+        also what a *small* read costs. Unbounded, a 16 MiB block would mean reading
+        one 7-byte member of a 25 MB archive fetched two blocks that overlap the
+        whole archive — the eager container fetch D25 refused, arrived at sideways.
+        Bounding the block bounds that at a quarter of the container however large the
+        blocks would otherwise be, which is *better* than the 33% the shipped 4 MiB
+        block spent on that same 25 MB archive.
+
+        Issue #12 proposed this shape (`clamp(container_size // 512, ...)`) for the
+        opposite reason — to make blocks *bigger* on large archives. The measurement
+        says large archives already reach the ceiling and it is the small ones that
+        need the clamp; the constants differ by 32x and the direction is reversed, but
+        the idea that the container's size belongs in this decision was right. Zenodo
+        publishes it in the record metadata, so it costs no request to consult.
+
+        Only for caches that split (Zenodo's ``mmap`` member view today). The listing
+        view must keep the small exact-range cache or ``ls`` stops being free (D25),
+        and an explicitly chosen block size is returned untouched.
+        """
+        if self._block_size_chosen:
+            return self.blocksize
+        piece = self.parallel_piece_size()
+        one_round = self.max_concurrent_reads * piece
+        if container_size:
+            share = container_size // 8
+            one_round = min(one_round, share - share % piece)
+        return max(self.blocksize, one_round)
+
     def split_span(self, start: int, end: int) -> list[tuple[int, int]]:
         """Cut ``[start, end)`` into pieces worth fetching in parallel.
 
-        Below one piece per slot there is nothing to gain, and very small pieces
-        make the per-request overhead dominate — so a short range is left whole.
+        Pieces of a fixed size, and *not* one per connection — which is the bug this
+        replaced. `MMapCache` consolidates every consecutive missing block into a
+        single range, so reading one 100 MB member asked for one 100 MB range, which
+        this method dutifully cut into 8 pieces of 12.5 MB: 100 MB in flight, four
+        times past the cliff, at a measured ~2.5 MB/s. Cutting to a size instead
+        gives 50 pieces of 2 MiB, of which the semaphore keeps 8 moving — the same
+        connections, the same bytes, at the peak of the curve rather than the tail.
+
+        The count is rounded up to a **whole number of full rounds**, one piece per
+        connection per round, and this is not cosmetic: cutting a 23 MB member into
+        2 MiB pieces gives 12, which is eight connections followed by four, and the
+        second round leaves half the connections idle. Measured end to end, that lost
+        more than the smaller pieces won (1.74 MB/s against 2.08 for the uncut rule).
+        Sixteen pieces of 1.44 MB is the same two rounds with none of them idle.
+
+        A range too short to be worth cutting is left whole.
         """
         length = end - start
-        pieces = self.max_concurrent_reads
-        if pieces < 2 or length < 2 * MIN_PARALLEL_PIECE:
+        if self.max_concurrent_reads < 2 or length < 2 * MIN_PARALLEL_PIECE:
             return [(start, end)]
-        pieces = min(pieces, length // MIN_PARALLEL_PIECE)
+        per_round = self.max_concurrent_reads * self.parallel_piece_size()
+        rounds = -(-length // per_round)
+        # Never below the floor, which also stops a short range being shredded into
+        # one tiny piece per connection just to fill a round.
+        pieces = min(rounds * self.max_concurrent_reads, length // MIN_PARALLEL_PIECE)
+        pieces = max(2, pieces)
+        # Even pieces rather than N full ones and a runt: the runt would finish
+        # early and leave its connection idle while the rest ran on.
         step = -(-length // pieces)
         return [
             (offset, min(offset + step, end))

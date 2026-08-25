@@ -499,6 +499,25 @@ them, and a single "import this study" operation becomes possible. The Chirograp
 registry design is the natural home for the link data; the archivefs side is small.
 Worth revisiting once the imminent multi-part deposit exists as a concrete example.
 
+## Split ordinary file reads too, not only ZIP blocks
+
+Everything D26 and D27 built — `fetch_ranges`, `split_span`, the shared semaphore — is
+reachable from exactly one place: the `multi_fetcher` on Zenodo's ZIP member view.
+**A plain file is still read over a single connection.** `ArchiveFile._fetch_range`
+and `cat_file` call `_fetch_range` directly, and `cat_file` passes the *whole file* as
+one range, so `archivefs get zenodo://…/big.tif` is one request for 2.5 GB.
+
+The measured size of that gap: a single connection sustains ~0.30 MB/s at any request
+size, against 9.7–14.0 MB/s for the same bytes cut into 2 MiB pieces across eight
+(`evidence/zenodo-piece-size-2026-08-25.md`). That is up to **30x, on every plain
+download from every backend** — EGA and BIA included, where nothing splits today.
+
+The change looks like two lines (`_fetch_range` → `fetch_ranges(split_span(...))`) and
+it is not, quite: the semaphore already bounds concurrency, but `cat_file` on a large
+file would hold every piece in memory before joining, and the pieces of a 2.5 GB file
+are 1250 of them. Wants a streaming rejoin, or a cap on how much of a single range is
+split at once. Worth doing — it is the largest measured win left in the transfer path.
+
 ## Seed the ZIP reading cache from the listing view
 
 `_member_view` (D25) re-parses the central directory through its own block-aligned

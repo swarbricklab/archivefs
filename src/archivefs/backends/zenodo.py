@@ -556,19 +556,27 @@ class ZenodoFileSystem(ArchiveFileSystem):
         container, member = self.split_path(self._strip_protocol(path))
         info = self._member(container, member)
         options: dict[str, Any] = {}
+        block_size = self.blocksize
         if cache_type == "mmap":
             # Every block this cache misses is fetched over several connections at
-            # once: Zenodo throttles per connection, so the same 4 MiB arrives in
-            # 2.4s instead of 11.3s. Passed as a cache option rather than assigned
-            # afterwards, so the cache is never briefly live without it.
+            # once, because a single connection to Zenodo sustains ~0.30 MB/s no
+            # matter what you ask it for. Passed as a cache option rather than
+            # assigned afterwards, so the cache is never briefly live without it.
             options["multi_fetcher"] = lambda spans: self._fetch_block_ranges(
                 info, spans
             )
+            # And the block is sized to fill those connections rather than to be
+            # small: a block is one round of parallel pieces, so 4 MiB of it was
+            # 8 x 512 KiB and half the throughput of 8 x 2 MiB. Reading a member
+            # smaller than one block costs the block, so this is bought with the
+            # single-member read — bounded by passing the container's size, which
+            # Zenodo publishes in the record and which therefore costs no request.
+            block_size = self.parallel_block_size(info.get("size"))
         return ArchiveFile(
             self,
             info,
             mode="rb",
-            block_size=self.blocksize,
+            block_size=block_size,
             cache_type=cache_type,
             cache_options=options,
         )
@@ -605,6 +613,13 @@ class ZenodoFileSystem(ArchiveFileSystem):
         directory lives at the *end* of the archive — so that is a whole block,
         fetched a second time. Reading one 7-byte member out of the 25 MB archive
         went from 4.2 MB (one block) to **8.2 MB (two)**.
+
+        That 8.2 MB is unchanged on a 25 MB archive, but the block now grows with the
+        container to fill eight connections with 2 MiB each (D27), so on a 395 MB
+        archive the same read costs **33.6 MB** — two 16 MiB blocks, 8% of it. A full
+        traversal is unaffected either way: every block is read once. `ideas.md`'s
+        "seed this cache from the listing view" would remove one of the two blocks,
+        and is worth more now than it was.
 
         So a single-member ``archivefs get`` pays about double, while a full import
         went from 497.8 MB to 25.0 MB. That is the trade, and it is worth taking

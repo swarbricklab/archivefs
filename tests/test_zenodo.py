@@ -20,6 +20,7 @@ from tests.fake_http import FakeRequestsModule, FakeResponse, ranged
 
 from archivefs import base as base_mod
 from archivefs.backends.zenodo import ZenodoFileSystem
+from archivefs.base import MAX_BYTES_IN_FLIGHT, TARGET_PARALLEL_PIECE
 from archivefs.errors import (
     ArchiveNotFoundError,
     AuthenticationError,
@@ -525,10 +526,11 @@ def test_the_reading_view_really_is_wired_for_parallel_fetches(zipped):
 def test_splitting_actually_happened(zipped):
     """Guard against the reassembly test passing because nothing was ever split."""
     fs = zipped(BIG, max_concurrent_reads=8)
-    spans = fs.split_span(0, fs.blocksize)
+    block = fs.parallel_block_size()
+    spans = fs.split_span(0, block)
     assert len(spans) == 8, spans
     assert spans[0][0] == 0
-    assert spans[-1][1] == fs.blocksize
+    assert spans[-1][1] == block
     # contiguous, no gaps and no overlap
     assert all(a[1] == b[0] for a, b in zip(spans, spans[1:]))
 
@@ -537,7 +539,113 @@ def test_a_range_too_small_to_split_is_left_whole(fs):
     """Below the piece floor, extra connections cost more round trips than they win."""
     assert fs.split_span(0, 1000) == [(0, 1000)]
     assert fs.split_span(0, 600_000) == [(0, 600_000)]  # under 2x the floor
+    # A 4 MiB range is one full round of eight, which is what it always was: the
+    # piece cap only binds once a range is bigger than the connections can carry.
     assert len(fs.split_span(0, 4 << 20)) == 8
+
+
+def test_a_range_is_cut_into_whole_rounds_so_no_connection_idles(fs):
+    """Twelve pieces across eight connections is eight busy, then four.
+
+    Measured end to end, that half-empty second round cost more than the smaller
+    pieces won — 1.74 MB/s against the 2.08 of not capping the piece size at all. The
+    cap has to come with a count that fills every round it starts.
+    """
+    spans = fs.split_span(0, 23_000_000)
+    assert len(spans) % fs.max_concurrent_reads == 0, len(spans)
+    assert all(end - start <= TARGET_PARALLEL_PIECE for start, end in spans)
+
+
+def test_a_long_range_is_cut_by_piece_size_not_by_connection_count(fs):
+    """The measured bug: one range per member, cut into `max_concurrent_reads`.
+
+    `MMapCache` consolidates consecutive missing blocks into a single range, so
+    reading a 100 MB member asked for 100 MB at once — which the old rule cut into 8
+    pieces of 12.5 MB, putting 100 MB in flight against a path that peaks at 16 MiB
+    and measured ~2.5 MB/s at 64 MiB. Piece size has to be bounded above, not just
+    below.
+    """
+    spans = fs.split_span(0, 100 << 20)
+    assert all(end - start <= TARGET_PARALLEL_PIECE for start, end in spans)
+    assert spans[0][0] == 0 and spans[-1][1] == 100 << 20
+    assert all(a[1] == b[0] for a, b in zip(spans, spans[1:]))
+
+
+@pytest.mark.parametrize("conns", [1, 2, 4, 8, 16])
+def test_bytes_in_flight_stay_at_or_under_the_measured_peak(fake_zenodo, conns):
+    """The cliff is in `connections x piece size`, so neither may be raised alone.
+
+    16 connections of 2 MiB measured *slower* than 8 of 2 MiB (4.08 against 14.03
+    MB/s) — raising the bound has to shrink the piece, or it buys a regression.
+    """
+    fs = ZenodoFileSystem(max_concurrent_reads=conns, skip_instance_cache=True)
+    assert conns * fs.parallel_piece_size() <= MAX_BYTES_IN_FLIGHT
+    # and a large container's block is exactly one round of those pieces
+    block = fs.parallel_block_size(2_000_000_000)
+    assert block % fs.parallel_piece_size() == 0
+    assert block <= MAX_BYTES_IN_FLIGHT
+
+
+def test_a_large_container_gets_a_block_that_fills_every_connection(fs):
+    """Eight connections carrying 2 MiB each, which is the measured peak."""
+    assert fs.parallel_block_size(2_000_000_000) == MAX_BYTES_IN_FLIGHT
+    assert len(fs.split_span(0, fs.parallel_block_size(2_000_000_000))) == 8
+
+
+@pytest.mark.parametrize("container", [12_000, 25_000_000, 50_000_000, 400_000_000])
+def test_one_member_never_costs_more_than_a_quarter_of_the_container(fs, container):
+    """The block is what a *small* read costs, so it cannot scale freely.
+
+    A flat 16 MiB block would have meant reading one 7-byte member of a 25 MB archive
+    fetched two blocks spanning the whole archive — D25's eager container fetch,
+    arrived at sideways. Bounding the block by the container bounds that; Zenodo
+    publishes the size in the record, so consulting it costs no request.
+    """
+    block = fs.parallel_block_size(container)
+    assert min(2 * block, container) <= max(container / 4, 2 * fs.blocksize)
+    # never *smaller* than what shipped, either — this may only trade upwards
+    assert block >= fs.blocksize
+
+
+def test_the_reading_view_sizes_its_block_from_the_container(zfs, monkeypatch):
+    """The container's size has to actually reach the block calculation.
+
+    Everything else here tests the arithmetic in isolation; this is the wiring, and
+    without it the clamp would be computed from `None` and silently do nothing.
+    """
+    real = zfs._member
+
+    def big(container, member):
+        return {**real(container, member), "size": 2_000_000_000}
+
+    monkeypatch.setattr(zfs, "_member", big)
+    handle = zfs._open_container(f"{RECID}/archive.zip", cache_type="mmap")
+    assert handle.blocksize == MAX_BYTES_IN_FLIGHT
+
+
+def test_the_listing_view_keeps_its_small_block(zfs):
+    """The two caches are sized for opposite jobs, and only one may grow.
+
+    The listing cache reads *ahead* by a block from the end-of-central-directory
+    record, so growing it would put megabytes on the wire to answer `ls` — the ~80x
+    regression D25 rejected `blockcache` for.
+    """
+    listing = zfs._open_container(f"{RECID}/archive.zip")
+    assert listing.blocksize == zfs.blocksize
+
+
+def test_an_explicitly_chosen_block_size_is_left_alone(fake_zenodo):
+    """A caller who asks for small blocks is asking for cheap small reads.
+
+    Quadrupling it under them would be the eager container fetch D25 refused, and
+    every test in this file that reasons about which blocks were fetched sets this.
+    """
+    fs = ZenodoFileSystem(
+        extract_zips=True, block_size=4096, skip_instance_cache=True
+    )
+    assert fs.parallel_block_size() == 4096
+    handle = fs._open_container(f"{RECID}/archive.zip", cache_type="mmap")
+    assert handle.blocksize == 4096
 
 
 def test_concurrency_is_bounded_no_matter_how_many_callers(zipped):
