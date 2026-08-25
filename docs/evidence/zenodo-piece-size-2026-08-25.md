@@ -7,9 +7,10 @@ It does — but not for the reason the issue gives, not in the direction it pred
 the top end, and the number it proposes (32 MiB blocks, 4 MiB pieces) is **measurably
 worse than what we ship today**.
 
-All four probes are in this directory and re-runnable. Every one uses distinct,
+Every probe below is in this directory and re-runnable, and each uses distinct,
 non-overlapping byte offsets throughout: a repeated range can be served from a cache
-and reads as a speed-up that is not one.
+and reads as a speed-up that is not one. §5 explains why that precaution is not
+enough on its own, and what it cost to find out.
 
 ## 1. Piece size, at the concurrency we actually use
 
@@ -178,4 +179,5 @@ Reading an ordinary (non-ZIP) file uses **one connection for the whole file**:
 `split_span`. At the 0.30 MB/s a single connection sustains, that is the 30x gap
 between probe 1's top and bottom rows, applied to every plain download from every
 backend. The machinery to fix it (`fetch_ranges` + `split_span`) already exists and is
-tested. Filed separately rather than folded in here.
+tested. Filed as [issue #14](https://github.com/swarbricklab/archivefs/issues/14)
+rather than folded in here.

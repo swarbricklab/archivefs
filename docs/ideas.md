@@ -501,6 +501,8 @@ Worth revisiting once the imminent multi-part deposit exists as a concrete examp
 
 ## Split ordinary file reads too, not only ZIP blocks
 
+*Filed as [issue #14](https://github.com/swarbricklab/archivefs/issues/14).*
+
 Everything D26 and D27 built — `fetch_ranges`, `split_span`, the shared semaphore — is
 reachable from exactly one place: the `multi_fetcher` on Zenodo's ZIP member view.
 **A plain file is still read over a single connection.** `ArchiveFile._fetch_range`
