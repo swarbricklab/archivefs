@@ -499,6 +499,25 @@ them, and a single "import this study" operation becomes possible. The Chirograp
 registry design is the natural home for the link data; the archivefs side is small.
 Worth revisiting once the imminent multi-part deposit exists as a concrete example.
 
+## Seed the ZIP reading cache from the listing view
+
+`_member_view` (D25) re-parses the central directory through its own block-aligned
+cache, and the central directory is at the end of the archive — so it re-fetches a
+whole block the listing view had already read. Measured: one 7-byte member out of a
+25 MB Zenodo archive costs 8.2 MB instead of 4.2 MB. Only the single-member
+`archivefs get`/`cat` path pays it; a full import is dominated by member data.
+
+`MMapCache` takes a `blocks` argument — the set of block numbers already present — so
+the shape of the fix exists: write the tail bytes the listing view holds into the
+sparse file and declare those blocks fetched. The awkward part is that
+`BytesCache` holds an arbitrary contiguous range, not whole blocks, so only the
+fully-covered blocks can be claimed and the bookkeeping has to be exactly right — a
+block wrongly marked present serves zeros as data, which is worse than the
+inefficiency it removes. Wants a test that reads every byte of a container both ways
+and compares, before anyone trusts it.
+
+Not urgent: the case it helps is the one where absolute cost is smallest.
+
 ---
 
 ## Things I deliberately did **not** do

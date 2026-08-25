@@ -1505,3 +1505,89 @@ migration note.
 **Cost to change my mind:** `strip_components=0` restores the previous behaviour
 exactly, per import. If the default proves wrong, the change is one number in
 `registry.PROTOCOLS["zenodo"].config` and one default in `ZenodoFileSystem.__init__`.
+
+## D25 — listing and reading a ZIP get **separate caches**, because they want opposite ones
+
+**Found by a bug report, not by review.** "Downloading big files from Zenodo is very
+slow", against an expanded-ZIP import. Instrumenting `_fetch_range` and attributing
+bytes by phase:
+
+```
+25MB archive, 26 members -> 497.8MB in 611s   (19.9x)
+   282.5MB   70 reqs   1. save_deps  (hash the dependency)
+   215.3MB   50 reqs   2. download   (materialise the out)
+```
+
+Two multipliers, and the one I fixated on first was the smaller.
+
+**2x — DVC reads the dependency twice**, by design (`dvc/stage/imports.py:47`:
+`stage.save_deps()` then `stage.deps[0].download(...)`). Pass 1 exists because a ZIP
+member publishes no md5 and one cannot be known without decompressing it (D9).
+
+**~9-10x inside each pass** — the actual culprit. `_open_container` used fsspec's
+`"bytes"` cache, which holds **one** contiguous range and drops it on any forward jump
+longer than a block (`fsspec/caching.py`, `BytesCache._fetch`: `elif end - self.end >
+self.blocksize: self.cache = self.fetcher(start, bend)`). `zipfile` reads a member's
+local header, then its data, then seeks away — so with 4 MiB blocks, a
+few-hundred-byte member cost a full block and nothing was ever reused.
+
+### Two things that look like the fix and are not
+
+**`cache_type="blockcache"`.** Fails
+`test_zip_interior_listing_is_download_free` immediately. Block-aligned caching reads
+the whole block containing the end-of-central-directory record, so listing goes from
+`O(central directory)` to `O(blocksize)` — on a 1.4 GB ZIP, megabytes to answer `ls`.
+That is an ~80x regression on the download-free listing the project is built on, traded
+for ~10x on reads. The test caught it on the first run.
+
+**`BytesCache(trim=False)`.** The trimming is not the problem; the discard-on-jump
+above is, and it happens regardless. A `BytesCache` cannot hold two non-adjacent
+members at all.
+
+### Decision
+
+**Two views of the same ZIP.** `zip_view` keeps the exact-range `"bytes"` cache and
+serves `ls`/`info`. `_member_view` uses `"mmap"` — a sparse file on local disk,
+block-fetched on demand, each block fetched **at most once for the life of the
+filesystem object** — and serves `cat_file`/`_open`.
+
+Why `mmap` rather than fetching the container once up front, which was the plan in the
+issue: an eager fetch means `archivefs get <1.4GB zip>/<4KB file>` pulls 1.4 GB. Block
+fetching needs **no size threshold and no guess about what the caller intends**, which
+is the part that took three wrong turns to reach. `test_reading_one_small_member_does_
+not_fetch_the_container` is that property.
+
+The two-pass cost disappears as a *side effect*: pass 2 fetched **0 bytes**, because
+every block it wants is already local from pass 1.
+
+### Measured
+
+| | before | after |
+|---|---|---|
+| bytes for one import | 497.8 MB (19.9x) | **25.0 MB (1.00x)** |
+| requests | 120 | **9** |
+| wall clock | 611 s | **84 s** |
+| listing 26 members | 1910 B, 3 reqs | unchanged |
+
+Wall clock is the least trustworthy row: the same import measured 324 s, 323 s and
+611 s before the change, so Zenodo's throughput varies ~2x run to run. Bytes and
+request counts are the honest metrics.
+
+**The cost, stated as a number rather than waved at.** The reading view re-parses the
+central directory through its own block-aligned cache, and the central directory is at
+the *end* — so that is a whole extra block. One 7-byte member out of the 25 MB archive
+went from 4.2 MB to **8.2 MB**. A single-member `archivefs get` pays about double.
+Worth it against 20x on the common case, but a real regression, not a rounding error;
+pinned by `test_one_member_costs_two_blocks_at_the_default_size`, with the obvious
+follow-up (seed the reading cache from what the listing view already fetched) in
+`ideas.md`.
+
+**Also fixed here, because it blocked the measurement:** a range request reaching EOF
+was treated as a server fault, retried five times, and reported as
+`Zenodo would not serve bytes … reduce concurrency if it persists` — advice that is
+actively wrong. `_fetch_range` now clamps to the declared size, and `_fetch_checked`
+accepts a short read whose bytes reach `Content-Range`'s own total, which is the only
+authority when the declared size is stale.
+
+**Cost to change my mind:** the two views are two dict lookups and one method. Point
+`cat_file`/`_open` back at `zip_view` and the old behaviour returns exactly.

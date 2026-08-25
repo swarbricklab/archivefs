@@ -353,6 +353,123 @@ def test_zip_interior_sizes_are_real(zfs):
         assert info["size"] == zf.getinfo("counts/barcodes.tsv").file_size
 
 
+# ------------------------------------ listing and reading are cached apart (D25)
+#
+# The fake's ZIP is 12 KB — smaller than one 4 MiB block — so the default blocksize
+# hides every question these tests ask. They set `block_size` small enough that
+# "which blocks were fetched" is a real distinction.
+
+
+def test_reading_every_member_costs_about_one_archive(fake_zenodo):
+    """The measured bug: a `dvc import-url` moved 19.9x the archive size.
+
+    Each block must be fetched at most once for the life of the filesystem, so
+    reading all members — twice, as DVC does — costs one archive, not twenty.
+    """
+    fs = ZenodoFileSystem(
+        extract_zips=True, block_size=4096, skip_instance_cache=True
+    )
+    members = fs.find(f"{RECID}/archive.zip")
+    for _pass in range(2):  # dvc/stage/imports.py:47 — hash, then materialise
+        for path in members:
+            fs.cat_file(path)
+    served = fake_zenodo.bytes_served
+    assert served <= len(ZIP_BYTES) * 1.2, (
+        f"read {served} bytes to extract a {len(ZIP_BYTES)}-byte archive twice; "
+        f"blocks are being refetched"
+    )
+
+
+def test_reading_one_small_member_does_not_fetch_the_container(zipped, fake_zenodo):
+    """Why this is a block cache and not an eager fetch of the whole container.
+
+    `archivefs get <1.4GB zip>/<4KB file>` must not pull 1.4 GB. Materialising the
+    container on first byte read would have been simpler and would have broken
+    this, which is what ruled that design out.
+    """
+    # Incompressible, so the ZIP really is ~200 KB and the assertion has teeth.
+    fs = zipped(
+        {"small.txt": b"hi", "big.bin": os.urandom(200_000)}, block_size=4096
+    )
+    container = len(fake_zenodo.bodies["archive.zip"])
+    assert container > 150_000
+    fake_zenodo.bytes_served = 0
+
+    assert fs.cat_file(f"{RECID}/archive.zip/small.txt") == b"hi"
+    assert fake_zenodo.bytes_served < container / 2, (
+        f"fetched {fake_zenodo.bytes_served} of {container} bytes to read 2"
+    )
+
+
+def test_one_member_costs_two_blocks_at_the_default_size(zipped, fake_zenodo):
+    """The cost of the split, pinned so it cannot drift unnoticed.
+
+    The reading view re-parses the central directory through its own block-aligned
+    cache, and the central directory sits at the *end* of the archive — so that is
+    a whole extra block. Live, one 7-byte member out of a 25 MB Zenodo archive went
+    from 4.2 MB (one block) to 8.2 MB (two).
+
+    Worth it: the same change took a full `dvc import-url` from 497.8 MB to 25.0 MB.
+    But it is a real regression for `archivefs get` of a single file, so it is
+    recorded as a number rather than described as negligible.
+    """
+    fs = zipped(
+        {"a.bin": os.urandom(60_000), "b.bin": os.urandom(60_000)}, block_size=4096
+    )
+    fake_zenodo.bytes_served = 0
+    fs.cat_file(f"{RECID}/archive.zip/a.bin")
+    one_member = fake_zenodo.bytes_served
+    # The member is 60 KB and a block is 4 KB, so this is dominated by the member
+    # itself plus the re-read tail — not by the whole 120 KB container.
+    assert 60_000 < one_member < 120_000, one_member
+
+
+def test_listing_does_not_open_the_reading_view(zfs, fake_zenodo):
+    """Listing keeps the exact-range cache, which is what makes it ~free.
+
+    A block-aligned cache reads the whole block containing the end-of-central-
+    directory record — on a 1.4 GB ZIP that is megabytes to answer `ls`. So the
+    two views exist, and `ls`/`info` must never reach for the reading one.
+    """
+    zfs.find(f"{RECID}/archive.zip")
+    assert zfs._member_views == {}
+    assert fake_zenodo.bytes_served < len(ZIP_BYTES) / 4
+
+    zfs.cat_file(f"{RECID}/archive.zip/README.md")
+    assert list(zfs._member_views) == [f"{RECID}/archive.zip"]
+
+
+def test_the_reading_view_is_vetted_too(fake_zenodo):
+    """A second parse of separately-fetched bytes gets its own check.
+
+    `zip_view` vets at listing time, but bytes reach the workspace through the
+    *reading* view, and "a path we would refuse to write must not be offered to
+    something that will write it" has to hold on the path that actually writes.
+    """
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as zf:
+        zf.writestr(zipfile.ZipInfo("../escaped.txt"), b"pwned")
+    payload = buffer.getvalue()
+    fake_zenodo.bodies["archive.zip"] = payload
+    fake_zenodo.record["files"][0]["size"] = len(payload)
+    fake_zenodo.record["files"][0]["checksum"] = (
+        f"md5:{hashlib.md5(payload).hexdigest()}"  # noqa: S324
+    )
+    fs = ZenodoFileSystem(extract_zips=True, skip_instance_cache=True)
+    with pytest.raises(UnsafeArchiveMemberError):
+        fs._member_view(f"{RECID}/archive.zip")
+
+
+def test_invalidating_the_cache_releases_the_reading_view(zfs):
+    """The view holds a sparse temp file; a refresh must not leak it."""
+    zfs.cat_file(f"{RECID}/archive.zip/README.md")
+    assert zfs._member_views
+    zfs.invalidate_cache(f"{RECID}/archive.zip")
+    assert zfs._member_views == {}
+    # and it still works afterwards
+    assert zfs.cat_file(f"{RECID}/archive.zip/README.md") == b"# a deposit\n"
+
+
 # ------------------------------------------------- the wrapper directory (D24)
 
 ZIP = f"{RECID}/archive.zip"

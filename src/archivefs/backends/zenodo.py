@@ -137,8 +137,10 @@ class ZenodoFileSystem(ArchiveFileSystem):
         self.token_source = self.creds.source_of("token") if self.token else "anonymous"
         #: record spec or id -> record JSON
         self._records: dict[str, dict] = {}
-        #: zip member path -> ZipFileSystem, created lazily
+        #: zip member path -> ZipFileSystem for *listing*, created lazily
         self._zip_views: dict[str, Any] = {}
+        #: zip member path -> ZipFileSystem for *reading bytes*; see `_member_view`
+        self._member_views: dict[str, Any] = {}
         #: zip member path -> the interior prefix `strip_components` removed
         self._zip_prefixes: dict[str, str] = {}
 
@@ -152,7 +154,7 @@ class ZenodoFileSystem(ArchiveFileSystem):
         super().invalidate_cache(path)
         if path is None:
             self._records.clear()
-            self._zip_views.clear()
+            self._close_zip_views()
             self._zip_prefixes.clear()
             return
         container, _ = self._split(self._strip_protocol(path))
@@ -173,9 +175,12 @@ class ZenodoFileSystem(ArchiveFileSystem):
                     self._manifest_used.pop(alias, None)
                     self._manifests.pop(alias, None)
                     self._drift.pop(alias, None)
-        for zip_path in [p for p in self._zip_views if p.startswith(f"{container}/")]:
+        stale = [p for p in self._zip_views if p.startswith(f"{container}/")]
+        stale += [p for p in self._member_views if p.startswith(f"{container}/")]
+        for zip_path in set(stale):
             self._zip_views.pop(zip_path, None)
             self._zip_prefixes.pop(zip_path, None)
+            self._close_member_view(zip_path)
 
     # ------------------------------------------------------------------- auth
 
@@ -538,11 +543,13 @@ class ZenodoFileSystem(ArchiveFileSystem):
             self._zip_views[zip_path] = view
         return self._zip_views[zip_path]
 
-    def _open_container(self, path: str):
+    def _open_container(self, path: str, cache_type: str = "bytes"):
         """Open a ZIP member *as the file it is*, bypassing the directory view.
 
         Needed because with ``extract_zips`` on, ``info()`` reports the ZIP as a
         directory — which is the point — so the ordinary open path would refuse.
+
+        ``cache_type`` is the whole of :meth:`_member_view`'s argument; see there.
         """
         from archivefs.base import ArchiveFile
 
@@ -552,8 +559,88 @@ class ZenodoFileSystem(ArchiveFileSystem):
             self._member(container, member),
             mode="rb",
             block_size=self.blocksize,
-            cache_type="bytes",
+            cache_type=cache_type,
         )
+
+    def _member_view(self, zip_path: str):
+        """A second view of the same ZIP, for reading member *bytes*.
+
+        Listing and reading want opposite caches, and one ``ZipFileSystem`` has
+        one file object — so there are two.
+
+        **Listing** (:meth:`zip_view`) touches a few hundred bytes at the very end
+        of the archive and then the central directory. fsspec's ``"bytes"`` cache
+        fetches exact ranges with read-ahead clamped at EOF, so that costs three
+        requests and ~0 bytes on a 25 MB archive. Keeping that is not optional: it
+        is the download-free listing the project is built on (D9).
+
+        **Reading members** walks the whole archive, jumping between members. The
+        same ``"bytes"`` cache holds one contiguous range and drops it on any
+        forward jump longer than a block (`fsspec/caching.py`, `BytesCache._fetch`),
+        so each member re-fetched a full 4 MiB block: a `dvc import-url` of a 25 MB,
+        26-member ZIP moved **497.8 MB — 19.9x the archive** across two passes.
+
+        ``"mmap"`` is the answer for this half: a sparse temp file on local disk,
+        block-fetched on demand, each block fetched **at most once for the life of
+        the filesystem object**. That covers both of DVC's passes
+        (`dvc/stage/imports.py:47` hashes the dependency, then downloads it) without
+        materialising the container up front — so reading one small member out of a
+        1.4 GB ZIP still costs one block, not 1.4 GB. No size threshold and no
+        heuristic about what the caller intends, which is the part of this that took
+        three wrong turns to get to.
+
+        **The cost, measured rather than waved at.** This view parses the central
+        directory again through its own block-aligned cache, and the central
+        directory lives at the *end* of the archive — so that is a whole block,
+        fetched a second time. Reading one 7-byte member out of the 25 MB archive
+        went from 4.2 MB (one block) to **8.2 MB (two)**.
+
+        So a single-member ``archivefs get`` pays about double, while a full import
+        went from 497.8 MB to 25.0 MB. That is the trade, and it is worth taking
+        because the import is the common case and the reported bug — but it is a
+        real regression for one-file reads, not a rounding error.
+        ``test_one_member_costs_two_blocks_at_the_default_size`` pins the number so
+        it cannot drift unnoticed, and ``ideas.md`` records the obvious follow-up:
+        seed this cache from the bytes the listing view already fetched.
+        """
+        import zipfile
+
+        from fsspec.implementations.zip import ZipFileSystem
+
+        from archivefs.zipsafe import inspect_zip
+
+        zip_path = self._strip_protocol(zip_path)
+        if zip_path not in self._member_views:
+            handle = self._open_container(zip_path, cache_type="mmap")
+            try:
+                view = ZipFileSystem(fo=handle)
+            except zipfile.BadZipFile as exc:
+                handle.close()
+                raise ArchiveNotFoundError(
+                    f"{zip_path} is not a readable ZIP archive ({exc})."
+                ) from exc
+            # Vetted again rather than trusted from `zip_view`: this is a separate
+            # parse of separately-fetched bytes, and the rule is that a path we
+            # would refuse to write is never offered to something that will write
+            # it. Cheap — the central directory is already local by now.
+            inspect_zip(view.zip, self.zip_limits, target=zip_path)
+            self._member_views[zip_path] = view
+        return self._member_views[zip_path]
+
+    def _close_member_view(self, zip_path: str) -> None:
+        """Drop one member view, releasing its sparse temp file."""
+        view = self._member_views.pop(zip_path, None)
+        if view is None:
+            return
+        try:
+            view.zip.close()
+        except Exception:  # noqa: BLE001 - a failed close must not mask the caller
+            logger.debug("could not close the member view for %s", zip_path)
+
+    def _close_zip_views(self) -> None:
+        self._zip_views.clear()
+        for zip_path in list(self._member_views):
+            self._close_member_view(zip_path)
 
     def chained_url(self, path: str, member: str = "") -> str:
         """The explicit fsspec chain for a ZIP's interior.
@@ -697,7 +784,7 @@ class ZenodoFileSystem(ArchiveFileSystem):
         if inside and inside[1]:
             zip_path, member = inside
             interior = self._to_interior(zip_path, member)
-            return self.zip_view(zip_path).cat_file(interior)[start:end]
+            return self._member_view(zip_path).cat_file(interior)[start:end]
         return super().cat_file(path, start=start, end=end, **kwargs)
 
     def _open(self, path: str, mode: str = "rb", **kwargs: Any):
@@ -706,7 +793,7 @@ class ZenodoFileSystem(ArchiveFileSystem):
         if inside and inside[1]:
             zip_path, member = inside
             interior = self._to_interior(zip_path, member)
-            return self.zip_view(zip_path)._open(interior, mode=mode)
+            return self._member_view(zip_path)._open(interior, mode=mode)
         return super()._open(path, mode=mode, **kwargs)
 
     # --------------------------------------------------------------- transfer
