@@ -253,6 +253,94 @@ def test_zip_transparency_through_fs_config(repo):
     assert not (root / "tree").is_file()
 
 
+# A small, long-lived deposit with the usual shape: `FSD50K.doc.zip` wrapping a
+# single `FSD50K.doc/` directory. The wrapper name equals the ZIP's stem, which is
+# what makes the doubling unavoidable by naming — see decisions.md D24.
+WRAPPED_ZIP = "zenodo://4060432/FSD50K.doc.zip"
+WRAPPED_ZIP_MD5 = "3516162b82dc2945d3e7feba0904e800"
+
+
+def test_a_wrapper_directory_does_not_survive_into_the_workspace(repo):
+    """D24, end to end through the real CLI.
+
+    The destination is named `docs`, deliberately *not* after the ZIP: the point
+    is that the archive's interior no longer dictates a level of nesting, whatever
+    the out is called.
+    """
+    root, run = repo
+    result = run(
+        "import-url", "--fs-config", "extract_zips=true", "--", WRAPPED_ZIP, "docs"
+    )
+    assert result.returncode == 0, result.stderr
+    assert sorted(p.name for p in (root / "docs").iterdir()) == [
+        "LICENSE-DATASET",
+        "README.md",
+    ]
+    assert not (root / "docs" / "FSD50K.doc").exists()
+
+    # The relpaths are committed, so the shape of the tree is in git rather than
+    # recomputed from a rule that might change under an existing repo.
+    spec = yaml.safe_load((root / "docs.dvc").read_text())
+    members = {entry["relpath"]: entry for entry in spec["deps"][0]["files"]}
+    assert sorted(members) == ["LICENSE-DATASET", "README.md"]
+    assert members["README.md"]["md5"] == "1061e6613da49333fdb919de61396225"
+    # The token still names the member as the ZIP stores it: stripping is a
+    # presentation choice and must not reach provenance.
+    assert members["README.md"]["version_id"] == f"{WRAPPED_ZIP_MD5}:b9b54419"
+
+
+def test_stripping_can_be_turned_off_per_import(repo):
+    """`strip_components=0` is the escape hatch, and it is committed like any other.
+
+    Note the space between the two pairs: `--fs-config` is `nargs="*"`, so a comma
+    would make one key with a value of `true,strip_components=0`.
+    """
+    root, run = repo
+    result = run(
+        "import-url", "--fs-config", "extract_zips=true", "strip_components=0",
+        "--", WRAPPED_ZIP, "docs",
+    )
+    assert result.returncode == 0, result.stderr
+    assert [p.name for p in (root / "docs").iterdir()] == ["FSD50K.doc"]
+    spec = yaml.safe_load((root / "docs.dvc").read_text())
+    # Committed as the **string** `'0'`, exactly as typed — DVC dumps `--fs-config`
+    # verbatim (the same reason `extract_zips` lands as `'true'` above). So the
+    # config schema's `Coerce(int)` is not what saves this path; `__init__`'s own
+    # `int()` is, and the unstripped tree asserted above is the proof it ran. A
+    # truthy `'0'` here would have silently stripped anyway.
+    assert spec["deps"][0]["fs_config"]["strip_components"] == "0"
+    assert sorted(e["relpath"] for e in spec["deps"][0]["files"]) == [
+        "FSD50K.doc/LICENSE-DATASET",
+        "FSD50K.doc/README.md",
+    ]
+
+
+def test_a_stripped_zip_is_pullable_by_a_reviewer_with_no_remote(repo):
+    """The strip must survive the round trip that matters: clone, `dvc pull`.
+
+    `fs_config` is committed, so the reviewer's DVC re-derives the same tree from
+    the archive — and the committed `files:` relpaths are what it fetches against,
+    so a strip that did not round-trip would show up here as a checkout failure
+    rather than a differently-shaped tree.
+    """
+    root, run = repo
+    dvc_bin = Path(sys.executable).with_name("dvc")
+    assert run(
+        "import-url", "--fs-config", "extract_zips=true", "--", WRAPPED_ZIP, "docs"
+    ).returncode == 0
+
+    _commit_all(root)
+    clone, result = _clone_and_pull(root, "reviewer-stripped", dvc_bin)
+    assert result.returncode == 0, result.stderr
+    assert sorted(p.name for p in (clone / "docs").iterdir()) == [
+        "LICENSE-DATASET",
+        "README.md",
+    ]
+    assert hashlib.md5((clone / "docs" / "README.md").read_bytes()).hexdigest() == (  # noqa: S324
+        "1061e6613da49333fdb919de61396225"
+    )
+
+
 BIA_THUMB = (
     "01776a3a-16a5-4c48-a104-fefcc83cc2ee/"
     "01776a3a-16a5-4c48-a104-fefcc83cc2ee-thumbnail-128-128.png"

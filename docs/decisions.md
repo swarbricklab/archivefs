@@ -1404,3 +1404,104 @@ meaning of existing `.dvc` files, so it wants its own decision.
 
 **Cost to change my mind:** set `immutability_basis=None` on a profile and that archive
 reverts entirely, tests included. The gate is one field.
+
+## D24 — a ZIP's **wrapper directory is stripped by default**, and `__MACOSX` is hidden
+
+**Found by using it.** A real import of a lab deposit:
+
+```console
+$ dvc import-url --fs-config extract_zips=true -- \
+    zenodo://10.5281/zenodo.18917100/pathology_annotations.zip pathology_annotations
+$ tree
+├── pathology_annotations
+│   └── pathology_annotations
+│       ├── visium
+│       ├── visium_hd
+│       └── visium_lymph_nodes
+└── pathology_annotations.dvc
+```
+
+Note what this is *not*: it is not a bad choice of output name. The destination was
+typed by hand, and the obvious name is the one that collides. `dvc import-url`'s own
+default is `os.path.basename` of the URL path — `pathology_annotations.zip`, a
+directory named like a file — so every available name is wrong in some way, and
+computing a better one is `dvc/utils/resolve_output`'s job, upstream, before any
+filesystem exists. Naming cannot fix this. Only the shape can.
+
+**Why the archive is shaped that way, and why that is correct.** `unzip foo.zip`
+extracts into the current directory and creates no wrapper of its own, so a ZIP that is
+a bare bag of files detonates into whatever directory the reader was standing in. The
+single-top-level-directory convention exists to prevent that, and
+[`evidence/zenodo-zip-shape-2026-08-21.md`](evidence/zenodo-zip-shape-2026-08-21.md)
+measures ~80% of sampled Zenodo ZIPs following it. So this is not sloppy zipping to be
+corrected on our side of the deposit: the wrapper is a service to everyone who
+downloads from the record page, and a bare-bag deposit would optimise for archivefs at
+their expense. **archivefs adapts; the deposits stay conventional.**
+
+**Decision.** `strip_components`, default **1**: drop leading interior components while
+each is the ZIP's sole top-level entry *and* a directory. `0` presents the interior
+verbatim. It is per-import, lives in `fs_config`, and is committed like any other
+storage option.
+
+**Why the default is on.** The usual objection to a content-dependent default is that
+the tree stops being predictable from the URL. Three things answer it here:
+
+* **The cost of being wrong is one directory level**, visible in `tree`, with no data
+  loss. That is a different universe from `_log_unversioned` (D23), where being wrong
+  means files silently missing. Defaults should be timid in proportion to their failure
+  mode, and this one's is benign.
+* **D23 already made the outcome legible.** A version-aware import writes an explicit
+  `files:` list of relpaths into the committed `.dvc`. Whatever the strip did is in
+  git, and changing the rule later shows up as a stage mismatch rather than a
+  differently-shaped workspace nobody notices.
+* **The dominant use is our own deposits**, where the convention is ours to keep
+  uniform, and a strip that announces itself is what says when someone broke it.
+
+**Why it checks instead of stripping blindly.** `tar --strip-components=N` removes N
+levels whatever is there, which on the 20% — a flat bag, two real directories, a ZIP
+wrapping one file — deletes a sibling. So `strip_components` is a **maximum, not a
+promise**, and the failure mode of asking for too much is "nothing happened". The
+alternative reading would have made the setting's name honest at the cost of making it
+dangerous.
+
+**`__MACOSX` is dropped from listings**, and this is load-bearing rather than tidiness:
+30% of sampled ZIPs carry one, and a ZIP holding `outs/` *plus* `__MACOSX/` has two
+top-level entries — so without the filter the strip declines on precisely the archives
+that most need it, firing in far fewer than 80% of cases. Cruft is **hidden, not
+unreadable**: a caller naming a `__MACOSX` path explicitly still gets the bytes.
+Hiding is a listing decision, and `find`/`walk` inherit it, which is what keeps
+resource forks out of the tracked directory hash.
+
+**The implementation risk was symmetry, not policy.** `_zip_container` maps a workspace
+path to `(zip, interior)` and is what `cat_file` and `_open` fetch through. A strip
+applied to listings only would present a tidy tree and then read the wrong member — or
+nothing. `_to_interior`/`_from_interior` are exact inverses and
+`test_stripping_is_symmetric_so_reads_follow_listings` walks every listed path back to
+its bytes. Deciding the strip needs the central directory, so
+`test_deciding_the_strip_does_not_open_a_records_zips` pins that listing a record still
+opens none of its ZIPs.
+
+**Two details that would have bitten.** Directory *markers* (`annotations/`) are
+optional in a ZIP and only some writers emit them, so counting them as top-level
+entries would make the same deposit expand differently depending on which tool zipped
+it — the strip reads file names only. And `strip_components = 0` from an INI config
+arrives as the string `"0"`, which is truthy: the same trap `extract_zips = false` fell
+into (D22), in the one setting whose entire purpose is *do not rearrange my tree*.
+Measured, because the two routes differ: `dvc remote modify` goes through the config
+schema, so the profile records `strip_components: int` and `_remote_schema` turns that
+into `Coerce(int)` plus a non-negative `Range`. **`--fs-config` does not** — DVC dumps
+those pairs into the `.dvc` verbatim, which is why the committed value reads
+`strip_components: '0'`, a string. So the schema is not what saves the flag people
+actually use; `__init__`'s own `int()` is, and it covers the CLI's `-o` and direct
+Python calls too. `test_stripping_can_be_turned_off_per_import` asserts the string in
+the file *and* the unstripped tree, so the two cannot drift apart silently.
+
+**What this does not settle.** `extract_zips` still defaults **off**. Both arguments
+for that are now gone — the reviewer objection to D23, and the archival-unit worry the
+Zenodo survey found no instance of — so it is a live question, but flipping it changes
+the meaning of existing `.dvc` files and belongs in its own entry with its own
+migration note.
+
+**Cost to change my mind:** `strip_components=0` restores the previous behaviour
+exactly, per import. If the default proves wrong, the change is one number in
+`registry.PROTOCOLS["zenodo"].config` and one default in `ZenodoFileSystem.__init__`.

@@ -353,6 +353,193 @@ def test_zip_interior_sizes_are_real(zfs):
         assert info["size"] == zf.getinfo("counts/barcodes.tsv").file_size
 
 
+# ------------------------------------------------- the wrapper directory (D24)
+
+ZIP = f"{RECID}/archive.zip"
+
+
+@pytest.fixture
+def zipped(fake_zenodo):
+    """Serve a ZIP of exactly these members, and hand back a filesystem over it."""
+
+    def make(members: dict[str, bytes], **options):
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            for name, body in members.items():
+                zf.writestr(name, body)
+        payload = buffer.getvalue()
+        fake_zenodo.bodies["archive.zip"] = payload
+        fake_zenodo.record["files"][0]["size"] = len(payload)
+        fake_zenodo.record["files"][0]["checksum"] = (
+            f"md5:{hashlib.md5(payload).hexdigest()}"  # noqa: S324
+        )
+        return ZenodoFileSystem(
+            extract_zips=True, skip_instance_cache=True, **options
+        )
+
+    return make
+
+
+#: The reported case, and the shape ~80% of sampled Zenodo ZIPs have: the
+#: depositor zipped a directory, because `unzip` creates no wrapper of its own.
+WRAPPED = {
+    "annotations/visium/a.csv": b"a\n",
+    "annotations/visium_hd/b.csv": b"b\n",
+    "annotations/README.md": b"# notes\n",
+}
+
+
+def test_a_wrapper_directory_is_stripped(zipped):
+    """`annotations.zip` imported to `annotations/` must not nest twice."""
+    fs = zipped(WRAPPED)
+    assert sorted(fs.ls(ZIP, detail=False)) == [
+        f"{ZIP}/README.md",
+        f"{ZIP}/visium",
+        f"{ZIP}/visium_hd",
+    ]
+    assert f"{ZIP}/annotations/visium/a.csv" not in fs.find(ZIP)
+
+
+def test_stripping_is_symmetric_so_reads_follow_listings(zipped):
+    """The one that matters: a strip applied in one direction only reads wrong.
+
+    `_to_interior` is what `cat_file` and `_open` fetch through, so listing a
+    tidy tree while fetching un-stripped paths would 404 — or, with an unlucky
+    name collision, silently return a different member's bytes.
+    """
+    fs = zipped(WRAPPED)
+    for path in fs.find(ZIP):
+        member = path[len(ZIP) + 1 :]
+        assert fs.cat_file(path) == WRAPPED[f"annotations/{member}"]
+        with fs.open(path, "rb") as handle:
+            assert handle.read() == WRAPPED[f"annotations/{member}"]
+        assert fs.info(path)["name"] == path
+
+
+def test_strip_components_zero_presents_the_interior_verbatim(zipped):
+    fs = zipped(WRAPPED, strip_components=0)
+    assert sorted(fs.ls(ZIP, detail=False)) == [f"{ZIP}/annotations"]
+    assert fs.cat_file(f"{ZIP}/annotations/README.md") == b"# notes\n"
+
+
+def test_several_real_top_level_entries_are_left_alone(zfs):
+    """The 20% case. Stripping here would drop a sibling, so it must not fire."""
+    assert sorted(zfs.ls(ZIP, detail=False)) == [
+        f"{ZIP}/README.md",
+        f"{ZIP}/counts",
+    ]
+
+
+def test_a_zip_wrapping_one_file_is_left_alone(zipped):
+    """A lone top-level *file* is not a wrapper directory — nothing to strip."""
+    fs = zipped({"md.xtc": b"trajectory"})
+    assert fs.ls(ZIP, detail=False) == [f"{ZIP}/md.xtc"]
+    assert fs.cat_file(f"{ZIP}/md.xtc") == b"trajectory"
+
+
+def test_macos_resource_forks_do_not_mask_the_wrapper(zipped):
+    """30% of sampled ZIPs carry `__MACOSX`, which makes two top-level entries.
+
+    Without cruft filtering the strip would decline on exactly the archives that
+    need it, so this is what makes the default worth having rather than a rule
+    that fires four times in five.
+    """
+    fs = zipped({**WRAPPED, "__MACOSX/._annotations": b"\x00rsrc"})
+    assert sorted(fs.ls(ZIP, detail=False)) == [
+        f"{ZIP}/README.md",
+        f"{ZIP}/visium",
+        f"{ZIP}/visium_hd",
+    ]
+
+
+def test_cruft_is_hidden_from_listings_but_stays_readable(zipped):
+    """Hidden, not deleted — and hiding is what keeps it out of the tracked hash.
+
+    With `version_aware` on, anything `walk` yields lands in the committed
+    `files:` list, so a resource fork listed is a resource fork versioned.
+    """
+    fs = zipped({"a.txt": b"real", "__MACOSX/._a.txt": b"\x00rsrc"})
+    assert fs.find(ZIP) == [f"{ZIP}/a.txt"]
+    assert fs.cat_file(f"{ZIP}/__MACOSX/._a.txt") == b"\x00rsrc"
+
+
+def test_asking_to_strip_deeper_than_the_archive_goes_stops_early(zipped):
+    """`strip_components` is a maximum, not a promise."""
+    fs = zipped(WRAPPED, strip_components=5)
+    assert sorted(fs.ls(ZIP, detail=False)) == [
+        f"{ZIP}/README.md",
+        f"{ZIP}/visium",
+        f"{ZIP}/visium_hd",
+    ]
+
+
+def test_nested_wrappers_strip_to_the_requested_depth(zipped):
+    members = {"outer/inner/deep.txt": b"payload"}
+    assert zipped(members, strip_components=1).ls(ZIP, detail=False) == [
+        f"{ZIP}/inner"
+    ]
+    assert zipped(members, strip_components=2).ls(ZIP, detail=False) == [
+        f"{ZIP}/deep.txt"
+    ]
+
+
+def test_directory_markers_do_not_decide_the_strip(fake_zenodo):
+    """Whether a writer emitted explicit directory entries must not change the tree.
+
+    `zipfile` omits them; many GUI archivers write them. Counting one as a
+    top-level entry would make the same deposit expand differently depending on
+    which tool zipped it.
+    """
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as zf:
+        zf.writestr("annotations/", b"")  # the marker
+        zf.writestr("annotations/a.csv", b"a\n")
+    payload = buffer.getvalue()
+    fake_zenodo.bodies["archive.zip"] = payload
+    fake_zenodo.record["files"][0]["size"] = len(payload)
+    fake_zenodo.record["files"][0]["checksum"] = (
+        f"md5:{hashlib.md5(payload).hexdigest()}"  # noqa: S324
+    )
+    fs = ZenodoFileSystem(extract_zips=True, skip_instance_cache=True)
+    assert fs.find(ZIP) == [f"{ZIP}/a.csv"]
+
+
+def test_deciding_the_strip_does_not_open_a_records_zips(zfs, fake_zenodo):
+    """`_zip_prefix` needs the central directory, which `ls(RECID)` must not pay for.
+
+    Companion to `test_listing_a_record_does_not_open_its_zips`: that pinned
+    `_container_as_directory`, this pins that the strip did not add a second
+    reason to open every ZIP in a record just to list it.
+    """
+    zfs.ls(RECID)
+    assert fake_zenodo.bytes_served == 0
+
+
+def test_a_string_depth_is_coerced_at_the_door(zipped):
+    """The CLI's `-o key=value` only special-cases true/false, so 0 arrives as "0".
+
+    DVC coerces through the config schema, but nothing does for `-o` or a direct
+    Python call, and truthy `"0"` would strip when told not to. `__init__` is the
+    one place both routes pass through.
+    """
+    fs = zipped(WRAPPED, strip_components="0")
+    assert fs.strip_components == 0
+    assert fs.ls(ZIP, detail=False) == [f"{ZIP}/annotations"]
+
+
+def test_the_version_token_still_names_the_real_member(zipped):
+    """Stripping is a presentation choice; provenance must stay archive-truthful.
+
+    The workspace path loses `annotations/`, but `zenodo.member` — and the CRC32
+    the version token is built from — still identify the member as the ZIP
+    stores it.
+    """
+    fs = zipped(WRAPPED)
+    info = fs.info(f"{ZIP}/README.md")
+    assert info["zenodo"]["member"] == "annotations/README.md"
+    assert info["version_id"].endswith(f"{info['crc32']:08x}")
+
+
 # --------------------------------------------------------------------- network
 
 

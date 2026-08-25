@@ -111,6 +111,13 @@ Opt-in, Zenodo only, and it reads the ZIP's central directory over ranged reques
 rather than fetching the archive. Members are checked for zip-slip, symlinks and
 absurd compression ratios at *listing* time ([`decisions.md`](decisions.md) D9).
 
+This ZIP holds two top-level files, so it is listed verbatim. One that wraps its
+contents in a single directory — the usual shape, ~80% of sampled Zenodo ZIPs — has
+that level stripped, so `annotations.zip` containing `annotations/visium/…` lists as
+`…/annotations.zip/visium/…`. Add `-o strip_components=0` for the interior exactly as
+stored, and see [`decisions.md`](decisions.md) D24 for when it declines to strip.
+`__MACOSX` resource forks are hidden from listings and stay readable by name.
+
 Note the `-R`. Without it, `ls` is children-only — as fsspec requires — so a
 record-level listing shows the ZIP as the one entry it is, and looks identical to
 the listing with expansion off:
