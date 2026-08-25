@@ -540,6 +540,118 @@ def test_the_version_token_still_names_the_real_member(zipped):
     assert info["version_id"].endswith(f"{info['crc32']:08x}")
 
 
+# ------------------------------------------------------- ranged reads at EOF
+
+
+def _spy_on_ranges(fs) -> list[str]:
+    """Record the ``Range`` header of every request ``fs`` makes."""
+    seen: list[str] = []
+    real = fs._request
+
+    def spy(method, url, **kwargs):
+        header = (kwargs.get("headers") or {}).get("Range")
+        if header:
+            seen.append(header)
+        return real(method, url, **kwargs)
+
+    fs._request = spy
+    return seen
+
+
+def test_a_read_past_the_end_is_clamped_not_requested(fs):
+    """A block-aligned reader asks for the block containing the last byte.
+
+    That overshoot is normal — every file's final read does it — and sending it to
+    the server buys nothing.
+    """
+    seen = _spy_on_ranges(fs)
+    info = fs.info(f"{RECID}/samples.csv")
+    size = info["size"]
+    assert fs._fetch_range(info, size - 10, size + 4_000_000) == CSV_BYTES[-10:]
+    assert seen == [f"bytes={size - 10}-{size - 1}"], (
+        "the request should stop at the last byte, not ask for what is not there"
+    )
+
+
+def test_an_empty_read_at_the_end_costs_no_request(fs):
+    info = fs.info(f"{RECID}/samples.csv")
+    seen = _spy_on_ranges(fs)
+    assert fs._fetch_range(info, info["size"], info["size"] + 4096) == b""
+    assert seen == []
+
+
+def test_a_short_read_that_reached_eof_is_accepted_not_retried(fs, fake_zenodo):
+    """A stale declared size must not look like a broken server.
+
+    This is the case the clamp above cannot catch: the size archivefs was given is
+    larger than the object, so the request looks in-bounds and the server answers
+    correctly by stopping early. It used to burn `max_retries` requests and then
+    raise, blaming the archive and advising the caller to reduce concurrency —
+    advice that is actively misleading, since concurrency has nothing to do with
+    it. Judged against `Content-Range`'s own total instead.
+    """
+    fake_zenodo.record["files"][1]["size"] = len(CSV_BYTES) + 5000
+    seen = _spy_on_ranges(fs)
+    info = fs.info(f"{RECID}/samples.csv")
+    assert fs._fetch_range(info, 0, info["size"]) == CSV_BYTES
+    assert len(seen) == 1, f"one request, not a retry storm: {seen}"
+
+
+def test_a_short_read_below_eof_is_still_a_failure(fs, fake_zenodo, monkeypatch):
+    """The guard above must not have disabled the check it lives inside.
+
+    A server that truncates mid-object is a real fault, and the retry exists for
+    it. Distinguished from the case above purely by whether the bytes served reach
+    `Content-Range`'s stated total.
+
+    `test_ega.py::test_short_body_is_retried_not_trusted` covers a short read that
+    succeeds on retry; this covers the other end, where every attempt is short and
+    the error is raised — the path the EOF guard sits directly in front of.
+    """
+    honest = ranged  # bind before the patch, or `truncating` calls itself
+
+    def truncating(body, headers, **kwargs):
+        # `truncate_to` is the fake's own facility for "says 206, sends fewer
+        # bytes than promised"; 4093 of a requested 4096 stays far below the
+        # object's real end, so it is a fault rather than EOF.
+        return honest(body, headers, truncate_to=4093, **kwargs)
+
+    # `FakeZenodo` resolves `ranged` in *this* module's namespace, so that is what
+    # has to be replaced — patching tests.fake_http would leave the fake calling
+    # the original through its own import.
+    monkeypatch.setattr(f"{__name__}.ranged", truncating)
+    monkeypatch.setattr(base_mod.ArchiveFileSystem, "_backoff", lambda *a: None)
+    info = fs.info(f"{RECID}/samples.csv")
+    seen = _spy_on_ranges(fs)
+    with pytest.raises(OSError, match="would not serve bytes"):
+        fs._fetch_range(info, 0, 4096)
+    assert len(seen) == fs.max_retries
+
+
+# ------------------------------------------------------- credential isolation
+
+
+def test_a_token_file_outside_the_test_home_is_invisible(fake_zenodo, tmp_path):
+    """`tests/conftest.py`'s job, pinned.
+
+    Three tests started failing the day a real `~/.config/archivefs/zenodo.json`
+    appeared on the developer's machine: they assert "no credential configured"
+    behaviour, and silently began exercising the rejected-credential path instead.
+    The fixtures cleared the credential *environment* and not the *files*, so the
+    suite's result depended on who ran it.
+    """
+    assert ZenodoFileSystem(skip_instance_cache=True).token is None
+
+    # The redirect is real, not a coincidence of the file being absent: a token
+    # written into the *test* home is found.
+    home = Path.home()
+    (home / ".config" / "archivefs").mkdir(parents=True, exist_ok=True)
+    token_file = home / ".config" / "archivefs" / "zenodo.json"
+    token_file.write_text('{"token": "t0ken"}')
+    token_file.chmod(0o600)  # archivefs refuses a group-readable credential
+    assert ZenodoFileSystem(skip_instance_cache=True).token == "t0ken"
+
+
 # --------------------------------------------------------------------- network
 
 
