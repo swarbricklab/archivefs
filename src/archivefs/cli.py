@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 from typing import Any
 
 from archivefs import __version__
@@ -288,6 +289,285 @@ def cmd_dvc(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_config(args: argparse.Namespace) -> int:
+    """Show the configuration layers and what they resolve to (issue: config model)."""
+    from archivefs import config
+
+    found = config.layers()
+    if args.action == "path":
+        # The user layer, so `$EDITOR $(archivefs config path)` works.
+        user = next(layer for layer in found if layer.name == "user")
+        print(user.path)
+        return 0
+
+    protocols = sorted(PROTOCOLS)
+    resolved = {name: config.settings(name) for name in protocols}
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "layers": [
+                        {
+                            "name": layer.name,
+                            "path": str(layer.path),
+                            "exists": layer.exists,
+                            "travels": layer.travels,
+                            "may_set": sorted(layer.allowed),
+                        }
+                        # highest precedence first, which is how people read it
+                        for layer in reversed(found)
+                    ],
+                    "settings": {k: v for k, v in resolved.items() if v},
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    print("layers, highest precedence first:")
+    for layer in reversed(found):
+        mark = "*" if layer.exists else " "
+        note = "content settings, committed" if layer.travels else "machine settings"
+        print(f"  {mark} {layer.name:<8} {layer.path}")
+        print(f"              {note}")
+    print("  (* = present;  above all of these: $ARCHIVEFS_* then -o/--fs-config)")
+    active = {name: values for name, values in resolved.items() if values}
+    if not active:
+        print("\nnothing configured")
+        return 0
+    print("\nresolved:")
+    for name in sorted(active):
+        print(f"  {name}://")
+        for key in sorted(active[name]):
+            print(f"      {key} = {active[name][key]!r}")
+    return 0
+
+
+def _read_input(source: str) -> tuple[bytes, str]:
+    if source == "-":
+        return sys.stdin.buffer.read(), "the input"
+    path = Path(source).expanduser()
+    if not path.exists():
+        raise SystemExit(f"no such bundle: {path}")
+    return path.read_bytes(), str(path)
+
+
+def cmd_credentials(args: argparse.Namespace) -> int:
+    """Inventory, package and install access credentials (issue: reviewer access)."""
+    from archivefs import bundle as bundles
+
+    if args.action == "list":
+        return _credentials_list(args, bundles)
+    if args.action == "export":
+        return _credentials_export(args, bundles)
+    return _credentials_import(args, bundles)
+
+
+def _credentials_list(args: argparse.Namespace, bundles) -> int:
+    report = []
+    for protocol in sorted(PROTOCOLS):
+        try:
+            held = bundles.holdings(protocol)
+        except ArchiveFSError as exc:
+            report.append({"protocol": protocol, "error": str(exc)})
+            continue
+        report.append(
+            {
+                "protocol": protocol,
+                "credentials": [
+                    {
+                        "name": h.credential,
+                        "shareable": h.shareable,
+                        "required": h.required,
+                        "source": h.source,
+                        "scopes": h.scopes,
+                        "warning": h.warning,
+                    }
+                    for h in held
+                ],
+            }
+        )
+    if args.json:
+        print(json.dumps(report, indent=2))
+        return 0
+
+    print("credentials archivefs can see. Values are never shown.\n")
+    for entry in report:
+        name = entry["protocol"] + "://"
+        if "error" in entry:
+            print(f"  {name:10} ? {entry['error']}")
+            continue
+        if not entry["credentials"]:
+            print(f"  {name:10} public; needs no credential")
+            continue
+        for index, credential in enumerate(entry["credentials"]):
+            shown = name if index == 0 else ""
+            kind = "shareable" if credential["shareable"] else "personal "
+            if credential["source"]:
+                scopes = credential["scopes"]
+                where = credential["source"]
+                held = (
+                    f"{where}"
+                    if scopes in ([], ["*"])
+                    else f"{where}  [{', '.join(scopes)}]"
+                )
+            else:
+                held = "not found" + ("" if credential["required"] else " (optional)")
+            print(f"  {shown:10} {credential['name']:<10} {kind}  {held}")
+            if credential["warning"]:
+                print(f"             ! {credential['warning']}")
+    print(
+        "\n  shareable = issued to be handed on, scoped to named data\n"
+        "  personal  = authenticates you; a bundle will refuse to carry it"
+    )
+    return 0
+
+
+def _credentials_export(args: argparse.Namespace, bundles) -> int:
+    """Package this repository's shareable access. The report goes to stderr.
+
+    stderr because ``--out -`` puts a zip on stdout, and a report interleaved with it
+    would corrupt the bundle — the pipe into ``age`` has to stay clean.
+    """
+    from archivefs import config
+
+    root = Path(args.repo).expanduser() if args.repo else config.project_root()
+    if root is None:
+        raise SystemExit(
+            "not inside a repository, so there is nothing to work out which deposits "
+            "reviewers need. Run this in the project, or pass --repo, or name the "
+            "deposits with --include bia:S-BIAD3080."
+        )
+    pack, rows, _ = bundles.collect(root, args.include)
+    pack.description = args.description or ""
+
+    def report(written: str | None, exit_code: int) -> int:
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "repo": str(root),
+                        "deposits": [
+                            {
+                                "protocol": r.protocol,
+                                "scope": r.scope,
+                                "status": r.status,
+                                "detail": r.detail,
+                                "references": r.references,
+                            }
+                            for r in rows
+                        ],
+                        "grants": len(pack.grants),
+                        "written": written,
+                    },
+                    indent=2,
+                ),
+                file=sys.stderr,
+            )
+            return exit_code
+        print(f"{root} depends on {len(rows)} deposit(s):", file=sys.stderr)
+        for row in rows:
+            where = f"{row.protocol}://{row.scope}" if row.scope else row.protocol
+            print(f"  {where:<34} {row.status:<12} {row.detail}", file=sys.stderr)
+        if written is None:
+            print(
+                "\nNothing shareable to export. That is the expected answer when the "
+                "data is public, or when access is by personal account — see the "
+                "statuses above.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"\nwrote {written} ({len(pack.grants)} grant(s), mode 0600)\n"
+                f"  It holds live keys. Send it the way you would a password, and "
+                f"tell the recipient to run:\n"
+                f"      archivefs credentials import {Path(written).name}",
+                file=sys.stderr,
+            )
+        return exit_code
+
+    if not pack.grants:
+        return report(None, 1)
+
+    if args.out == "-" and sys.stdout.isatty():
+        raise SystemExit(
+            "refusing to write a bundle to a terminal: it is binary, and it holds "
+            "live access keys that would then be in your scrollback and shell "
+            "history.\n"
+            "  Give --out a path, or pipe it:\n"
+            "      archivefs credentials export --out - | age -r <recipient> > pack.age"
+        )
+
+    named = "archivefs-access.zip" if args.out == "-" else Path(args.out).name
+    payload = bundles.write(
+        pack, as_zip=not str(args.out).endswith(".json"), filename=named
+    )
+    if args.out == "-":
+        sys.stdout.buffer.write(payload)
+        sys.stdout.buffer.flush()
+        return report("stdout", 0)
+
+    out = Path(args.out).expanduser()
+    if not args.force:
+        objection = bundles.refuse_in_repo(out)
+        if objection:
+            raise SystemExit(objection)
+    bundles.write_private(out, payload)
+    return report(str(out), 0)
+
+
+def _credentials_import(args: argparse.Namespace, bundles) -> int:
+    data, where = _read_input(args.bundle)
+    pack = bundles.read(data, where)
+    changes = bundles.plan(pack)
+
+    for change in changes:
+        mark = {"add": "+", "unchanged": "=", "conflict": "!"}[change.action]
+        scope = change.grant.scope or "any deposit"
+        print(
+            f"  {mark} {change.grant.protocol:<7} {change.grant.credential:<8} "
+            f"{scope:<22} {change.path}"
+        )
+    if pack.description:
+        print(f"  ({pack.description})")
+
+    if args.dry_run:
+        print("\n--dry-run: nothing written")
+        return 0
+
+    written = bundles.install(changes, force=args.force)
+    if not written:
+        print("\nalready installed; nothing to do")
+    else:
+        for path in written:
+            print(f"\nwrote {path} (mode 0600)")
+    if pack.verify:
+        print("\nverify with:")
+        for url in sorted(set(pack.verify))[:5]:
+            print(f"  archivefs ls {url}")
+    return 0
+
+
+def _scratch_note() -> str:
+    """Where blocks land when nothing is persisted — worth saying even when it is.
+
+    fsspec gives `tempfile.TemporaryFile()` no directory, so this follows `$TMPDIR`
+    and otherwise `/tmp`. On Gadi `/tmp` is a 63 GB tmpfs, i.e. RAM, so "where do
+    the bytes actually go" is a question with a surprising default answer.
+    """
+    import tempfile
+
+    from archivefs import blockcache
+
+    root = blockcache.scratch_root()
+    if root is not None:
+        return f"scratch (blocks not kept): {root}  [${blockcache.SCRATCH_DIR_ENV}]"
+    return (
+        f"scratch (blocks not kept): {tempfile.gettempdir()}  "
+        f"[$TMPDIR; set ${blockcache.SCRATCH_DIR_ENV} to choose]"
+    )
+
+
 def cmd_cache(args: argparse.Namespace) -> int:
     """Show or clear the block cache that lets a long import resume (issue #15)."""
     import time
@@ -295,6 +575,11 @@ def cmd_cache(args: argparse.Namespace) -> int:
     from archivefs import blockcache
 
     root = blockcache.cache_root(args.dir)
+    if args.action == "path":
+        # Pure, for scripts: the directory or nothing.
+        if root is not None:
+            print(root)
+        return 0 if root is not None else 1
     if root is None:
         print(
             f"No block cache is configured, so an interrupted import starts again "
@@ -303,9 +588,7 @@ def cmd_cache(args: argparse.Namespace) -> int:
             f"/scratch/$PROJECT/$USER/archivefs-cache\n"
             f"or per command: -o cache_dir=/some/where"
         )
-        return 0
-    if args.action == "path":
-        print(root)
+        print(_scratch_note())
         return 0
     if not root.exists():
         if args.action == "size":
@@ -339,6 +622,7 @@ def cmd_cache(args: argparse.Namespace) -> int:
         )
     total = sum(entry["on_disk"] for entry in found)
     print(f"  {len(found)} entries, {_human(total)} on disk")
+    print(_scratch_note())
     return 0
 
 
@@ -411,6 +695,71 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_common(verify)
     verify.set_defaults(func=cmd_verify)
+
+    cfg = sub.add_parser(
+        "config", help="the configuration layers, and what they resolve to"
+    )
+    cfg.add_argument("action", nargs="?", default="show", choices=["show", "path"])
+    cfg.add_argument("--json", action="store_true")
+    cfg.set_defaults(func=cmd_config)
+
+    creds = sub.add_parser(
+        "credentials",
+        aliases=["creds"],
+        help="what access you hold, and how to hand it to a reviewer",
+        description=(
+            "Package the access a reviewer needs for this project's deposits, and "
+            "install one you were sent. Only credentials an archive issues to be "
+            "handed on — a per-study sharing key — can be exported; an account "
+            "password or API token is refused."
+        ),
+    )
+    creds.add_argument(
+        "action",
+        nargs="?",
+        default="list",
+        choices=["list", "export", "import"],
+    )
+    creds.add_argument(
+        "bundle",
+        nargs="?",
+        default="-",
+        help="for import: the .zip/.json to install, a sharing link, or - for stdin",
+    )
+    creds.add_argument(
+        "--out",
+        metavar="PATH",
+        default="-",
+        help="for export: where to write the bundle (.zip or .json), or - for stdout",
+    )
+    creds.add_argument(
+        "--include",
+        action="append",
+        metavar="PROTOCOL:ACCESSION",
+        help="export a deposit the repository does not mention, repeatable",
+    )
+    creds.add_argument(
+        "--repo",
+        metavar="DIR",
+        help="the repository to read dependencies from (default: the enclosing one)",
+    )
+    creds.add_argument(
+        "--description",
+        metavar="TEXT",
+        help='what this bundle is for, e.g. "reviewer access, Smith et al. 2026"',
+    )
+    creds.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="for import: say what would change and write nothing",
+    )
+    creds.add_argument(
+        "--force",
+        action="store_true",
+        help="overwrite a differing credential, or write a bundle inside a git repo",
+    )
+    creds.add_argument("--json", action="store_true")
+    creds.set_defaults(func=cmd_credentials)
 
     cache = sub.add_parser(
         "cache",

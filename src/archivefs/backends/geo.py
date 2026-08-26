@@ -308,11 +308,13 @@ class GEOFileSystem(ArchiveFileSystem):
 
     def __init__(
         self,
-        view: str = "supplementary",
-        base_url: str = DEFAULT_BASE_URL,
+        view: str | None = None,
+        base_url: str | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
+        view = self._setting("view", view, "supplementary")
+        base_url = self._setting("base_url", base_url, DEFAULT_BASE_URL)
         if view not in self.views:
             raise ValueError(
                 f"unknown GEO view {view!r}; known views: "

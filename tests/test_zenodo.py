@@ -1481,12 +1481,14 @@ def test_without_a_cache_dir_the_blocks_die_with_the_process(zipped):
     """The default, and what issue #15 describes: `tempfile.TemporaryFile()`.
 
     Unlinked at creation, so a 2h50m import that had cached 16.1 GB started again
-    from zero. Nothing here is opt-out; the cache is opt-*in*.
+    from zero. Nothing here is opt-out; the cache is opt-*in*, so with no `cache_dir`
+    there must be no file on disk to find and no index recording one.
     """
     fs = zipped(BIG)
     handle = fs._open_container(ZIP, cache_type="mmap")
-    assert type(handle.cache).__name__ == "MMapCache"
-    assert getattr(handle.cache, "location", None) is None
+    assert handle.cache.location is None
+    assert handle.cache.index is None
+    assert handle.cache.lock is None
 
 
 def test_an_interrupted_container_read_resumes_from_disk(zipped, tmp_path):
@@ -1560,3 +1562,96 @@ def test_a_republished_container_is_not_resumed_into(zipped, fake_zenodo, tmp_pa
     fetched = counted_container_fetches(later)
     assert later.cat_file(f"{ZIP}/a.bin") == BIG["a.bin"]
     assert fetched, "a changed md5 resumed into the previous deposit's blocks"
+
+
+# ------------------------------------------ configuration reaches the backend
+
+
+@pytest.fixture
+def layered(tmp_path, monkeypatch):
+    """Write config layers and run as though inside a repository that has them."""
+    project = tmp_path / "proj"
+    (project / ".git").mkdir(parents=True)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setenv("XDG_CONFIG_DIRS", str(tmp_path / "etc"))
+    monkeypatch.chdir(project)
+
+    def write(layer: str, data: dict) -> None:
+        from archivefs import config
+
+        path = {
+            "user": tmp_path / "xdg" / config.XDG_NAME,
+            "project": project / config.PROJECT_NAME,
+            "local": project / config.LOCAL_NAME,
+        }[layer]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data))
+
+    return write
+
+
+def test_a_committed_config_can_turn_on_zip_expansion(fake_zenodo, layered):
+    """The reason `project` is allowed to set content keys at all.
+
+    It is committed, so a colleague's clone reads the same setting and gets the same
+    tree — which is exactly what a user-level setting could not promise.
+    """
+    layered("project", {"zenodo": {"extract_zips": True}})
+    fs = ZenodoFileSystem(skip_instance_cache=True)
+    assert fs.extract_zips is True
+    assert fs.isdir(f"{RECID}/archive.zip")
+
+
+def test_an_explicit_option_still_beats_the_committed_config(fake_zenodo, layered):
+    """Precedence has to hold at the top or the config is a trap rather than a default."""
+    layered("project", {"zenodo": {"extract_zips": True}})
+    fs = ZenodoFileSystem(extract_zips=False, skip_instance_cache=True)
+    assert fs.extract_zips is False
+    assert not fs.isdir(f"{RECID}/archive.zip")
+
+
+def test_configured_zero_is_honoured_not_treated_as_absent(fake_zenodo, layered):
+    """The bug the `None` defaults exist to prevent.
+
+    With `strip_components: int = 1` in the signature there is no way to tell "the
+    user said 0" from "the user said nothing", so a configured 0 would be silently
+    replaced by the default — the same trap as a configured `false`.
+    """
+    layered("project", {"zenodo": {"extract_zips": True, "strip_components": 0}})
+    fs = ZenodoFileSystem(skip_instance_cache=True)
+    assert fs.strip_components == 0
+
+
+def test_a_user_config_can_turn_on_the_resumable_cache(fake_zenodo, layered, tmp_path):
+    """The setting that started all this: naming the directory *is* the opt-in."""
+    blocks = tmp_path / "blocks"
+    layered("user", {"cache_dir": str(blocks)})
+    fs = ZenodoFileSystem(extract_zips=True, skip_instance_cache=True)
+    handle = fs._open_container(ZIP, cache_type="mmap")
+    assert handle.cache.location is not None
+    assert str(blocks) in handle.cache.location
+    handle.cache.release()
+
+
+def test_the_environment_beats_a_configured_cache_dir(fake_zenodo, layered, tmp_path,
+                                                      monkeypatch):
+    """A shell variable is more specific than a file, and must win."""
+    monkeypatch.setenv("ARCHIVEFS_CACHE_DIR", str(tmp_path / "from-env"))
+    layered("user", {"cache_dir": str(tmp_path / "from-file")})
+    fs = ZenodoFileSystem(extract_zips=True, skip_instance_cache=True)
+    handle = fs._open_container(ZIP, cache_type="mmap")
+    assert "from-env" in handle.cache.location
+    handle.cache.release()
+
+
+def test_one_command_can_still_opt_out_of_a_configured_cache(fake_zenodo, layered,
+                                                             tmp_path):
+    """`cache_dir=false` has to beat an enabled config, or turning it off for one
+    import would mean editing a file the rest of your work depends on."""
+    layered("user", {"cache_dir": str(tmp_path / "blocks")})
+    fs = ZenodoFileSystem(
+        extract_zips=True, cache_dir="false", skip_instance_cache=True
+    )
+    handle = fs._open_container(ZIP, cache_type="mmap")
+    assert handle.cache.location is None
+    assert handle.cache.index is None

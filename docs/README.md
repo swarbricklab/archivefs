@@ -6,7 +6,9 @@
 |---|---|
 | import someone's imaging deposit, start to finish | [`importing-from-bia.md`](importing-from-bia.md) |
 | use any archive as a DVC dependency | [`using-with-dvc.md`](using-with-dvc.md) |
+| set a default once instead of per command | [`configuration.md`](configuration.md) |
 | set up EGA (or restricted Zenodo) access safely | [`credentials.md`](credentials.md) |
+| give reviewers access to an unreleased deposit | [`reviewer-access.md`](reviewer-access.md) |
 | know why something is built the way it is | [`design.md`](design.md), [`decisions.md`](decisions.md) |
 
 ## Command reference
@@ -22,9 +24,16 @@ One page per subcommand: syntax, every option, worked scenarios, exit codes.
 | [`archivefs check`](cli-check.md) | has the *deposit* drifted from its manifest? |
 | [`archivefs verify`](cli-verify.md) | do the files on *my disk* match the manifest? |
 | [`archivefs dvc`](cli-dvc.md) | register the protocols with DVC — required once per environment |
+| [`archivefs config`](configuration.md) | the configuration layers, and what they resolve to |
 | [`archivefs cache`](cli-cache.md) | the on-disk block cache that lets an interrupted import resume |
+| [`archivefs credentials`](reviewer-access.md) | what access you hold, and how to hand it to a reviewer |
 
 Every command that takes a URL also takes `-o KEY=VALUE`.
+
+Every option below can also be a **default**, in a layered config file rather than on
+every command line — see [`configuration.md`](configuration.md). Which layer may set
+which option is not uniform: only the committed `.archivefs.json` may set anything
+that changes *what the data is*, because only that one travels with the data.
 
 ## Storage options (`-o KEY=VALUE`)
 
@@ -54,6 +63,7 @@ private file, and every other route is refused. See
 | | `layout` | `accession` (default), `display`, `nested` | how dataset members are named ([`decisions.md`](decisions.md) D7) |
 | | `api_url` | URL | override the EGA API endpoint |
 | *all* | `cache_dir` | path, or `false` | keep a ZIP container's fetched blocks in this directory so an interrupted import resumes instead of starting again. **Off unless set**; also readable from `$ARCHIVEFS_CACHE_DIR`, which `cache_dir=false` overrides for one command. Put it on `/scratch`, not `$HOME` — entries are as large as the archive ([`cli-cache.md`](cli-cache.md), [`decisions.md`](decisions.md) D28) |
+| *all* | `scratch_dir` | path, or `false` | which filesystem takes a ZIP container's sparse block file while it is being read, whether or not `cache_dir` keeps it. **Unset inherits fsspec's `tempfile` default — `$TMPDIR`, or `/tmp`, which on Gadi is a 63 GB tmpfs and therefore RAM.** Also readable from `$ARCHIVEFS_SCRATCH_DIR` ([`cli-cache.md`](cli-cache.md)) |
 | *all* | `max_concurrent_reads` | integer, `8` (default) | ceiling on concurrent ranged reads, shared across every caller of one filesystem. Archives throttle **per connection**: on Zenodo one connection sustains ~0.30 MB/s at any request size, while eight carrying 2 MiB each sustain 9.7–14.0 MB/s. **8 is a measured optimum, not just a politeness budget** — 16 connections are *slower*, because throughput tracks the bytes in flight and falls off a cliff past ~16 MiB. Raising this shrinks the piece size to compensate ([`decisions.md`](decisions.md) D26, D27) |
 | `zenodo` | `extract_zips` | `true`, `false` (default) | list ZIP contents as directories, read members by range. **Off by default**, though the reason that justified it has gone — an expanded ZIP is now pullable from Zenodo by a reviewer with no remote ([`decisions.md`](decisions.md) D23). Do not combine with `--no-download`: it costs a full transfer and buys nothing |
 | | `strip_components` | integer, `1` (default) | drop leading directories from a ZIP's interior, but only while each is its sole top-level entry — so `annotations.zip` holding `annotations/…` expands without the redundant level. A **maximum, not a promise**: a ZIP with two real top-level entries is passed through untouched. `0` presents the interior verbatim ([`decisions.md`](decisions.md) D24) |

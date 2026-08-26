@@ -358,6 +358,36 @@ archive publishes no digest, which is precisely GEO's weakness.
 
 ## Worth building when someone needs them
 
+### 18. Zenodo per-record share links, as a second shareable capability
+D32's bundle mechanism can carry exactly one credential today, because BIA's per-study
+key is the only capability archivefs models — Zenodo's `token` is a personal access
+token, which authenticates an account and is refused. But Zenodo *does* issue per-record
+preview links for restricted and embargoed records, which are the same shape: scoped to
+one deposit, issued to be handed on, revocable without touching the account.
+
+Adding one would be a `Credential(name="share_token", scoped=True, shareable=True)`
+beside the existing token, a `grants_from_link` that parses the preview URL, and
+whatever query parameter Zenodo actually wants — which needs measuring against the live
+API, not reading off the docs, on the D31 precedent. The bundle format needs no change:
+grants already carry `(protocol, credential, scope, value)`.
+
+Worth doing the day someone has an embargoed Zenodo record in a paper under review. Not
+before — the guessed API shape would be the whole risk, and there is nothing to test it
+against.
+
+### 19. A bundle that expires
+A sharing key is revocable but not time-limited, so a bundle mailed to a reviewer in
+2026 still works in 2029 unless the depositor regenerates the link. An `expires` field
+in the manifest was considered and left out: nothing could enforce it, and a field that
+merely *claims* an expiry is worse than none, since it invites the belief that access
+lapsed on its own.
+
+The honest version is a `credentials list --stale` that flags keys for studies that have
+since been released — those are dead weight, and knowing which are safe to delete is the
+question a depositor actually has. It needs one API call per accession, which is why it
+is here and not built.
+
+
 ### 6. Sample-sheet-driven selection as a first-class thing
 The design's "selection-driven virtual `ls()`" is implemented for EGA
 (`selection=[…]`), but the ergonomic version is a **file**: point the backend at a

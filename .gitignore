@@ -13,3 +13,6 @@ src/archivefs/_version.py
 .dvc/config.local
 egacheck/
 *.credentials.json
+# the per-machine config layer. `.archivefs.json` IS committed — that is the whole
+# distinction (docs/configuration.md); this one names paths on one machine.
+.archivefs.local.json

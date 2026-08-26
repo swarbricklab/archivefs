@@ -211,6 +211,81 @@ So, for the submitted tier, choose deliberately:
 
 ---
 
+## 4b. Before the study is published
+
+A deposit you are still working on, or reviewing, is not released yet. BioStudies
+answers `403` for it — the study exists, you just cannot see it — and shares it
+instead through a link carrying a key:
+
+```
+https://www.ebi.ac.uk/biostudies/bioimages/studies/S-BIAD3080?key=aaaaaaaa-…
+```
+
+Give archivefs that key and everything else works unchanged:
+
+```console
+$ export BIA_KEY=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+$ archivefs ls -l bia://S-BIAD3080 | head -3
+$ dvc import-url 'bia://S-BIAD3080/images/he/…/P17_Xe5k_matrix.csv' matrix.csv
+```
+
+For more than one private study, or to avoid a variable in your shell history, let
+archivefs file the link for you — it writes `~/.config/archivefs/bia.json` at
+`chmod 600`, reading from stdin so the key never reaches your shell history:
+
+```console
+$ echo 'https://www.ebi.ac.uk/biostudies/bioimages/studies/S-BIAD3080?key=…' \
+    | archivefs credentials import -
+```
+
+[`credentials.md`](credentials.md) has the file's shape if you would rather write it
+yourself.
+
+**Sending access to reviewers or co-authors** is
+[`reviewer-access.md`](reviewer-access.md): `archivefs credentials export` packages
+the keys this repository's deposits need — and only those — and tells you which of
+its dependencies no key can open.
+
+### The `.dvc` file does not change at publication
+
+This is the property worth checking, because it is what lets a depositor and a
+reviewer and a future stranger all use one committed file. The import above writes:
+
+```yaml
+deps:
+- md5: 46c7f2c87913ab9a02ba72972e04ec77
+  size: 115
+  hash: md5
+  path: bia://S-BIAD3080/images/he/alignment_files/xenium/P17_Xe5k_matrix.csv
+```
+
+Nothing there is publication-dependent. The accession and the interior path do not
+move when a study is released; the md5 is a hash of the content, so it does not
+either. And nothing there is secret — the key appears in **no** file DVC writes, not
+the `.dvc`, not `.dvc/config`, not `.dvc/tmp`.
+
+What *does* change at release — the payload path gaining a `.private/<key>` prefix,
+`isPublic`, `released` — is resolved from the API at read time and never recorded.
+
+So: commit the `.dvc` file now, share it with reviewers, and it keeps working after
+the DOI is minted. A reviewer needs their own copy of the key until then, and
+nothing afterwards.
+
+### What you still do not get before release
+
+**No checksums, so no cheap `--no-download`.** BIA publishes no md5 for submitted
+files at any point (`decisions.md` D8), so DVC computes one by streaming the whole
+file — the cost described in D14. That is unchanged by the key.
+
+**Not a pull-through remote.** BIA-submitted declares no immutability basis, so it is
+not version-aware and DVC will not treat it as fallback storage: a reviewer cannot
+`dvc pull` your completed import from BIA. They run `dvc import-url` themselves with
+their key, or you share the bytes some other way. A `.chiro` sidecar is the route to
+changing that, since it supplies the checksums BIA does not.
+
+**Derived view is release-only.** BIA's OME-Zarr conversions are built after
+publication, so `-o view=derived` has nothing to find on an unreleased study.
+
 ## 5. Without DVC
 
 There is no adaptor to install for plain Python — the entry point is enough:

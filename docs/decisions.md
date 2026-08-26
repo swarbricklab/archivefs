@@ -1951,6 +1951,44 @@ So: named directory, or nothing. `$ARCHIVEFS_CACHE_DIR` in a shell profile is th
 intended shape — set once, applies to every import — and `cache_dir=false` turns it off
 for one command without unsetting it.
 
+### And the *ephemeral* destination is configurable too, which is the sharper problem
+
+Turning the cache off does not mean nothing is written: a container's blocks still need
+somewhere to live for the length of the read. fsspec creates that file with
+`tempfile.TemporaryFile()` and passes **no directory**, so it silently follows
+`$TMPDIR` — and `/tmp` when `$TMPDIR` is unset.
+
+**On Gadi `/tmp` is a 63 GB tmpfs.** That is RAM. An unset `$TMPDIR` therefore turns a
+20 GB import into 20 GB of memory pressure on a node shared with everyone else's work,
+which is a worse outcome than filling any disk — and it happens without anyone choosing
+it, which is the part that makes it a defect rather than a trade-off.
+
+`scratch_dir` / `$ARCHIVEFS_SCRATCH_DIR` names that directory. It is deliberately a
+*second* option rather than a reuse of `cache_dir`, because the two answer different
+questions — "should these blocks outlive the process" and "which filesystem absorbs
+them while they do not" — and the second matters to someone who wants nothing kept.
+
+Implementing it costs six duplicated lines: `MMapCache._makefile` hard-codes the
+`TemporaryFile()` call, so `ResumableBlockCache` overrides it. That override is also
+why our cache class is now used **even when nothing is persisted** — which brings a
+second fix with it. fsspec marks blocks present *before* fetching them, so a read
+retried after a failed fetch is served zeros out of the mmap. That is a live bug in the
+ephemeral path too, not only the persistent one, and `_fetch`'s snapshot-and-restore
+now covers both.
+
+### Neither destination is ever `$HOME`
+
+Nothing in archivefs writes payload to a home directory. Credentials are *read* from
+`~/.config/archivefs/` and `~/.pyega3/` — a few hundred bytes of JSON, read-only — and
+verified empirically: a ZIP-member read with `$HOME` redirected to an empty directory
+leaves it empty.
+
+Pointing either option at `$HOME` **warns once** rather than refusing. `~/.cache` is
+the conventional place for a cache and a laptop is welcome to it; the reason for the
+warning is that on a cluster the failure arrives three hours into an import as a quota
+error attributed to whatever wrote last. This host's home allowance is 10 GB with
+6.9 GB already used — 3.3 GB free against a 20 GB archive.
+
 **Cost of being wrong about this:** if it turns out that everyone sets the variable and
 nobody is surprised by the disk use, flipping the default is a one-line change plus a
 default cap. If it were on by default and filled a shared `/scratch`, that would be
@@ -2002,3 +2040,348 @@ would reintroduce the amplification #10 fixed.
 **Cost to change my mind:** the cache is one `cache_type` string. Returning `"mmap", {}`
 unconditionally from `block_cache_options` restores the previous behaviour exactly, and
 `tests/test_blockcache.py` fails loudly rather than silently if it is ever half-wired.
+
+---
+
+## D30 — configuration is **layered**, and only the layer that travels may change the data
+
+Three environment variables appeared in one afternoon — `ARCHIVEFS_CACHE_DIR`,
+`ARCHIVEFS_SCRATCH_DIR`, `ARCHIVEFS_CACHE_MAX_AGE_DAYS` — which is where ad-hoc stops
+scaling. A setting you have to remember to `export` is a setting you discover you
+needed the day after it would have helped, and D29's cache is exactly that shape: the
+property you want is "my three-hour import survives an interruption", and you want it
+*before* the interruption.
+
+Four layers, XDG-shaped, lowest precedence first — `system`
+(`$XDG_CONFIG_DIRS/archivefs/config.json`), `user`
+(`$XDG_CONFIG_HOME/archivefs/config.json`), `project` (`.archivefs.json`, committed),
+`local` (`.archivefs.local.json`, gitignored) — with the environment above every file
+and an explicit option above that. The same order `credentials.py` uses for secrets, so
+learning it once is enough. Details and worked setups:
+[`configuration.md`](configuration.md).
+
+### The decision that is not obvious
+
+**Only a layer that travels with the data may change what the data is.**
+
+`--fs-config extract_zips=true` is written into the `.dvc` file, so it travels: a
+colleague's `dvc pull` reproduces the same tree. The same setting arriving from
+`~/.config/archivefs/config.json` would leave the `.dvc` file with **no record of it**,
+and that identical file would then resolve to a different tree on a different machine —
+silently. That is the reproducibility hole this whole project is arranged to avoid,
+reached sideways through a convenience.
+
+So options are classified, and a layer that cannot honour a class refuses it:
+
+| kind | examples | settable from | refused in |
+|---|---|---|---|
+| machine — changes cost | `cache_dir`, `scratch_dir`, `max_concurrent_reads`, `api_url`, `credentials_file` | `system`, `user`, `local` | `project` |
+| content — changes what comes back | `extract_zips`, `strip_components`, `view`, `layout`, `chiro` | `project` only | everywhere else |
+| credentials | `password`, `token` | nowhere | everywhere |
+
+The `project` refusal has the mirror-image justification: a committed `/scratch/...`
+path is wrong for everyone who did not write it.
+
+That split is what makes refusing content keys in the user config a *design* rather
+than a restriction. Without `project`, the answer to "I want `extract_zips` on by
+default" would just be no. With it, the answer is "yes, and committed, so your
+collaborators get it too" — which is the answer that was wanted anyway.
+
+### Refused, not warned; and unknown keys too
+
+Every failure here has the same shape: the setting looks applied and is not, or is
+applied somewhere it will not follow the data. A warning in a pipeline log is invisible
+at exactly the moment it matters, which is the argument `credentials.py` already makes
+for refusing a password on the command line rather than discouraging one. So a bad key
+raises `ConfigError` at filesystem construction, naming the file, the layer, and where
+the setting does belong.
+
+That extends to typos. `cach_dir` silently doing nothing is the failure mode config
+models are famous for, so an unknown key is an error listing the ones that would work,
+and a misspelled protocol section (`"zendo": {…}`) is caught rather than skipped as
+though it were a container.
+
+`test_every_backend_option_is_classified` is what keeps the two key sets honest: a new
+backend option cannot be added without deciding whether it changes the data. That guard
+is the only reason it is safe for those sets to be hand-written lists rather than
+another field on `registry.Backend`.
+
+### JSON, and `None` defaults
+
+JSON rather than TOML: `requires-python` is 3.9 so there is no `tomllib`, the CLI is
+deliberately stdlib-only, and credential files are already JSON — one syntax to learn.
+
+The unglamorous half of this change is that every configurable option's signature
+default became `None`. With `extract_zips: bool = False` there is no way to distinguish
+"the user said no" from "the user said nothing", so a configured `true` would be
+silently overridden by the signature — and `strip_components: int = 1` has the same
+problem at `0`. Both are pinned by tests, because it is the kind of bug that looks like
+the config file not being read at all.
+
+### Cost of being wrong
+
+### One thing this made worse before it made it better
+
+The first version of the chain ended at `$XDG_CACHE_HOME`, on the reasoning that XDG
+already answers "where do caches go" and honouring a standard beats inventing a
+variable. That was wrong, and the config model is what makes it clearly wrong: XDG
+names a *location*, not consent for an entry the size of the archive. Someone
+exporting `XDG_CACHE_HOME` is thinking about pip wheels and font caches, and on a
+cluster the directory they point it at is shared project space — on this one, 78% full
+and at 85% of its inode quota. Honouring it would have enabled a 20 GB cache for
+anyone following ordinary XDG advice, which is exactly what D29 declined to do by
+default, arrived at through a standard instead of a hardcoded path.
+
+It is dropped. The `system` layer is the better answer to the same wish — lab-wide,
+explicit, one file, and visible in `archivefs config`.
+
+`archivefs config` shows every layer and what it resolved to, which is the diagnostic
+that makes a layered model debuggable rather than mysterious. If the classification
+turns out to be too strict, moving a key between `MACHINE_KEYS` and `CONTENT_KEYS` is
+one line and the test above will notice. If layering turns out to be unwanted, deleting
+`config.py` and the `_setting` calls restores exactly the environment-variable
+behaviour that preceded it.
+
+---
+
+## D31 — BioStudies' **sharing key** is a credential, and the `.dvc` file survives publication
+
+A depositor sharing an unreleased BioImage Archive study sends a link with a key on
+it: `…/studies/S-BIAD3080?key=<uuid>`. Reviewers get the same link. The requirement
+that came with it is sharper than "support the key": **one committed `.dvc` file that
+works for a reviewer holding a key before release, for the depositor, and for anyone
+at all afterwards.**
+
+### The API behaviour, which upstream does not document
+
+Measured against the live service, because the help pages and the REST docs do not
+mention it:
+
+| request | no key | `?key=` |
+|---|---|---|
+| `/api/v1/studies/{acc}/info` | **403** | 200 |
+| `/api/v1/studies/{acc}` | **403** | 200 |
+| `/api/v1/files/{acc}?…` | **200 `{}`** | 200, full listing |
+
+Three things fall out of that table:
+
+* **Query parameter only.** `X-Session-Token: <key>` is refused with 403.
+* **`/files` does not 403; it returns an empty object.** So a private study and a
+  missing one are indistinguishable there — which is why `study_info` uses
+  `/studies/{acc}/info` as the existence check (a decision made for a different
+  reason, and it pays again here).
+* **A stale key is harmless.** A released study answers 200 with a key that is wrong,
+  expired, or nonsense. So archivefs sends the key whenever it holds one, without
+  first checking whether the study is public: nothing is gained by asking twice, and a
+  depositor's key can stay in place after release.
+
+BioStudies' own name for it, in the `/info` payload, is `seckey`.
+
+### The URL *is* the capability
+
+The important discovery is not the query parameter. An unreleased study is served from
+a path that contains the key:
+
+    relPath = .private/aa/aaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/S-BIAD/080/S-BIAD3080
+
+that is `key[:2]/key[2:]`. A ranged GET on it returns **206 with no key parameter at
+all**, and the same path minus the key is 404. It is a presigned URL that never
+expires — so the key leaks through anything that prints a URL, which for this codebase
+means every error message: `_request` interpolates the URL into `AuthenticationError`
+and `ArchiveNotFoundError`.
+
+Hence `_redact`, a new hook on `ArchiveFileSystem` — identity everywhere except BIA,
+which masks both shapes. **Both**, and that was not the first version: the first masked
+only the `.private/` path, and a test caught the `?key=` query parameter — which
+archivefs itself adds — leaking through the very handler written to stop it.
+
+### Decision
+
+`key` is a declared `Credential` with `secret=True`, `required=False`, and a new
+`scoped=True`. Scoping is the shape of the thing rather than a nicety: EGA issues one
+username and password for every dataset you are authorised for, while BioStudies issues
+a link per deposit, so a single value stops working at the second private study. The
+file holds a mapping, with a flat entry beside it as the catch-all for the reviewer who
+has exactly one:
+
+    {"keys": {"S-BIAD3080": "…"}}      # several
+    {"key": "…"}                        # one, applies to whatever you ask for
+
+Everything else follows the existing policy unchanged: `secret=True` keeps `key` out of
+`registry.Backend.config`, so `--fs-config key=…` dies inside DVC's own config
+validator; `-o key=…` is refused by `CredentialResolver`; the file's mode is checked.
+
+### Why the `.dvc` file is invariant
+
+Not by care — by construction, and this is the part worth being precise about.
+`dvc_data`'s `Meta.from_info` keeps a **fixed** field set out of an `info()` dict
+(`size`, `md5`, `etag`, `checksum`, `version_id`, `mtime`, …). Everything else archivefs
+reports, including the whole `bia` provenance block, is discarded before anything is
+written. So of the things that change at publication —
+
+| field | changes at release? | recorded? |
+|---|---|---|
+| accession + interior path | no | **yes** (`deps[].path`) |
+| content md5 | no | **yes** |
+| size | no | **yes** |
+| `relPath` / `httpLink` | **yes** — gains/loses `.private/<key>` | no |
+| `isPublic`, `released` | **yes** | no |
+
+— none of the mutable ones is in the file. Verified end to end against the live private
+study: `dvc import-url` succeeded with the key, and the key and the string `.private`
+appear in **no** file DVC wrote — not the `.dvc`, not `.dvc/config`, not `.dvc/tmp`.
+
+`relpath` survives in the provenance block, masked to `.private/<key>` rather than
+dropped: that a deposit is unreleased is worth reporting, and `archivefs stat` prints
+it to stdout, which ends up in logs as readily as stderr does.
+
+### What this does *not* buy
+
+BIA-submitted still declares no immutability basis, so it is not version-aware and DVC
+will not treat it as fallback storage (D6/D17/D23). A reviewer cannot `dvc pull` a
+depositor's completed import from BIA; they run `dvc import-url` themselves with their
+own copy of the key. That is arguably correct rather than merely unfinished — an
+unreleased deposit is *mutable*, so treating it as immutable storage would be a lie —
+and a `.chiro` sidecar is the route to changing it, since it supplies the checksums BIA
+does not.
+
+**Cost to change my mind:** the credential declaration is one list entry; deleting it
+returns BIA to anonymous-only, and `_redact` becomes dead code rather than wrong code.
+
+## D32 — a credential bundle carries **capabilities, never identities**, and is derived from the repository
+
+D31 made an unreleased BioStudies study readable with a sharing key. The next question
+is operational: how does a depositor get that key to three reviewers? The ask was "a
+zip file of the credentials they need, set up in one go", and the mechanics of that are
+easy. The security shape of it is the part worth writing down.
+
+### The distinction the feature turns on
+
+Ask archivefs to "bundle up the credentials" and, run naively over one researcher's
+configuration, it would produce a file containing their EGA account password, their
+Zenodo personal access token, and their dbGaP `.ngc` — addressed to four strangers.
+None of those grants access to a *deposit*. They grant access to a *person*.
+
+So `Credential` gained one field, `shareable`, defaulting to `False`:
+
+| | capability | identity |
+|---|---|---|
+| example | BioStudies per-study sharing key | EGA password, Zenodo token, dbGaP `.ngc` |
+| opens | one named deposit | everything the account can reach |
+| revoked by | regenerating that deposit's link | rotating the account |
+| in a bundle | **yes** | **refused, with no flag** |
+
+Exactly one credential in archivefs is marked, and
+`test_exactly_one_credential_is_shareable_and_it_is_a_per_study_key` enumerates the
+answer so that marking a second one has to come past a test whose reviewer is looking
+at the security question rather than at plumbing. A companion test asserts that
+`shareable` implies `scoped`, because unscoped-and-shareable is a contradiction: it
+would open everything.
+
+The flag lives on the declaration rather than in the exporter deliberately — the person
+who knows whether a new archive's secret is safe to hand on is the person adding that
+archive, and a default of `False` means forgetting to think about it fails closed.
+
+**Import enforces it too**, not just export. A hand-edited manifest carrying
+`ega:password` is refused at install with "whoever sent this should rotate it". The
+producer and the consumer are on different machines and only one of them is ours.
+
+### Derived from the repository, not from the credential store
+
+The bundle is built by scanning the project's `*.dvc`, `dvc.lock`, `dvc.yaml` and
+`.dvc/config` for archivefs URLs and exporting keys for exactly the deposits found.
+A depositor with three papers in review has three keys in one file; reviewers of the
+first get one.
+
+Text matching, not YAML parsing: the CLI is deliberately stdlib-only and has no YAML
+reader, and "does this repo mention `bia://S-BIAD3080`" does not need one. It
+over-matches rather than under-matches — a URL in a `desc:` field counts — which is the
+safe direction, since a spurious row costs a line of output where a missed one costs a
+reviewer their access.
+
+The report is the second half of the value, and it covers the deposits a bundle
+*cannot* help with:
+
+```
+  bia://S-BIAD3080          included     key from ~/.config/archivefs/bia.json (S-BIAD3080)
+  ega://EGAD00001006673     personal     password, username authenticate an account, not a
+                                         deposit — a reviewer needs their own …
+  geo://GSE12345            public       needs no credential; nothing to hand over
+  zenodo://1486184          personal     public unless this deposit is restricted; …
+```
+
+An "included" row names its *source*, not just that a value was found, because a scoped
+credential can resolve from a flat one: `$BIA_KEY` answers for any accession asked of
+it. Exporting on that basis pins one study's key to another, and the failure surfaces
+as a 403 on the reviewer's machine with nothing connecting it to the depositor's
+environment. So the row says `from $BIA_KEY, which is not per-study — check it is this
+deposit's`.
+
+### No crypto, on purpose
+
+There is no `--password`. Python's `zipfile` cannot *write* encrypted archives at all,
+and the legacy ZipCrypto it can read has been broken for decades; adding `pyzipper` to
+a stdlib-only CLI would buy weaker protection than the alternative. The alternative is
+that the bundle reads and writes stdin/stdout, so `age` or `gpg` composes and does the
+job properly:
+
+```console
+archivefs credentials export --out - | age -r age1… > pack.age
+age -d pack.age | archivefs credentials import -
+```
+
+What archivefs does instead is the accident-proofing, because the realistic threat is
+not an interceptor, it is `git add -A`:
+
+* `0600` on write, via an atomic temp file whose mode is set *before* the content goes
+  in, so there is no window at the default umask;
+* **refused inside a git repository** unless the path is already ignored — `git
+  check-ignore` is asked rather than `.gitignore` re-implemented — because rewriting
+  history does not un-publish a key;
+* refused onto a terminal, where binary output is useless and the keys would be in the
+  scrollback;
+* no value in any human-readable output, in any mode: not the report, not
+  `credentials list`, not the conflict error, not `--json`. Asserted directly against
+  the literal secret in tests, because "we do not print it" decays one helpful error
+  message at a time.
+
+### Import merges, and never overwrites silently
+
+A key differing from one already held is a **conflict**: nothing is written, the error
+names the deposit, and `--force` is required. The failure that prevents — a stale key
+quietly replacing a working one — surfaces much later as an unexplained 403. Same
+argument as D30's refusal to warn: an invisible action is worse than a loud stop.
+
+`test_what_import_writes_is_what_the_resolver_reads` pins the two halves together.
+They live in different modules and read the same declaration, and nothing else would
+notice them drifting apart until a reviewer's pull failed.
+
+### The route with no artefact
+
+For BioStudies the URL *is* the capability (D31), so a sharing link is already a
+bundle. `credentials import -` accepts one:
+
+```console
+echo 'https://www.ebi.ac.uk/biostudies/…/studies/S-BIAD3080?key=…' \
+  | archivefs credentials import -
+```
+
+Parsed by `ArchiveFileSystem.grants_from_link`, a classmethod on the backend — the
+inverse of `_redact` and, for the same reason, the backend's business rather than the
+bundler's. **stdin, not an argument**: an argument lands in shell history and the
+process table, which would sit oddly beside D16's refusal of credentials on the command
+line.
+
+Prefer this when it applies. It is the whole feature in one line of a cover letter,
+with nothing to mislay and nothing to go stale.
+
+### Naming
+
+`archivefs credentials`, not `archivefs config import` as originally sketched.
+D30's config model raises `ConfigError` on a credential key by design; a `config`
+subcommand whose job is installing secrets would undercut the one sentence that model
+is built to make true.
+
+**Cost to change my mind:** the `shareable` flag is one line per credential. Deleting
+`bundle.py` and its subcommand removes the feature entirely; nothing else imports it,
+and the sharing-key support from D31 stands on its own without it.

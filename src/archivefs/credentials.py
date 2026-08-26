@@ -70,8 +70,39 @@ class Credential:
     files: tuple[str, ...] = ()
     #: key to read out of those JSON files (defaults to ``name``)
     file_key: str | None = None
+    #: Is the secret scoped to *one accession* rather than to an account?
+    #:
+    #: EGA hands out one username and password that open every dataset you have been
+    #: authorised for. BioStudies hands out a key per **study** — the reviewer link
+    #: for one pre-publication deposit — so a single value is not enough once you
+    #: have two of them. When set, the JSON file's ``file_key`` holds a mapping from
+    #: accession to secret, and a flat ``name`` entry beside it still works as a
+    #: catch-all for the common case of exactly one private study::
+    #:
+    #:     {"keys": {"S-BIAD3080": "aaaaaaaa-…", "S-BIAD1234": "…"}}
+    #:     {"key": "aaaaaaaa-…"}     # applies to whatever you ask for
+    scoped: bool = False
     #: is this a secret (must never be committed) or a plain identifier?
     secret: bool = True
+    #: May this value be *given to someone else*?
+    #:
+    #: Two things wear the word "credential" and they are not the same, which only
+    #: becomes load-bearing once something offers to package them up
+    #: (``archivefs credentials export``):
+    #:
+    #: * a **capability** — issued deliberately so it can be handed over, scoped to
+    #:   named data, revocable without touching your account. BioStudies' per-study
+    #:   sharing key is one: the depositor mails it to reviewers, and it opens that
+    #:   one unreleased study and nothing else.
+    #: * an **identity** — Zenodo's personal access token, an EGA password, a dbGaP
+    #:   ``.ngc``. Passing one to a reviewer does not grant them access to your data;
+    #:   it makes them you, for every deposit you can reach, until you rotate it.
+    #:
+    #: Default ``False``, so a new backend is un-shareable until someone writes down
+    #: why it is safe. The export path refuses anything not marked, which is why the
+    #: distinction lives here beside the declaration rather than in the exporter: the
+    #: person who knows the answer is the person adding the backend.
+    shareable: bool = False
     #: is the value a filesystem path that must exist? (dbGaP's ``.ngc``)
     is_path: bool = False
     required: bool = True
@@ -175,9 +206,10 @@ class CredentialResolver:
 
     # ------------------------------------------------------------------ lookup
 
-    def resolve(self, name: str) -> Resolved:
-        if name in self._cache:
-            return self._cache[name]
+    def resolve(self, name: str, scope: str | None = None) -> Resolved:
+        cache_key = name if scope is None else f"{name}\0{scope}"
+        if cache_key in self._cache:
+            return self._cache[cache_key]
         try:
             credential = self.credentials[name]
         except KeyError:
@@ -217,8 +249,21 @@ class CredentialResolver:
                     f"{path} is not valid JSON ({exc}); expected an object "
                     f"containing {credential.file_key or credential.name!r}"
                 ) from exc
+            if not isinstance(payload, dict):
+                continue
             key = credential.file_key or credential.name
-            if isinstance(payload, dict) and payload.get(key):
+            if credential.scoped:
+                # The scoped entry for *this* accession first, then a flat entry as
+                # the catch-all — so the one-private-study case stays a two-line file
+                # and the many-studies case does not need one file per study.
+                mapping = payload.get(key)
+                if isinstance(mapping, dict) and scope and mapping.get(scope):
+                    value = str(mapping[scope])
+                    source = f"{path} ({scope})"
+                elif payload.get(credential.name):
+                    value = str(payload[credential.name])
+                    source = str(path)
+            elif payload.get(key):
                 value = str(payload[key])
                 source = str(path)
 
@@ -237,23 +282,25 @@ class CredentialResolver:
         if value is None and credential.required:
             raise CredentialsNotFoundError(
                 self.archive,
-                name,
+                name if scope is None else f"{name} for {scope}",
                 searched,
                 hints={name: credential.help} if credential.help else None,
             )
-        self._cache[name] = resolved
+        self._cache[cache_key] = resolved
         return resolved
 
-    def get(self, name: str, default: str | None = None) -> str | None:
+    def get(
+        self, name: str, default: str | None = None, scope: str | None = None
+    ) -> str | None:
         """Resolve, returning ``default`` for an optional missing credential."""
         credential = self.credentials.get(name)
         if credential is not None and not credential.required:
             try:
-                resolved = self.resolve(name)
+                resolved = self.resolve(name, scope)
             except CredentialsNotFoundError:
                 return default
             return resolved.value if resolved.value is not None else default
-        return self.resolve(name).value
+        return self.resolve(name, scope).value
 
     def require(self, *names: str) -> dict[str, str]:
         """Resolve several credentials, reporting *all* the missing ones at once.

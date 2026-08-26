@@ -122,17 +122,23 @@ class ZenodoFileSystem(ArchiveFileSystem):
 
     def __init__(
         self,
-        api_url: str = DEFAULT_API_URL,
-        extract_zips: bool = False,
-        strip_components: int = 1,
+        api_url: str | None = None,
+        extract_zips: bool | None = None,
+        strip_components: int | None = None,
         zip_limits: Any = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
-        self.api_url = api_url.rstrip("/")
-        self.extract_zips = extract_zips
-        self.strip_components = int(strip_components)
-        self.zip_limits = zip_limits
+        # `None` rather than a literal default for anything the config layers may
+        # set: with `extract_zips: bool = False` there is no way to tell "the user
+        # said no" from "the user said nothing", so a configured `true` would be
+        # silently overridden by the signature. See `archivefs.config`.
+        self.api_url = self._setting("api_url", api_url, DEFAULT_API_URL).rstrip("/")
+        self.extract_zips = bool(self._setting("extract_zips", extract_zips, False))
+        self.strip_components = int(
+            self._setting("strip_components", strip_components, 1)
+        )
+        self.zip_limits = self._setting("zip_limits", zip_limits)
         self.token = self.creds.get("token")
         self.token_source = self.creds.source_of("token") if self.token else "anonymous"
         #: record spec or id -> record JSON

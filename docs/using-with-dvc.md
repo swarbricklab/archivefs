@@ -229,6 +229,22 @@ swallows the URL and fails with *"not enough values to unpack"*.
 possible to put a secret there: DVC rejects `--fs-config password=…` outright. See
 [`credentials.md`](credentials.md).
 
+### Setting a default instead of repeating it
+
+`--fs-config` is per import, which is right for a setting the dataset depends on —
+being in the `.dvc` file is exactly what makes a colleague's `dvc pull` reproduce your
+tree. For everything else there is a layered config file, so
+`--fs-config cache_dir=/scratch/...` on every command becomes one line written once
+([`configuration.md`](configuration.md)).
+
+The two are not interchangeable, and the config model enforces that rather than
+trusting it. A setting that changes **what the data is** — `extract_zips`, `view`,
+`chiro`, `layout` — may only come from `--fs-config` or from the committed
+`.archivefs.json`, because those are the two places that travel with the data. Put one
+in your personal config and it is refused, with the reason: the same `.dvc` file would
+otherwise resolve to a different tree on a colleague's machine, with nothing recorded
+to say why.
+
 ### Using an archive as a DVC remote is not supported
 
 `dvc remote add bia bia://S-BIAD599` will appear to work, and `import-url` through

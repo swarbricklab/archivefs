@@ -152,6 +152,7 @@ PROTOCOLS: dict[str, Backend] = {
             "api_url": str,
             "max_concurrent_reads": int,
             "cache_dir": str,
+            "scratch_dir": str,
         },
         dvc_wrapper="EGADVCFileSystem",
         # `plainChecksum` is the md5 of the *decrypted* bytes, which is what lands
@@ -173,6 +174,7 @@ PROTOCOLS: dict[str, Backend] = {
             "chiro": str,
             "max_concurrent_reads": int,
             "cache_dir": str,
+            "scratch_dir": str,
         },
         dvc_wrapper="ZenodoDVCFileSystem",
         published_checksum="md5",
@@ -195,6 +197,7 @@ PROTOCOLS: dict[str, Backend] = {
             "chiro": str,
             "max_concurrent_reads": int,
             "cache_dir": str,
+            "scratch_dir": str,
         },
         dvc_wrapper="GEODVCFileSystem",
         # GEO publishes no per-file digest at all (D8), so `info()["md5"]` is None
@@ -207,8 +210,8 @@ PROTOCOLS: dict[str, Backend] = {
         class_path="archivefs.backends.bia.BIAFileSystem",
         extra=None,
         summary=(
-            "BioImage Archive via BioStudies (open; submitted files + OME-Zarr "
-            "conversions)"
+            "BioImage Archive via BioStudies (submitted files + OME-Zarr "
+            "conversions; unreleased studies via a sharing key)"
         ),
         requires=("requests",),
         config={
@@ -218,6 +221,7 @@ PROTOCOLS: dict[str, Backend] = {
             "chiro": str,
             "max_concurrent_reads": int,
             "cache_dir": str,
+            "scratch_dir": str,
         },
         dvc_wrapper="BIADVCFileSystem",
         # Mixed, and recorded conservatively: the derived (OME-Zarr) view carries
