@@ -1,0 +1,23 @@
+17411292/HE_P15-2.ome.tif  2.53 GB, 8 slots
+2 sections x 3 trials x 2 conditions x 64 MiB = 0.81 GB
+
+--- range primitive
+  trial 1  before    179.9 s    0.37 MB/s
+  trial 1   after     10.3 s    6.52 MB/s
+  trial 2   after      3.3 s   20.21 MB/s
+  trial 2  before      6.6 s   10.11 MB/s
+  trial 3  before      6.7 s   10.02 MB/s
+  trial 3   after      7.2 s    9.27 MB/s
+  = before   10.02 MB/s   1.00x  [0.37-10.11]
+  =  after    9.27 MB/s   0.93x  [6.52-20.21]
+
+--- fs.open().read()
+  trial 1  before      9.1 s    7.36 MB/s
+  trial 1   after      8.0 s    8.34 MB/s
+  trial 2   after      6.6 s   10.24 MB/s
+  trial 2  before      8.5 s    7.90 MB/s
+  trial 3  before      7.9 s    8.44 MB/s
+  trial 3   after      8.6 s    7.76 MB/s
+  = before    7.90 MB/s   1.00x  [7.36-8.44]
+  =  after    8.34 MB/s   1.06x  [7.76-10.24]
+
