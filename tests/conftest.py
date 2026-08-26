@@ -37,3 +37,8 @@ def isolated_home(request, monkeypatch, tmp_path_factory):
     empty = tmp_path_factory.mktemp("home")
     monkeypatch.setenv("HOME", str(empty))
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    # Same argument, one directory over: a developer who has turned the block
+    # cache on would otherwise have every test resuming from *their* cache, and
+    # "did this read go to the network" is the question half of them ask.
+    monkeypatch.delenv("ARCHIVEFS_CACHE_DIR", raising=False)
+    monkeypatch.delenv("ARCHIVEFS_CACHE_MAX_AGE_DAYS", raising=False)

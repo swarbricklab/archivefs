@@ -1905,3 +1905,100 @@ reads now use a bound (`max_concurrent_reads`, default 8) they already had.
 **Cost to change my mind:** `max_concurrent_reads=1` restores the old behaviour per
 filesystem without a code change; `fetch_span` returning `self._fetch_range(info, start,
 end)` restores it globally, in one line.
+## D29 — a ZIP's block cache can **outlive the process**, if you name a directory for it
+
+D25 gave the member view an `mmap` cache so each block of a container is fetched once.
+It is thrown away: `MMapCache` with no `location` falls through to
+`tempfile.TemporaryFile()`, unlinked at creation, so the sparse file dies with the
+process.
+
+Measured, not inferred: a real `dvc import-url` of a 20.09 GB Zenodo record ran for
+**2 hours 50 minutes**, had **16.1 GB** in that file — visible as
+`/proc/<pid>/fd/12 -> /scratch/…/tmp870ebnra (deleted)` — did not complete, and the
+retry started from zero. At the ~1.6 MB/s such a record reads at, that is a 3.5 hour
+window in which a cancelled job, a walltime kill or an unrelated DVC exception costs
+the entire transfer. Issue #15.
+
+**This is a worse property than the 19.9x amplification D25/#10 fixed.** Amplification
+made imports slow. This makes long ones a coin flip, and a coin flip is not something
+you can put in a pipeline.
+
+### Decision
+
+`ARCHIVEFS_CACHE_DIR`, or `cache_dir=` per filesystem, names a directory where a
+container's blocks persist between processes. The next run finds them and fetches only
+what is missing. `archivefs cache` reports and clears it; see
+[`cli-cache.md`](cli-cache.md).
+
+The machinery was already there — `MMapCache` takes both `location` and `blocks`, and
+its `__getstate__` deliberately keeps them. What the decision is really about is the
+four ways of being wrong that a *persistent* block set opens up.
+
+### Off by default, and that is the uncomfortable part
+
+The property people want is "my three-hour import survives an interruption", and they
+want it **before** the interruption, which is exactly when nobody has configured
+anything. An opt-in cache is one you turn on the day after it would have helped.
+
+It is still off, because the alternative is worse. A cache of 20 GB archives needs a
+bound, and no default byte cap is both **useful** — necessarily bigger than the archive
+being imported, or it cannot resume the case that motivated it — and **safe** on a
+filesystem whose quota we do not know. A 20 GB default under `~/.cache` would blow an
+NCI home directory (10 GB) on first use. Age-based eviction is a real bound and is
+applied (14 days), but it bounds *accumulation*, not peak size.
+
+So: named directory, or nothing. `$ARCHIVEFS_CACHE_DIR` in a shell profile is the
+intended shape — set once, applies to every import — and `cache_dir=false` turns it off
+for one command without unsetting it.
+
+**Cost of being wrong about this:** if it turns out that everyone sets the variable and
+nobody is surprised by the disk use, flipping the default is a one-line change plus a
+default cap. If it were on by default and filled a shared `/scratch`, that would be
+somebody else's job failing, not ours.
+
+### The hazard everything else is shaped around
+
+A block recorded as present but never written serves **zeros as data** — silently — and
+DVC then hashes and commits them. That is a corrupt dataset with a clean checksum,
+which is the worst failure mode in this project. Four consequences:
+
+* **The index is written after the bytes.** fsspec's own `_fetch` does
+  `self.blocks.update(_blocks)` *before* fetching them, which is a latent bug in-process
+  (the object is normally abandoned along with the exception) and a loaded gun on disk.
+  `ResumableBlockCache._fetch` snapshots the set, and restores it if the fetch raises.
+  The index is then `msync`'d and `os.replace`d, so a crash between the two loses
+  blocks — which costs time — rather than inventing them, which costs correctness.
+* **The entry names the object.** Protocol, path, size, published md5 and **block
+  size**, in the cache key *and* inside the index. Any mismatch discards the entry.
+  Block size is in there because block *numbers* mean nothing under a different one, and
+  D27 made the block size depend on `max_concurrent_reads` and the container's size — so
+  it moves.
+* **No checksum, no persistent cache.** Without a published md5, "same path, same size"
+  is not evidence of the same bytes, and resuming into a re-deposited file produces
+  something that hashes cleanly against nothing. Zenodo publishes an md5 for every file
+  (which is why this landed there); GEO publishes none (D8) and keeps the
+  process-lifetime cache it always had.
+* **One writer per entry.** A non-blocking `flock`; the loser gets a private cache
+  rather than interleaving writes into one sparse file. Non-blocking on purpose — two
+  imports of one record should not queue behind each other for hours, and falling back
+  is exactly the behaviour everyone had before this existed.
+
+Every one of those paths is a *fallback*, never an error. A cache is an optimisation,
+and an import that cannot write one must still run.
+
+### What this does not cover
+
+**Plain files.** `_open` uses a read-ahead cache and streams to disk, so an interrupted
+`archivefs get` of a 2.5 GB `.ome.tif` still starts again. That wants a different
+mechanism — a partial output file and a resume offset, not a block cache — and it is
+not written yet.
+
+**A clean exit does not clean up.** An entry survives until it ages out or `archivefs
+cache clear` removes it, including after an import that finished perfectly. "Delete it
+when the container has been read whole" was rejected: DVC's `sync_import` reads the
+dependency twice (`dvc/stage/imports.py:47`), so deleting at the end of the first pass
+would reintroduce the amplification #10 fixed.
+
+**Cost to change my mind:** the cache is one `cache_type` string. Returning `"mmap", {}`
+unconditionally from `block_cache_options` restores the previous behaviour exactly, and
+`tests/test_blockcache.py` fails loudly rather than silently if it is ever half-wired.

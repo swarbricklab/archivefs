@@ -126,6 +126,7 @@ class ArchiveFileSystem(AbstractFileSystem):
         transfer_timeout: int = 1800,
         chiro: str | bool = "auto",
         max_concurrent_reads: int = 8,
+        cache_dir: str | None = None,
         **kwargs: Any,
     ) -> None:
         # Anything a subclass declared as a credential is consumed here rather
@@ -155,6 +156,10 @@ class ArchiveFileSystem(AbstractFileSystem):
         #: touch the former — a caller who asks for small blocks is usually asking
         #: for cheap small reads, and silently quadrupling them would be the exact
         #: eager fetch D25 refused.
+        #: Where a block cache may persist between processes, or None for "nowhere",
+        #: which is the default. See :mod:`archivefs.blockcache` for why this is not
+        #: on by default and what it costs when it is off.
+        self.cache_dir = cache_dir
         self._block_size_chosen = bool(block_size)
         if block_size:
             self.blocksize = block_size
@@ -765,6 +770,28 @@ class ArchiveFileSystem(AbstractFileSystem):
                     )
                 buffer[first - start : last - start] = piece
         return bytes(out)
+    def block_cache_options(self, info: dict, block_size: int) -> tuple[str, dict]:
+        """``(cache_type, cache_options)`` for a cache that may outlive this process.
+
+        fsspec's ``"mmap"`` cache is a sparse ``tempfile.TemporaryFile()``, unlinked
+        at creation, so every block it holds dies with the process: a 20 GB import
+        that ran 2h50m and cached 16.1 GB started again from zero (issue #15). This
+        returns a resumable cache instead **when it is safe to** — configured,
+        lockable, and identifiable by a published checksum — and otherwise returns
+        exactly what was there before. See :mod:`archivefs.blockcache`.
+        """
+        from archivefs import blockcache
+
+        protocol = type(self).protocol
+        if isinstance(protocol, (list, tuple)):
+            protocol = protocol[0]
+        options = blockcache.prepare(
+            blockcache.cache_root(self.cache_dir),
+            blockcache.identity_of(str(protocol), info, block_size),
+        )
+        if options is None:
+            return "mmap", {}
+        return blockcache.ResumableBlockCache.name, options
 
     def parallel_piece_size(self) -> int:
         """Bytes per parallel request: the measured optimum, or less if that would

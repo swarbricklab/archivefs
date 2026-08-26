@@ -66,6 +66,12 @@ def _filesystem(url: str, options: list[str] | None = None) -> tuple[Any, str]:
     return fs, rest
 
 
+def blockcache_env() -> str:
+    from archivefs.blockcache import CACHE_DIR_ENV
+
+    return CACHE_DIR_ENV
+
+
 def _human(size: int | None) -> str:
     if size is None:
         return "?"
@@ -282,6 +288,60 @@ def cmd_dvc(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_cache(args: argparse.Namespace) -> int:
+    """Show or clear the block cache that lets a long import resume (issue #15)."""
+    import time
+
+    from archivefs import blockcache
+
+    root = blockcache.cache_root(args.dir)
+    if root is None:
+        print(
+            f"No block cache is configured, so an interrupted import starts again "
+            f"from zero.\nTurn it on with, e.g.\n"
+            f"  export {blockcache.CACHE_DIR_ENV}="
+            f"/scratch/$PROJECT/$USER/archivefs-cache\n"
+            f"or per command: -o cache_dir=/some/where"
+        )
+        return 0
+    if args.action == "path":
+        print(root)
+        return 0
+    if not root.exists():
+        if args.action == "size":
+            print(_human(0))
+        elif args.action == "clear":
+            print(f"nothing to remove; {root} does not exist")
+        else:
+            print(f"{root} (empty)")
+        return 0
+    if args.action == "clear":
+        gone = blockcache.clear(root)
+        print(f"removed {gone} entr{'y' if gone == 1 else 'ies'} from {root}")
+        return 0
+    found = blockcache.entries(root)
+    if args.action == "size":
+        print(_human(sum(entry["on_disk"] for entry in found)))
+        return 0
+    if args.json:
+        print(json.dumps(found, indent=2))
+        return 0
+    print(f"{root}")
+    now = time.time()
+    for entry in found:
+        share = entry["cached"] / entry["size"] if entry["size"] else 0
+        age = (now - entry["mtime"]) / 86400
+        print(
+            f"  {entry['protocol']}://{entry['path']}\n"
+            f"      {_human(entry['on_disk'])} on disk, "
+            f"{share:.0%} of {_human(entry['size'])} cached, "
+            f"{age:.1f} days old"
+        )
+    total = sum(entry["on_disk"] for entry in found)
+    print(f"  {len(found)} entries, {_human(total)} on disk")
+    return 0
+
+
 # ---------------------------------------------------------------------- parser
 
 
@@ -351,6 +411,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_common(verify)
     verify.set_defaults(func=cmd_verify)
+
+    cache = sub.add_parser(
+        "cache",
+        help="the on-disk block cache that lets an interrupted import resume",
+    )
+    cache.add_argument(
+        "action",
+        nargs="?",
+        default="list",
+        choices=["list", "path", "size", "clear"],
+    )
+    cache.add_argument(
+        "--dir", metavar="DIR", help=f"override ${blockcache_env()}"
+    )
+    cache.add_argument("--json", action="store_true")
+    cache.set_defaults(func=cmd_cache)
 
     dvc = sub.add_parser("dvc", help="register archivefs' protocols with DVC")
     dvc.add_argument("action", choices=["status", "enable", "disable"])
