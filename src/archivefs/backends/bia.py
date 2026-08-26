@@ -443,12 +443,15 @@ class BIAFileSystem(ArchiveFileSystem):
 
     def __init__(
         self,
-        view: str = "submitted",
-        api_url: str = DEFAULT_API_URL,
-        s3_url: str = DEFAULT_S3_URL,
+        view: str | None = None,
+        api_url: str | None = None,
+        s3_url: str | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
+        view = self._setting("view", view, "submitted")
+        api_url = self._setting("api_url", api_url, DEFAULT_API_URL)
+        s3_url = self._setting("s3_url", s3_url, DEFAULT_S3_URL)
         if view not in self.views:
             raise ValueError(
                 f"unknown BIA view {view!r}; known views: "

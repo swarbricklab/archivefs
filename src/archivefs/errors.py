@@ -20,6 +20,7 @@ __all__ = [
     "ArchiveFSError",
     "ArchiveNotFoundError",
     "AuthenticationError",
+    "ConfigError",
     "CredentialSourceError",
     "CredentialsNotFoundError",
     "ManifestError",
@@ -112,6 +113,18 @@ class CredentialsNotFoundError(ArchiveFSError):
             f"be passed as options or written into DVC config — see "
             f"docs/credentials.md."
         )
+
+
+class ConfigError(ArchiveFSError, ValueError):
+    """A configuration file is unreadable, or sets something that layer may not.
+
+    Raised rather than warned. Every failure mode here — a typo, a content-affecting
+    key in a layer that does not travel, a credential in a file with no permission
+    check — has the same shape: the setting looks applied and is not, or is applied
+    somewhere it will not follow the data. A warning in a pipeline log is invisible
+    at exactly the moment it matters, which is the argument
+    :mod:`archivefs.credentials` already makes for refusing rather than warning.
+    """
 
 
 class CredentialSourceError(ArchiveFSError):

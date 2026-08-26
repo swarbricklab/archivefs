@@ -288,6 +288,60 @@ def cmd_dvc(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_config(args: argparse.Namespace) -> int:
+    """Show the configuration layers and what they resolve to (issue: config model)."""
+    from archivefs import config
+
+    found = config.layers()
+    if args.action == "path":
+        # The user layer, so `$EDITOR $(archivefs config path)` works.
+        user = next(layer for layer in found if layer.name == "user")
+        print(user.path)
+        return 0
+
+    protocols = sorted(PROTOCOLS)
+    resolved = {name: config.settings(name) for name in protocols}
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "layers": [
+                        {
+                            "name": layer.name,
+                            "path": str(layer.path),
+                            "exists": layer.exists,
+                            "travels": layer.travels,
+                            "may_set": sorted(layer.allowed),
+                        }
+                        # highest precedence first, which is how people read it
+                        for layer in reversed(found)
+                    ],
+                    "settings": {k: v for k, v in resolved.items() if v},
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    print("layers, highest precedence first:")
+    for layer in reversed(found):
+        mark = "*" if layer.exists else " "
+        note = "content settings, committed" if layer.travels else "machine settings"
+        print(f"  {mark} {layer.name:<8} {layer.path}")
+        print(f"              {note}")
+    print("  (* = present;  above all of these: $ARCHIVEFS_* then -o/--fs-config)")
+    active = {name: values for name, values in resolved.items() if values}
+    if not active:
+        print("\nnothing configured")
+        return 0
+    print("\nresolved:")
+    for name in sorted(active):
+        print(f"  {name}://")
+        for key in sorted(active[name]):
+            print(f"      {key} = {active[name][key]!r}")
+    return 0
+
+
 def _scratch_note() -> str:
     """Where blocks land when nothing is persisted — worth saying even when it is.
 
@@ -435,6 +489,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_common(verify)
     verify.set_defaults(func=cmd_verify)
+
+    cfg = sub.add_parser(
+        "config", help="the configuration layers, and what they resolve to"
+    )
+    cfg.add_argument("action", nargs="?", default="show", choices=["show", "path"])
+    cfg.add_argument("--json", action="store_true")
+    cfg.set_defaults(func=cmd_config)
 
     cache = sub.add_parser(
         "cache",

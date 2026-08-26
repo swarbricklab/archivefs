@@ -124,7 +124,7 @@ class ArchiveFileSystem(AbstractFileSystem):
         max_retries: int = 5,
         request_timeout: int = 300,
         transfer_timeout: int = 1800,
-        chiro: str | bool = "auto",
+        chiro: str | bool | None = None,
         max_concurrent_reads: int = 8,
         cache_dir: str | None = None,
         scratch_dir: str | None = None,
@@ -136,10 +136,17 @@ class ArchiveFileSystem(AbstractFileSystem):
             c.name: kwargs.pop(c.name, None) for c in type(self).credentials
         }
         super().__init__(**kwargs)
-        self.max_retries = max_retries
-        self.request_timeout = request_timeout
-        self.transfer_timeout = transfer_timeout
-        self.chiro = chiro
+        #: Merged configuration for this protocol — see :mod:`archivefs.config` for
+        #: the layers and for why a layer that does not travel with the data may not
+        #: set anything that changes the data. Read here so that subclasses can
+        #: consult it for their own options after ``super().__init__``.
+        self.configured = self._configured_settings()
+        self.max_retries = self._setting("max_retries", max_retries, 5)
+        self.request_timeout = self._setting("request_timeout", request_timeout, 300)
+        self.transfer_timeout = self._setting(
+            "transfer_timeout", transfer_timeout, 1800
+        )
+        self.chiro = self._setting("chiro", chiro, "auto")
         #: Ceiling on *all* concurrent ranged reads through this filesystem.
         #:
         #: One bound, held here rather than at each call site, because the callers
@@ -150,25 +157,31 @@ class ArchiveFileSystem(AbstractFileSystem):
         #: 2 MiB pieces, 4 connections give 9.12 MB/s, 8 give 14.03, and 16 give
         #: 4.08 — past 8 the extra bytes in flight cost more than the extra socket
         #: wins. See :meth:`parallel_piece_size`.
-        self.max_concurrent_reads = max(1, int(max_concurrent_reads))
+        self.max_concurrent_reads = max(
+            1, int(self._setting("max_concurrent_reads", max_concurrent_reads, 8))
+        )
         self._read_slots = threading.BoundedSemaphore(self.max_concurrent_reads)
-        #: Whether the caller chose a block size, as opposed to inheriting the class
-        #: default. :meth:`parallel_block_size` enlarges the latter and must not
-        #: touch the former — a caller who asks for small blocks is usually asking
-        #: for cheap small reads, and silently quadrupling them would be the exact
-        #: eager fetch D25 refused.
         #: Where a block cache may persist between processes, or None for "nowhere",
-        #: which is the default. See :mod:`archivefs.blockcache` for why this is not
-        #: on by default and what it costs when it is off.
+        #: which is the default. Held as given rather than resolved here: the full
+        #: chain runs argument -> `$ARCHIVEFS_CACHE_DIR` -> config, and the middle
+        #: step belongs where that variable is defined. See
+        #: :mod:`archivefs.blockcache` for why this is off by default.
         self.cache_dir = cache_dir
         #: Where the *ephemeral* block file goes when nothing is persisted. None
         #: inherits ``tempfile``'s choice — `$TMPDIR`, or `/tmp` if that is unset,
         #: which on Gadi is a tmpfs and therefore RAM. Neither this nor `cache_dir`
         #: ever defaults to `$HOME`.
         self.scratch_dir = scratch_dir
+        #: Whether the caller chose a block size, as opposed to inheriting the class
+        #: default. :meth:`parallel_block_size` enlarges the latter and must not
+        #: touch the former — a caller who asks for small blocks is usually asking
+        #: for cheap small reads, and silently quadrupling them would be the exact
+        #: eager fetch D25 refused. Config counts as choosing: someone who writes a
+        #: block size into a file meant it as much as someone who typed it.
+        block_size = self._setting("block_size", block_size)
         self._block_size_chosen = bool(block_size)
         if block_size:
-            self.blocksize = block_size
+            self.blocksize = int(block_size)
         self.creds = CredentialResolver(
             self.archive_name, type(self).credentials, credential_options
         )
@@ -776,6 +789,43 @@ class ArchiveFileSystem(AbstractFileSystem):
                     )
                 buffer[first - start : last - start] = piece
         return bytes(out)
+    @classmethod
+    def _configured_settings(cls) -> dict:
+        """This protocol's settings from the config layers, or ``{}`` if unreadable.
+
+        A malformed config file is a :class:`~archivefs.errors.ConfigError` and is
+        allowed to propagate — it is the user's file and a silently ignored setting is
+        the failure mode config models are famous for. Anything *else* going wrong
+        while looking for one is not: a filesystem must still open on a machine with
+        an exotic ``$XDG_CONFIG_DIRS`` or an unreadable cwd.
+        """
+        from archivefs import config
+        from archivefs.errors import ConfigError
+
+        protocol = cls.protocol
+        if isinstance(protocol, (list, tuple)):
+            protocol = protocol[0]
+        try:
+            return config.settings(str(protocol))
+        except ConfigError:
+            raise
+        except OSError as exc:  # pragma: no cover - defensive
+            logger.debug("could not read archivefs configuration: %s", exc)
+            return {}
+
+    def _setting(self, key: str, given: Any, default: Any = None) -> Any:
+        """One option, resolved down the chain: argument, then config, then default.
+
+        The environment sits between those two for the settings that have an
+        environment variable, and that is resolved in :mod:`archivefs.blockcache`
+        where those variables are defined — here there is nothing between, because an
+        argument that was passed always wins and a missing one has only config left.
+        """
+        if given is not None:
+            return given
+        value = self.configured.get(key)
+        return default if value is None else value
+
     def block_cache_options(self, info: dict, block_size: int) -> tuple[str, dict]:
         """``(cache_type, cache_options)`` for a cache that may outlive this process.
 
@@ -798,11 +848,14 @@ class ArchiveFileSystem(AbstractFileSystem):
         if isinstance(protocol, (list, tuple)):
             protocol = protocol[0]
         options = blockcache.prepare(
-            blockcache.cache_root(self.cache_dir),
+            blockcache.cache_root(self.cache_dir, self.configured.get("cache_dir")),
             blockcache.identity_of(str(protocol), info, block_size),
+            self.configured.get("cache_max_age_days"),
         )
         if options is None:
-            options = blockcache.scratch_options(self.scratch_dir)
+            options = blockcache.scratch_options(
+                self.scratch_dir, self.configured.get("scratch_dir")
+            )
         return blockcache.ResumableBlockCache.name, options
 
     def parallel_piece_size(self) -> int:

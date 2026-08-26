@@ -2040,3 +2040,89 @@ would reintroduce the amplification #10 fixed.
 **Cost to change my mind:** the cache is one `cache_type` string. Returning `"mmap", {}`
 unconditionally from `block_cache_options` restores the previous behaviour exactly, and
 `tests/test_blockcache.py` fails loudly rather than silently if it is ever half-wired.
+
+---
+
+## D30 — configuration is **layered**, and only the layer that travels may change the data
+
+Three environment variables appeared in one afternoon — `ARCHIVEFS_CACHE_DIR`,
+`ARCHIVEFS_SCRATCH_DIR`, `ARCHIVEFS_CACHE_MAX_AGE_DAYS` — which is where ad-hoc stops
+scaling. A setting you have to remember to `export` is a setting you discover you
+needed the day after it would have helped, and D29's cache is exactly that shape: the
+property you want is "my three-hour import survives an interruption", and you want it
+*before* the interruption.
+
+Four layers, XDG-shaped, lowest precedence first — `system`
+(`$XDG_CONFIG_DIRS/archivefs/config.json`), `user`
+(`$XDG_CONFIG_HOME/archivefs/config.json`), `project` (`.archivefs.json`, committed),
+`local` (`.archivefs.local.json`, gitignored) — with the environment above every file
+and an explicit option above that. The same order `credentials.py` uses for secrets, so
+learning it once is enough. Details and worked setups:
+[`configuration.md`](configuration.md).
+
+### The decision that is not obvious
+
+**Only a layer that travels with the data may change what the data is.**
+
+`--fs-config extract_zips=true` is written into the `.dvc` file, so it travels: a
+colleague's `dvc pull` reproduces the same tree. The same setting arriving from
+`~/.config/archivefs/config.json` would leave the `.dvc` file with **no record of it**,
+and that identical file would then resolve to a different tree on a different machine —
+silently. That is the reproducibility hole this whole project is arranged to avoid,
+reached sideways through a convenience.
+
+So options are classified, and a layer that cannot honour a class refuses it:
+
+| kind | examples | settable from | refused in |
+|---|---|---|---|
+| machine — changes cost | `cache_dir`, `scratch_dir`, `max_concurrent_reads`, `api_url`, `credentials_file` | `system`, `user`, `local` | `project` |
+| content — changes what comes back | `extract_zips`, `strip_components`, `view`, `layout`, `chiro` | `project` only | everywhere else |
+| credentials | `password`, `token` | nowhere | everywhere |
+
+The `project` refusal has the mirror-image justification: a committed `/scratch/...`
+path is wrong for everyone who did not write it.
+
+That split is what makes refusing content keys in the user config a *design* rather
+than a restriction. Without `project`, the answer to "I want `extract_zips` on by
+default" would just be no. With it, the answer is "yes, and committed, so your
+collaborators get it too" — which is the answer that was wanted anyway.
+
+### Refused, not warned; and unknown keys too
+
+Every failure here has the same shape: the setting looks applied and is not, or is
+applied somewhere it will not follow the data. A warning in a pipeline log is invisible
+at exactly the moment it matters, which is the argument `credentials.py` already makes
+for refusing a password on the command line rather than discouraging one. So a bad key
+raises `ConfigError` at filesystem construction, naming the file, the layer, and where
+the setting does belong.
+
+That extends to typos. `cach_dir` silently doing nothing is the failure mode config
+models are famous for, so an unknown key is an error listing the ones that would work,
+and a misspelled protocol section (`"zendo": {…}`) is caught rather than skipped as
+though it were a container.
+
+`test_every_backend_option_is_classified` is what keeps the two key sets honest: a new
+backend option cannot be added without deciding whether it changes the data. That guard
+is the only reason it is safe for those sets to be hand-written lists rather than
+another field on `registry.Backend`.
+
+### JSON, and `None` defaults
+
+JSON rather than TOML: `requires-python` is 3.9 so there is no `tomllib`, the CLI is
+deliberately stdlib-only, and credential files are already JSON — one syntax to learn.
+
+The unglamorous half of this change is that every configurable option's signature
+default became `None`. With `extract_zips: bool = False` there is no way to distinguish
+"the user said no" from "the user said nothing", so a configured `true` would be
+silently overridden by the signature — and `strip_components: int = 1` has the same
+problem at `0`. Both are pinned by tests, because it is the kind of bug that looks like
+the config file not being read at all.
+
+### Cost of being wrong
+
+`archivefs config` shows every layer and what it resolved to, which is the diagnostic
+that makes a layered model debuggable rather than mysterious. If the classification
+turns out to be too strict, moving a key between `MACHINE_KEYS` and `CONTENT_KEYS` is
+one line and the test above will notice. If layering turns out to be unwanted, deleting
+`config.py` and the `_setting` calls restores exactly the environment-variable
+behaviour that preceded it.
