@@ -293,10 +293,34 @@ def test_cache_says_how_to_turn_itself_on_when_it_is_off(capsys):
     assert "cache_dir=" in out
 
 
-def test_cache_path_and_size_on_an_empty_cache(tmp_path, monkeypatch, capsys):
+def test_cache_path_is_script_friendly(tmp_path, monkeypatch, capsys):
+    """One line or nothing, and a non-zero exit when there is nothing — so
+    `dir=$(archivefs cache path) || ...` works."""
+    monkeypatch.delenv("ARCHIVEFS_CACHE_DIR", raising=False)
+    assert main(["cache", "path"]) == 1
+    assert capsys.readouterr().out == ""
     monkeypatch.setenv("ARCHIVEFS_CACHE_DIR", str(tmp_path / "blocks"))
     assert main(["cache", "path"]) == 0
     assert capsys.readouterr().out.strip() == str(tmp_path / "blocks")
+
+
+def test_cache_reports_where_unpersisted_blocks_go(tmp_path, monkeypatch, capsys):
+    """The question the cache being off does not answer on its own.
+
+    With no `cache_dir` the sparse file still has to live somewhere, and fsspec
+    inherits `$TMPDIR` — or `/tmp`, a tmpfs on Gadi. Saying so is the whole point of
+    making it configurable.
+    """
+    monkeypatch.delenv("ARCHIVEFS_CACHE_DIR", raising=False)
+    monkeypatch.setenv("ARCHIVEFS_SCRATCH_DIR", str(tmp_path / "spill"))
+    assert main(["cache"]) == 0
+    out = capsys.readouterr().out
+    assert str(tmp_path / "spill") in out
+    assert "ARCHIVEFS_SCRATCH_DIR" in out
+
+
+def test_cache_size_on_an_empty_cache(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("ARCHIVEFS_CACHE_DIR", str(tmp_path / "blocks"))
     assert main(["cache", "size"]) == 0
     assert capsys.readouterr().out.strip() == "0 B"
     assert main(["cache"]) == 0

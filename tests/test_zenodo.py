@@ -1481,12 +1481,14 @@ def test_without_a_cache_dir_the_blocks_die_with_the_process(zipped):
     """The default, and what issue #15 describes: `tempfile.TemporaryFile()`.
 
     Unlinked at creation, so a 2h50m import that had cached 16.1 GB started again
-    from zero. Nothing here is opt-out; the cache is opt-*in*.
+    from zero. Nothing here is opt-out; the cache is opt-*in*, so with no `cache_dir`
+    there must be no file on disk to find and no index recording one.
     """
     fs = zipped(BIG)
     handle = fs._open_container(ZIP, cache_type="mmap")
-    assert type(handle.cache).__name__ == "MMapCache"
-    assert getattr(handle.cache, "location", None) is None
+    assert handle.cache.location is None
+    assert handle.cache.index is None
+    assert handle.cache.lock is None
 
 
 def test_an_interrupted_container_read_resumes_from_disk(zipped, tmp_path):

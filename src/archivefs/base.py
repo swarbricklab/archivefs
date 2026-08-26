@@ -127,6 +127,7 @@ class ArchiveFileSystem(AbstractFileSystem):
         chiro: str | bool = "auto",
         max_concurrent_reads: int = 8,
         cache_dir: str | None = None,
+        scratch_dir: str | None = None,
         **kwargs: Any,
     ) -> None:
         # Anything a subclass declared as a credential is consumed here rather
@@ -160,6 +161,11 @@ class ArchiveFileSystem(AbstractFileSystem):
         #: which is the default. See :mod:`archivefs.blockcache` for why this is not
         #: on by default and what it costs when it is off.
         self.cache_dir = cache_dir
+        #: Where the *ephemeral* block file goes when nothing is persisted. None
+        #: inherits ``tempfile``'s choice — `$TMPDIR`, or `/tmp` if that is unset,
+        #: which on Gadi is a tmpfs and therefore RAM. Neither this nor `cache_dir`
+        #: ever defaults to `$HOME`.
+        self.scratch_dir = scratch_dir
         self._block_size_chosen = bool(block_size)
         if block_size:
             self.blocksize = block_size
@@ -775,10 +781,16 @@ class ArchiveFileSystem(AbstractFileSystem):
 
         fsspec's ``"mmap"`` cache is a sparse ``tempfile.TemporaryFile()``, unlinked
         at creation, so every block it holds dies with the process: a 20 GB import
-        that ran 2h50m and cached 16.1 GB started again from zero (issue #15). This
-        returns a resumable cache instead **when it is safe to** — configured,
-        lockable, and identifiable by a published checksum — and otherwise returns
-        exactly what was there before. See :mod:`archivefs.blockcache`.
+        that ran 2h50m and cached 16.1 GB started again from zero (issue #15). With
+        ``cache_dir`` set this returns a resumable cache instead — but only when that
+        is *safe*: configured, lockable, and identifiable by a published checksum.
+
+        Failing that it still returns our cache class rather than fsspec's, for two
+        reasons that apply whether or not anything is persisted. ``scratch_dir``
+        decides which filesystem takes the sparse file instead of inheriting
+        ``$TMPDIR``, and :meth:`ResumableBlockCache._fetch` un-marks blocks whose
+        fetch raised — fsspec marks them present *before* fetching, so a retried read
+        can otherwise be served zeros out of the mmap.
         """
         from archivefs import blockcache
 
@@ -790,7 +802,7 @@ class ArchiveFileSystem(AbstractFileSystem):
             blockcache.identity_of(str(protocol), info, block_size),
         )
         if options is None:
-            return "mmap", {}
+            options = blockcache.scratch_options(self.scratch_dir)
         return blockcache.ResumableBlockCache.name, options
 
     def parallel_piece_size(self) -> int:

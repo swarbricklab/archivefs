@@ -7,6 +7,11 @@ again.**
 archivefs cache [list|path|size|clear] [--dir DIR] [--json]
 ```
 
+**Nothing archivefs does ever writes to `$HOME`.** Credentials are *read* from
+`~/.config/archivefs/` and `~/.pyega3/` (a few hundred bytes of JSON, read-only);
+every byte of payload goes either where you asked for it or to one of the two
+directories below, both configurable, neither defaulting to your home directory.
+
 ## Why this exists
 
 Reading a ZIP member fetches the container in blocks and caches them, so an import
@@ -46,6 +51,53 @@ $ dvc import-url --fs-config cache_dir=/scratch/tmp/blocks 'zenodo://…' out
 `-o cache_dir=false` — which is the direction that has to work without unsetting a
 variable the rest of your shell depends on.
 
+## Where the bytes go when you *don't* turn it on
+
+The cache being off does not mean nothing is written — a container's blocks still need
+somewhere to live for the length of the read. fsspec creates that file with
+`tempfile.TemporaryFile()` and passes **no directory**, so it follows `$TMPDIR`, and
+`/tmp` when `$TMPDIR` is unset.
+
+**On Gadi `/tmp` is a 63 GB tmpfs — that is RAM.** An unset `$TMPDIR` therefore turns
+a 20 GB import into 20 GB of memory pressure on a shared node, which is a worse
+outcome than any disk. `ARCHIVEFS_SCRATCH_DIR` names that directory instead of
+inheriting it:
+
+```console
+$ export ARCHIVEFS_SCRATCH_DIR=/scratch/$PROJECT/$USER/tmp
+```
+
+or `-o scratch_dir=…` / `--fs-config scratch_dir=…` per command, and
+`scratch_dir=false` to fall back to `tempfile`'s own choice. The file is still
+unlinked at creation and still dies with the process — this only decides *which
+filesystem* absorbs it.
+
+`archivefs cache` reports the resolved value either way:
+
+```console
+$ archivefs cache
+No block cache is configured, so an interrupted import starts again from zero.
+Turn it on with, e.g.
+  export ARCHIVEFS_CACHE_DIR=/scratch/$PROJECT/$USER/archivefs-cache
+or per command: -o cache_dir=/some/where
+scratch (blocks not kept): /scratch/a56/jr9959/tmp  [$TMPDIR; set $ARCHIVEFS_SCRATCH_DIR to choose]
+```
+
+## Not your home directory
+
+Neither `cache_dir` nor `scratch_dir` defaults to `$HOME`, and pointing either there
+logs a warning — one line, once:
+
+```
+cache_dir=/home/913/jr9959/.cache/archivefs is inside your home directory, and one
+entry is as large as the archive it caches. Home quotas are usually far smaller than
+that (10 GB on Gadi) — prefer /scratch or /g/data.
+```
+
+It is a warning and not a refusal: `~/.cache` is the conventional place for a cache
+and a laptop is welcome to it. On a cluster the failure mode is a blown quota three
+hours into an import, with the error pointing at whatever happened to write last.
+
 ## What resuming looks like
 
 ```console
@@ -63,7 +115,7 @@ The resume line is at `INFO`, so `dvc -v` shows it.
 | action | what it does |
 |---|---|
 | `list` (default) | one line per entry: what it is, how much is on disk, how much of the object is cached, how old it is |
-| `path` | print the directory and nothing else — for scripts |
+| `path` | print the directory and nothing else — for scripts. Exits 1 when no cache is configured, so `dir=$(archivefs cache path) \|\| …` works |
 | `size` | total bytes actually occupied |
 | `clear` | remove every entry not currently in use |
 

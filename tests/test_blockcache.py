@@ -20,7 +20,9 @@ from archivefs import blockcache
 @pytest.fixture
 def root(tmp_path, monkeypatch):
     monkeypatch.delenv(blockcache.CACHE_DIR_ENV, raising=False)
+    monkeypatch.delenv(blockcache.SCRATCH_DIR_ENV, raising=False)
     blockcache._pruned.clear()
+    blockcache._warned.clear()
     return tmp_path / "cache"
 
 
@@ -350,3 +352,91 @@ def test_a_lock_is_not_stranded_when_the_cache_cannot_be_built(root, monkeypatch
         build(root, ident, 4096, 1024, lambda s, e: b"")
     monkeypatch.undo()
     assert blockcache.prepare(root, ident) is not None
+
+
+# ------------------------------------------- where the *ephemeral* file goes
+
+
+def test_by_default_the_scratch_directory_is_tempfile_s_own_choice(monkeypatch):
+    """Unchanged behaviour when nothing is configured — `$TMPDIR`, then `/tmp`."""
+    monkeypatch.delenv(blockcache.SCRATCH_DIR_ENV, raising=False)
+    assert blockcache.scratch_root() is None
+    assert blockcache.scratch_options() == {}
+
+
+def test_the_scratch_directory_is_configurable_and_created(tmp_path, monkeypatch):
+    """The point of the option.
+
+    fsspec calls `tempfile.TemporaryFile()` with no `dir`, so a 20 GB container's
+    sparse file silently follows `$TMPDIR` — or `/tmp` if that is unset, which on
+    Gadi is a 63 GB **tmpfs**. Inheriting a destination that might be RAM is not a
+    choice anyone made on purpose.
+    """
+    monkeypatch.delenv(blockcache.SCRATCH_DIR_ENV, raising=False)
+    target = tmp_path / "spill" / "here"
+    assert blockcache.scratch_options(str(target)) == {"scratch": str(target)}
+    assert target.is_dir()
+
+
+def test_the_environment_sets_the_scratch_directory_too(tmp_path, monkeypatch):
+    monkeypatch.setenv(blockcache.SCRATCH_DIR_ENV, str(tmp_path))
+    assert blockcache.scratch_root() == tmp_path
+    assert blockcache.scratch_options() == {"scratch": str(tmp_path)}
+    # and one command can opt back out, same as `cache_dir`
+    assert blockcache.scratch_options("false") == {}
+
+
+def test_an_unusable_scratch_directory_falls_back_instead_of_failing(tmp_path):
+    """A directory we cannot create is a fallback, not a failed import."""
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("in the way")
+    assert blockcache.scratch_options(str(blocker / "under")) == {}
+
+
+def test_the_ephemeral_file_lands_in_the_scratch_directory(tmp_path):
+    """Not just recorded — the sparse file has to actually be created there."""
+    spill = tmp_path / "spill"
+    body = os.urandom(4096)
+    before = _open_inodes()
+    cache = blockcache.ResumableBlockCache(
+        1024, lambda s, e: body[s:e], 4096, **blockcache.scratch_options(str(spill))
+    )
+    cache._fetch(0, 4096)
+    # The file is unlinked at creation, so it has no name to look for; what is
+    # visible is a new open descriptor whose target is under `spill`.
+    assert any(str(spill) in path for path in _open_inodes() - before)
+    cache.release()
+
+
+def _open_inodes() -> set[str]:
+    import os as _os
+
+    found = set()
+    for entry in _os.listdir("/proc/self/fd"):
+        try:
+            found.add(_os.readlink(f"/proc/self/fd/{entry}"))
+        except OSError:
+            continue
+    return found
+
+
+@pytest.mark.parametrize("option", ["cache_dir", "scratch_dir"])
+def test_pointing_either_directory_at_home_warns_but_is_allowed(
+    tmp_path, monkeypatch, caplog, option
+):
+    """Not a refusal — `~/.cache` is conventional and a laptop is welcome to it.
+
+    But on a cluster the failure is a blown quota three hours into an import, with
+    the traceback pointing at whatever wrote last. One line up front is cheap.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    blockcache._warned.clear()
+    under_home = tmp_path / "cache"
+    with caplog.at_level("WARNING"):
+        if option == "scratch_dir":
+            assert blockcache.scratch_options(str(under_home)) == {
+                "scratch": str(under_home)
+            }
+        else:
+            assert blockcache.prepare(under_home, identity()) is not None
+    assert "inside your home directory" in caplog.text

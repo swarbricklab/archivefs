@@ -39,6 +39,17 @@ archive you are importing) and safe (smaller than someone else's quota). Set
 
 Entries older than ``ARCHIVEFS_CACHE_MAX_AGE_DAYS`` (default 14) are removed when the
 cache is next opened, and ``archivefs cache`` reports and clears it by hand.
+
+**And where the *ephemeral* file goes is configurable too**, which matters more than
+it sounds. With no ``cache_dir``, fsspec's ``tempfile.TemporaryFile()`` takes no
+directory argument, so a container's sparse file lands wherever ``tempfile`` decides:
+``$TMPDIR`` if set, and otherwise ``/tmp``. On Gadi ``/tmp`` is a **63 GB tmpfs** —
+that is RAM — so an unset ``TMPDIR`` turns a 20 GB import into 20 GB of memory
+pressure on a shared node. ``ARCHIVEFS_SCRATCH_DIR`` / ``scratch_dir=`` names that
+directory explicitly instead of inheriting it.
+
+Neither destination ever defaults to ``$HOME``. Both warn if you point them there,
+because these files are as large as the archive and an HPC home quota is not.
 """
 
 from __future__ import annotations
@@ -58,15 +69,21 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "CACHE_DIR_ENV",
+    "SCRATCH_DIR_ENV",
     "ResumableBlockCache",
     "cache_root",
     "entries",
     "prepare",
     "prune",
+    "scratch_options",
+    "scratch_root",
 ]
 
 #: Where the cache lives. Unset means no persistent cache, which is the default.
 CACHE_DIR_ENV = "ARCHIVEFS_CACHE_DIR"
+#: Where the *ephemeral* sparse file goes when there is no persistent cache. Unset
+#: means whatever ``tempfile`` picks, which is ``$TMPDIR`` or else ``/tmp``.
+SCRATCH_DIR_ENV = "ARCHIVEFS_SCRATCH_DIR"
 #: How long an untouched entry survives, in days.
 MAX_AGE_ENV = "ARCHIVEFS_CACHE_MAX_AGE_DAYS"
 DEFAULT_MAX_AGE_DAYS = 14
@@ -84,6 +101,9 @@ _DISABLED = {"", "0", "false", "no", "none", "off"}
 
 #: Pruning is a directory walk; once per root per process is enough.
 _pruned: set[str] = set()
+
+#: One warning per directory per process, not one per container opened.
+_warned: set[str] = set()
 
 
 def cache_root(explicit: Any = None) -> Path | None:
@@ -103,6 +123,72 @@ def cache_root(explicit: Any = None) -> Path | None:
     if explicit is True:
         raise ValueError("cache_dir needs a directory, not a bare true")
     return Path(explicit).expanduser()
+
+
+def scratch_root(explicit: Any = None) -> Path | None:
+    """Where the ephemeral sparse file goes, or ``None`` for ``tempfile``'s own choice.
+
+    Separate from :func:`cache_root` because it answers a different question. That one
+    is "should these blocks survive the process"; this one is "which filesystem takes
+    the bytes while they do not", and the answer matters even to someone who wants
+    nothing kept: fsspec calls ``tempfile.TemporaryFile()`` with no directory, so a
+    20 GB container follows ``$TMPDIR`` — and if that is unset, ``/tmp``, which on
+    Gadi is a 63 GB **tmpfs**. Inheriting a default that might be RAM is not a choice
+    anyone made on purpose.
+    """
+    if explicit is None:
+        explicit = os.environ.get(SCRATCH_DIR_ENV)
+    if explicit is None or explicit is False:
+        return None
+    if isinstance(explicit, str) and explicit.strip().lower() in _DISABLED:
+        return None
+    if explicit is True:
+        raise ValueError("scratch_dir needs a directory, not a bare true")
+    return Path(explicit).expanduser()
+
+
+def _warn_if_under_home(root: Path, option: str) -> None:
+    """These files are as large as the archive; an HPC home quota is not.
+
+    Not a refusal — ``~/.cache`` is the conventional place for a cache and a laptop is
+    welcome to it. But on a cluster the failure mode is a blown quota three hours into
+    an import, with the traceback pointing at whatever wrote last, so it is worth one
+    line up front.
+    """
+    try:
+        home = Path.home().resolve()
+        resolved = root.expanduser().resolve()
+    except (OSError, RuntimeError):  # pragma: no cover - no home to compare against
+        return
+    if home not in (resolved, *resolved.parents):
+        return
+    key = f"{option}:{resolved}"
+    if key in _warned:
+        return
+    _warned.add(key)
+    logger.warning(
+        "%s=%s is inside your home directory, and one entry is as large as the "
+        "archive it caches. Home quotas are usually far smaller than that (10 GB on "
+        "Gadi) — prefer /scratch or /g/data.",
+        option,
+        root,
+    )
+
+
+def scratch_options(explicit: Any = None) -> dict:
+    """``{"scratch": dir}`` for the ephemeral file, ``{}`` to let ``tempfile`` pick."""
+    root = scratch_root(explicit)
+    if root is None:
+        return {}
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        # Same rule as everywhere else here: a directory we cannot use is a fallback,
+        # not a failed import.
+        logger.warning("cannot use %s for block scratch space: %s", root, exc)
+        return {}
+    _warn_if_under_home(root, SCRATCH_DIR_ENV)
+    return {"scratch": str(root)}
 
 
 def _max_age_seconds() -> float:
@@ -255,6 +341,7 @@ def prepare(root: Path | None, identity: dict | None) -> dict | None:
     """
     if root is None or identity is None:
         return None
+    _warn_if_under_home(root, CACHE_DIR_ENV)
     data, index, lock = _paths(root, identity)
     try:
         data.parent.mkdir(parents=True, exist_ok=True)
@@ -382,10 +469,13 @@ class ResumableBlockCache(MMapCache):
         index: str | None = None,
         lock: int | None = None,
         identity: dict | None = None,
+        scratch: str | None = None,
     ) -> None:
         self.index = index
         self.lock = lock
         self.identity = identity or {}
+        # Set before `super().__init__`, which calls `_makefile` before returning.
+        self.scratch = scratch
         try:
             super().__init__(blocksize, fetcher, size, location, blocks, multi_fetcher)
         except BaseException:
@@ -394,6 +484,29 @@ class ResumableBlockCache(MMapCache):
             # quietly pushing every later reader onto a private cache.
             self.release()
             raise
+
+    def _makefile(self) -> Any:
+        """As fsspec's, except that the temporary file goes where we were told.
+
+        ``MMapCache._makefile`` calls ``tempfile.TemporaryFile()`` with no ``dir``, so
+        a container's sparse file silently follows ``$TMPDIR`` — or ``/tmp``, which on
+        Gadi is a tmpfs. Six duplicated lines to make that an argument instead.
+        """
+        if self.location is not None or self.scratch is None:
+            return super()._makefile()
+        if self.size == 0:
+            return bytearray()
+        import mmap
+        import tempfile
+
+        # Deliberately not a context manager: `mmap` dups the descriptor, so the
+        # mapping is what keeps the (already unlinked) file alive after `handle` goes.
+        handle = tempfile.TemporaryFile(dir=self.scratch)  # noqa: SIM115
+        handle.seek(self.size - 1)
+        handle.write(b"1")
+        handle.flush()
+        self.blocks = set()
+        return mmap.mmap(handle.fileno(), self.size)
 
     def _fetch(self, start: int | None, end: int | None) -> bytes:
         known = set(self.blocks)

@@ -288,6 +288,26 @@ def cmd_dvc(args: argparse.Namespace) -> int:
     return 0
 
 
+def _scratch_note() -> str:
+    """Where blocks land when nothing is persisted — worth saying even when it is.
+
+    fsspec gives `tempfile.TemporaryFile()` no directory, so this follows `$TMPDIR`
+    and otherwise `/tmp`. On Gadi `/tmp` is a 63 GB tmpfs, i.e. RAM, so "where do
+    the bytes actually go" is a question with a surprising default answer.
+    """
+    import tempfile
+
+    from archivefs import blockcache
+
+    root = blockcache.scratch_root()
+    if root is not None:
+        return f"scratch (blocks not kept): {root}  [${blockcache.SCRATCH_DIR_ENV}]"
+    return (
+        f"scratch (blocks not kept): {tempfile.gettempdir()}  "
+        f"[$TMPDIR; set ${blockcache.SCRATCH_DIR_ENV} to choose]"
+    )
+
+
 def cmd_cache(args: argparse.Namespace) -> int:
     """Show or clear the block cache that lets a long import resume (issue #15)."""
     import time
@@ -295,6 +315,11 @@ def cmd_cache(args: argparse.Namespace) -> int:
     from archivefs import blockcache
 
     root = blockcache.cache_root(args.dir)
+    if args.action == "path":
+        # Pure, for scripts: the directory or nothing.
+        if root is not None:
+            print(root)
+        return 0 if root is not None else 1
     if root is None:
         print(
             f"No block cache is configured, so an interrupted import starts again "
@@ -303,9 +328,7 @@ def cmd_cache(args: argparse.Namespace) -> int:
             f"/scratch/$PROJECT/$USER/archivefs-cache\n"
             f"or per command: -o cache_dir=/some/where"
         )
-        return 0
-    if args.action == "path":
-        print(root)
+        print(_scratch_note())
         return 0
     if not root.exists():
         if args.action == "size":
@@ -339,6 +362,7 @@ def cmd_cache(args: argparse.Namespace) -> int:
         )
     total = sum(entry["on_disk"] for entry in found)
     print(f"  {len(found)} entries, {_human(total)} on disk")
+    print(_scratch_note())
     return 0
 
 

@@ -1951,6 +1951,44 @@ So: named directory, or nothing. `$ARCHIVEFS_CACHE_DIR` in a shell profile is th
 intended shape — set once, applies to every import — and `cache_dir=false` turns it off
 for one command without unsetting it.
 
+### And the *ephemeral* destination is configurable too, which is the sharper problem
+
+Turning the cache off does not mean nothing is written: a container's blocks still need
+somewhere to live for the length of the read. fsspec creates that file with
+`tempfile.TemporaryFile()` and passes **no directory**, so it silently follows
+`$TMPDIR` — and `/tmp` when `$TMPDIR` is unset.
+
+**On Gadi `/tmp` is a 63 GB tmpfs.** That is RAM. An unset `$TMPDIR` therefore turns a
+20 GB import into 20 GB of memory pressure on a node shared with everyone else's work,
+which is a worse outcome than filling any disk — and it happens without anyone choosing
+it, which is the part that makes it a defect rather than a trade-off.
+
+`scratch_dir` / `$ARCHIVEFS_SCRATCH_DIR` names that directory. It is deliberately a
+*second* option rather than a reuse of `cache_dir`, because the two answer different
+questions — "should these blocks outlive the process" and "which filesystem absorbs
+them while they do not" — and the second matters to someone who wants nothing kept.
+
+Implementing it costs six duplicated lines: `MMapCache._makefile` hard-codes the
+`TemporaryFile()` call, so `ResumableBlockCache` overrides it. That override is also
+why our cache class is now used **even when nothing is persisted** — which brings a
+second fix with it. fsspec marks blocks present *before* fetching them, so a read
+retried after a failed fetch is served zeros out of the mmap. That is a live bug in the
+ephemeral path too, not only the persistent one, and `_fetch`'s snapshot-and-restore
+now covers both.
+
+### Neither destination is ever `$HOME`
+
+Nothing in archivefs writes payload to a home directory. Credentials are *read* from
+`~/.config/archivefs/` and `~/.pyega3/` — a few hundred bytes of JSON, read-only — and
+verified empirically: a ZIP-member read with `$HOME` redirected to an empty directory
+leaves it empty.
+
+Pointing either option at `$HOME` **warns once** rather than refusing. `~/.cache` is
+the conventional place for a cache and a laptop is welcome to it; the reason for the
+warning is that on a cluster the failure arrives three hours into an import as a quota
+error attributed to whatever wrote last. This host's home allowance is 10 GB with
+6.9 GB already used — 3.3 GB free against a 20 GB archive.
+
 **Cost of being wrong about this:** if it turns out that everyone sets the variable and
 nobody is surprised by the disk use, flipping the default is a one-line change plus a
 default cap. If it were on by default and filled a shared `/scratch`, that would be
