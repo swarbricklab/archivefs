@@ -519,6 +519,29 @@ The concurrency is worth having — an import always reads cold — but the less
 one D27 already flagged and this went on to demonstrate: **absolute MB/s against
 Zenodo means nothing outside a within-run comparison at one temperature.**
 
+## Make a plain file's *download* resumable, not just a ZIP's blocks
+
+D29 gave ZIP containers a block cache that survives the process, so an interrupted
+20 GB import resumes. **A plain file gets nothing.** `_open` uses a read-ahead cache
+and DVC streams straight to a temporary file, so an `archivefs get` or `dvc
+import-url` of a 2.5 GB `.ome.tif` that dies at 90% starts again from zero — and at
+the 2.32 MB/s a cold Zenodo object gives (D28), that is 18 minutes thrown away for
+that file, more for the imaging objects this project exists to move.
+
+It is not the same mechanism. A block cache is the right shape when the reader jumps
+around inside a container; a sequential download wants a partial output file plus a
+resume offset, which is `HTTP Range` against something already on disk. The
+correctness hazard is the mirror image of D29's and just as sharp: resuming into a
+partial file whose *tail* is a half-written buffer appends good bytes to bad ones and
+produces a file that is the right length and wrong. So the offset has to come from a
+sidecar written after an `fsync`, not from `os.path.getsize`.
+
+The identity check D29 already has — protocol, path, size, published md5 — carries
+over unchanged, and so does the argument for keying on the checksum. What does not
+carry over is where the file lives: a resumable download's partial output belongs
+next to its destination, not in a shared cache directory, because that is where the
+finished file is going anyway.
+
 ## Seed the ZIP reading cache from the listing view
 
 `_member_view` (D25) re-parses the central directory through its own block-aligned

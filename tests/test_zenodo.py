@@ -19,6 +19,7 @@ import pytest
 from tests.fake_http import FakeRequestsModule, FakeResponse, ranged
 
 from archivefs import base as base_mod
+from archivefs import blockcache
 from archivefs.backends.zenodo import ZenodoFileSystem
 from archivefs.base import MAX_BYTES_IN_FLIGHT, TARGET_PARALLEL_PIECE
 from archivefs.errors import (
@@ -1199,6 +1200,33 @@ def test_live_zip_transparency(live_fs):
 
 
 @pytest.mark.network
+def test_live_a_cached_container_resumes_against_zenodo(live_fs, tmp_path):
+    """The offline suite proves the bookkeeping; this proves it against a real ZIP.
+
+    Reading a member costs one block, so a second reader that fetches *nothing* has
+    genuinely served those bytes out of the file the first one left behind — which
+    is the whole claim of issue #15, and the one thing a fake server cannot check
+    for us because it has no notion of a process ending.
+    """
+    fs = ZenodoFileSystem(
+        extract_zips=True, cache_dir=str(tmp_path), skip_instance_cache=True
+    )
+    member = fs.find("1486184/github-mark.zip")[0]
+    first = fs.cat_file(member)
+    fs._close_zip_views()
+
+    (entry,) = blockcache.entries(tmp_path)
+    assert entry["cached"] > 0
+
+    later = ZenodoFileSystem(
+        extract_zips=True, cache_dir=str(tmp_path), skip_instance_cache=True
+    )
+    fetched = counted_container_fetches(later)
+    assert later.cat_file(member) == first
+    assert fetched == [], "the resumed read went back to Zenodo"
+
+
+@pytest.mark.network
 def test_live_chained_url_through_fsspec():
     """The documented explicit form must work with no help from us."""
     if os.environ.get("ARCHIVEFS_TEST_ZENODO", "") != "1":
@@ -1426,3 +1454,109 @@ def test_an_open_record_with_no_files_is_still_empty_not_an_error(fake_zenodo):
     fake_zenodo.record["metadata"]["access_right"] = "open"
     fs = ZenodoFileSystem(skip_instance_cache=True)
     assert fs.ls(RECID, detail=False) == []
+
+
+# ------------------------------------- a cache that survives the process (#15)
+
+
+def counted_container_fetches(fs) -> list[list[tuple[int, int]]]:
+    """Record only the *member view's* fetches.
+
+    The listing view goes through `_fetch_range` and the member view through
+    `_fetch_block_ranges`, so watching the latter isolates the cache under test from
+    the central-directory reads that happen either way.
+    """
+    seen: list[list[tuple[int, int]]] = []
+    real = fs._fetch_block_ranges
+
+    def spy(info, spans):
+        seen.append(list(spans))
+        return real(info, spans)
+
+    fs._fetch_block_ranges = spy
+    return seen
+
+
+def test_without_a_cache_dir_the_blocks_die_with_the_process(zipped):
+    """The default, and what issue #15 describes: `tempfile.TemporaryFile()`.
+
+    Unlinked at creation, so a 2h50m import that had cached 16.1 GB started again
+    from zero. Nothing here is opt-out; the cache is opt-*in*.
+    """
+    fs = zipped(BIG)
+    handle = fs._open_container(ZIP, cache_type="mmap")
+    assert type(handle.cache).__name__ == "MMapCache"
+    assert getattr(handle.cache, "location", None) is None
+
+
+def test_an_interrupted_container_read_resumes_from_disk(zipped, tmp_path):
+    """The property the issue is about: the second attempt keeps the first's bytes."""
+    fs = zipped(BIG, cache_dir=str(tmp_path))
+    handle = fs._open_container(ZIP, cache_type="mmap")
+    assert isinstance(handle.cache, blockcache.ResumableBlockCache)
+    prefix = handle.read(600_000)
+    handle.cache.release()  # what a clean exit does; a kill -9 does not
+
+    later = ZenodoFileSystem(
+        extract_zips=True, cache_dir=str(tmp_path), skip_instance_cache=True
+    )
+    fetched = counted_container_fetches(later)
+    resumed = later._open_container(ZIP, cache_type="mmap")
+    assert resumed.read(600_000) == prefix
+    assert fetched == [], "the resumed read went back to Zenodo for cached blocks"
+    resumed.cache.release()
+
+
+def test_a_member_read_populates_and_then_reuses_the_cache(zipped, tmp_path):
+    """End to end through `cat_file`, which is the path a `dvc import-url` takes."""
+    fs = zipped(BIG, cache_dir=str(tmp_path))
+    assert fs.cat_file(f"{ZIP}/a.bin") == BIG["a.bin"]
+    fs._close_zip_views()
+
+    (entry,) = blockcache.entries(tmp_path)
+    assert entry["protocol"] == "zenodo"
+    assert entry["cached"] > 0
+
+    later = ZenodoFileSystem(
+        extract_zips=True, cache_dir=str(tmp_path), skip_instance_cache=True
+    )
+    fetched = counted_container_fetches(later)
+    assert later.cat_file(f"{ZIP}/a.bin") == BIG["a.bin"]
+    assert fetched == []
+
+
+def test_closing_a_view_releases_the_lock_for_the_next_import(zipped, tmp_path):
+    """A held lock pushes the next reader onto a private cache, silently.
+
+    So the lock has to go when the view does, not merely when the process does —
+    DVC keeps one filesystem alive across a whole command.
+    """
+    fs = zipped(BIG, cache_dir=str(tmp_path))
+    fs.cat_file(f"{ZIP}/a.bin")
+    fs._close_zip_views()
+
+    later = ZenodoFileSystem(
+        extract_zips=True, cache_dir=str(tmp_path), skip_instance_cache=True
+    )
+    handle = later._open_container(ZIP, cache_type="mmap")
+    assert isinstance(handle.cache, blockcache.ResumableBlockCache)
+    handle.cache.release()
+
+
+def test_a_republished_container_is_not_resumed_into(zipped, fake_zenodo, tmp_path):
+    """Zenodo records are immutable, but a *concept* DOI moves between versions.
+
+    The published md5 is in the cache key, so a different deposit at the same path
+    gets a different entry rather than the previous version's blocks.
+    """
+    fs = zipped(BIG, cache_dir=str(tmp_path))
+    fs.cat_file(f"{ZIP}/a.bin")
+    fs._close_zip_views()
+
+    fake_zenodo.record["files"][0]["checksum"] = "md5:" + "0" * 32
+    later = ZenodoFileSystem(
+        extract_zips=True, cache_dir=str(tmp_path), skip_instance_cache=True
+    )
+    fetched = counted_container_fetches(later)
+    assert later.cat_file(f"{ZIP}/a.bin") == BIG["a.bin"]
+    assert fetched, "a changed md5 resumed into the previous deposit's blocks"

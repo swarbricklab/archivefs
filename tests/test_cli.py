@@ -276,3 +276,64 @@ def test_ls_long_resolves_unknown_sizes(fake_geo, capsys):
     out = capsys.readouterr().out
     assert "?" not in out.split("\n")[-2]  # the -l lines carry real numbers
     assert str(len(BODIES["meta.tsv"])) in out
+
+
+# ------------------------------------------------- `archivefs cache` (issue #15)
+
+
+def test_cache_says_how_to_turn_itself_on_when_it_is_off(capsys):
+    """Off is the default, so this is the output most people will ever see.
+
+    It has to be actionable: someone reads it *after* losing three hours of an
+    import, and "no cache configured" alone would not tell them what to do next.
+    """
+    assert main(["cache"]) == 0
+    out = capsys.readouterr().out
+    assert "ARCHIVEFS_CACHE_DIR" in out
+    assert "cache_dir=" in out
+
+
+def test_cache_path_and_size_on_an_empty_cache(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("ARCHIVEFS_CACHE_DIR", str(tmp_path / "blocks"))
+    assert main(["cache", "path"]) == 0
+    assert capsys.readouterr().out.strip() == str(tmp_path / "blocks")
+    assert main(["cache", "size"]) == 0
+    assert capsys.readouterr().out.strip() == "0 B"
+    assert main(["cache"]) == 0
+    assert "empty" in capsys.readouterr().out
+
+
+def test_cache_lists_and_clears_what_is_there(tmp_path, monkeypatch, capsys):
+    from archivefs import blockcache
+
+    root = tmp_path / "blocks"
+    monkeypatch.setenv("ARCHIVEFS_CACHE_DIR", str(root))
+    body = b"x" * 4096
+    identity = blockcache.identity_of(
+        "zenodo", {"name": "1486184/archive.zip", "size": 4096, "md5": "abc"}, 1024
+    )
+    cache = blockcache.ResumableBlockCache(
+        1024, lambda s, e: body[s:e], 4096, **blockcache.prepare(root, identity)
+    )
+    cache._fetch(0, 4096)
+    cache.release()
+
+    assert main(["cache"]) == 0
+    listed = capsys.readouterr().out
+    assert "zenodo://1486184/archive.zip" in listed
+    assert "1 entries" in listed
+
+    assert main(["cache", "--json"]) == 0
+    (entry,) = json.loads(capsys.readouterr().out)
+    assert entry["path"] == "1486184/archive.zip"
+
+    assert main(["cache", "clear"]) == 0
+    assert "removed 1 entry" in capsys.readouterr().out
+    assert main(["cache"]) == 0
+    assert "0 entries" in capsys.readouterr().out
+
+
+def test_cache_dir_overrides_the_environment(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("ARCHIVEFS_CACHE_DIR", str(tmp_path / "from-env"))
+    assert main(["cache", "path", "--dir", str(tmp_path / "explicit")]) == 0
+    assert capsys.readouterr().out.strip() == str(tmp_path / "explicit")

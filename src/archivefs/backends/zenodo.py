@@ -572,6 +572,11 @@ class ZenodoFileSystem(ArchiveFileSystem):
             # single-member read — bounded by passing the container's size, which
             # Zenodo publishes in the record and which therefore costs no request.
             block_size = self.parallel_block_size(info.get("size"))
+            # And, if the user has configured somewhere to put it, the blocks
+            # survive this process — so a 3.5 hour read interrupted at hour three
+            # resumes instead of starting again (issue #15).
+            cache_type, resumable = self.block_cache_options(info, block_size)
+            options.update(resumable)
         return ArchiveFile(
             self,
             info,
@@ -679,6 +684,12 @@ class ZenodoFileSystem(ArchiveFileSystem):
         view = self._member_views.pop(zip_path, None)
         if view is None:
             return
+        # Drop the persistent cache's entry lock before the handle goes, so a second
+        # import of the same container is not pushed onto a private cache by a lock
+        # this process no longer needs.
+        release = getattr(getattr(view.zip.fp, "cache", None), "release", None)
+        if release is not None:
+            release()
         try:
             view.zip.close()
         except Exception:  # noqa: BLE001 - a failed close must not mask the caller

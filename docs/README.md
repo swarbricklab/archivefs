@@ -22,6 +22,7 @@ One page per subcommand: syntax, every option, worked scenarios, exit codes.
 | [`archivefs check`](cli-check.md) | has the *deposit* drifted from its manifest? |
 | [`archivefs verify`](cli-verify.md) | do the files on *my disk* match the manifest? |
 | [`archivefs dvc`](cli-dvc.md) | register the protocols with DVC — required once per environment |
+| [`archivefs cache`](cli-cache.md) | the on-disk block cache that lets an interrupted import resume |
 
 Every command that takes a URL also takes `-o KEY=VALUE`.
 
@@ -52,6 +53,7 @@ private file, and every other route is refused. See
 | `ega` | `credentials_file` | path | JSON file to read username + password from — a *path*, so it may be committed |
 | | `layout` | `accession` (default), `display`, `nested` | how dataset members are named ([`decisions.md`](decisions.md) D7) |
 | | `api_url` | URL | override the EGA API endpoint |
+| *all* | `cache_dir` | path, or `false` | keep a ZIP container's fetched blocks in this directory so an interrupted import resumes instead of starting again. **Off unless set**; also readable from `$ARCHIVEFS_CACHE_DIR`, which `cache_dir=false` overrides for one command. Put it on `/scratch`, not `$HOME` — entries are as large as the archive ([`cli-cache.md`](cli-cache.md), [`decisions.md`](decisions.md) D28) |
 | *all* | `max_concurrent_reads` | integer, `8` (default) | ceiling on concurrent ranged reads, shared across every caller of one filesystem. Archives throttle **per connection**: on Zenodo one connection sustains ~0.30 MB/s at any request size, while eight carrying 2 MiB each sustain 9.7–14.0 MB/s. **8 is a measured optimum, not just a politeness budget** — 16 connections are *slower*, because throughput tracks the bytes in flight and falls off a cliff past ~16 MiB. Raising this shrinks the piece size to compensate ([`decisions.md`](decisions.md) D26, D27) |
 | `zenodo` | `extract_zips` | `true`, `false` (default) | list ZIP contents as directories, read members by range. **Off by default**, though the reason that justified it has gone — an expanded ZIP is now pullable from Zenodo by a reviewer with no remote ([`decisions.md`](decisions.md) D23). Do not combine with `--no-download`: it costs a full transfer and buys nothing |
 | | `strip_components` | integer, `1` (default) | drop leading directories from a ZIP's interior, but only while each is its sole top-level entry — so `annotations.zip` holding `annotations/…` expands without the redundant level. A **maximum, not a promise**: a ZIP with two real top-level entries is passed through untouched. `0` presents the interior verbatim ([`decisions.md`](decisions.md) D24) |
