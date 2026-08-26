@@ -254,20 +254,27 @@ class EGAFileSystem(ArchiveFileSystem):
     def __init__(
         self,
         credentials_file: str | os.PathLike | None = None,
-        api_url: str = DEFAULT_API_URL,
+        api_url: str | None = None,
         auth_url: str = DEFAULT_AUTH_URL,
         client_id: str = DEFAULT_CLIENT_ID,
         client_secret: str = DEFAULT_CLIENT_SECRET,
-        layout: str = "accession",
+        layout: str | None = None,
         selection: list[str] | None = None,
-        include_index_files: bool = True,
+        include_index_files: bool | None = None,
         **kwargs: Any,
     ) -> None:
+        super().__init__(**kwargs)
+        credentials_file = self._setting("credentials_file", credentials_file)
+        api_url = self._setting("api_url", api_url, DEFAULT_API_URL)
+        layout = self._setting("layout", layout, "accession")
+        selection = self._setting("selection", selection)
+        include_index_files = bool(
+            self._setting("include_index_files", include_index_files, True)
+        )
         if layout not in ("accession", "display", "nested"):
             raise ValueError(
                 f"layout must be 'accession', 'display' or 'nested', got {layout!r}"
             )
-        super().__init__(**kwargs)
         self.api_url = api_url.rstrip("/")
         self.layout = layout
         self.selection = set(selection) if selection else None

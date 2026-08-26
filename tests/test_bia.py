@@ -9,10 +9,12 @@ imagined; see ``docs/decisions.md`` D13.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import os
 from pathlib import Path
+from urllib.parse import parse_qs, unquote, urlparse
 
 import pytest
 from tests.fake_http import FakeRequestsModule, FakeResponse, ranged
@@ -22,6 +24,7 @@ from archivefs.backends.bia import PAGE_SIZE, BIAFileSystem, is_true
 from archivefs.errors import (
     ArchiveNotFoundError,
     AuthenticationError,
+    CredentialSourceError,
     NotSupportedError,
 )
 
@@ -33,6 +36,10 @@ S3_STUDY_LEVEL = (DATA / "bia_s3_study_level.xml").read_bytes()
 S3_IMAGE_LEVEL = (DATA / "bia_s3_image_level.xml").read_bytes()
 ACC = "S-BIAD599"
 FIRE = "https://ftp.ebi.ac.uk/biostudies/fire/S-BIAD/599/S-BIAD599/Files"
+#: Where BioStudies serves an unreleased study from. Real shape, verified against
+#: the live API: the access key is *inside the path*, so the URL is the capability.
+PRIVATE_FIRE_ROOT = "https://ftp.ebi.ac.uk/pub/databases/biostudies"
+KEY = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
 #: A study whose paths exercise the awkward cases: nesting, a '#', a duplicate.
 ROWS = [
@@ -165,20 +172,58 @@ class FakeBIA:
     #: what the live API does when asked for more rows than it will serve
     cap = 1000
 
-    def __init__(self, rows=None, exists=True, repeat_token_forever=False):
+    def __init__(
+        self,
+        rows=None,
+        exists=True,
+        repeat_token_forever=False,
+        key=None,
+        released=True,
+    ):
         self.rows = list(ROWS if rows is None else rows)
         self.exists = exists
         self.repeat_token_forever = repeat_token_forever
+        #: the study's sharing key; when set, an unkeyed API request 403s
+        self.key = key
+        #: released studies are served from the public path, unreleased ones from
+        #: `.private/<key[:2]>/<key[2:]>/…` — which is why the URL is the capability
+        self.released = released
         self.page_requests: list[tuple[int, int]] = []
+        self.keys_seen: list[str | None] = []
         self.fetched_urls: list[str] = []
         self.s3_listings: list[tuple[str, str]] = []
 
-    def __call__(self, method: str, url: str, headers: dict, kwargs: dict):
-        if "/studies/" in url and url.endswith("/info"):
-            return FakeResponse(200, json=INFO if self.exists else {})
-        if "/files/" in url and "biostudies/api" in url:
-            from urllib.parse import parse_qs, urlparse
+    def _study_info(self) -> dict:
+        info = dict(INFO)
+        if self.released:
+            return info
+        prefix = f".private/{self.key[:2]}/{self.key[2:]}"
+        info["relPath"] = f"{prefix}/{INFO['relPath']}"
+        info["httpLink"] = f"{PRIVATE_FIRE_ROOT}/{prefix}/S-BIAD/599/S-BIAD599"
+        info["isPublic"] = False
+        info["seckey"] = self.key
+        return info
 
+    def _keyed_ok(self, url: str) -> bool:
+
+        offered = parse_qs(urlparse(url).query).get("key", [None])[0]
+        self.keys_seen.append(offered)
+        return self.key is None or offered == self.key
+
+    def __call__(self, method: str, url: str, headers: dict, kwargs: dict):
+        # `endswith("/info")` here, before `?key=` existed. Matching on the *path*
+        # rather than the whole URL, because a query string now follows it.
+        if "/studies/" in url and urlparse(url).path.endswith("/info"):
+            if not self._keyed_ok(url):
+                return FakeResponse(403, json={"errorMessage": "Study not accessible"})
+            return FakeResponse(200, json=self._study_info() if self.exists else {})
+        if "/files/" in url and "biostudies/api" in url:
+
+            if not self._keyed_ok(url):
+                # The live API answers 200 {} here rather than 403, which is why
+                # /info is the existence check. Reproduced so the test suite meets
+                # the same edge the backend was written for.
+                return FakeResponse(200, json={})
             query = parse_qs(urlparse(url).query)
             start = int(query.get("start", ["0"])[0])
             length = int(query.get("length", ["5"])[0])  # the real default is 5
@@ -197,18 +242,17 @@ class FakeBIA:
                     "recordsTotal": len(self.rows),
                 },
             )
-        if url.startswith(FIRE):
-            from urllib.parse import unquote
-
+        # Either FIRE root: a released study is served from the public path and an
+        # unreleased one from `.private/<key>/…`, and both end `/Files/<member>`.
+        if "ftp.ebi.ac.uk" in url and "/Files/" in url:
             self.fetched_urls.append(url)
-            path = unquote(url[len(FIRE) + 1 :])
+            path = unquote(url.split("/Files/", 1)[1])
             if path not in BODIES:
                 return FakeResponse(404, b"not found")
             return ranged(BODIES[path], headers)
         if "uk1s3.embassy.ebi.ac.uk" in url and "list-type=2" in url:
             return self._s3_listing(url)
         if "uk1s3.embassy.ebi.ac.uk" in url:
-            from urllib.parse import unquote, urlparse
 
             key = unquote(urlparse(url).path).lstrip("/")
             key = key.split("/", 1)[-1] if key.startswith("bia-integrator-data/") else key
@@ -216,7 +260,6 @@ class FakeBIA:
         return FakeResponse(404, b"not found")
 
     def _s3_listing(self, url: str):
-        from urllib.parse import parse_qs, unquote, urlparse
 
         query = parse_qs(urlparse(url).query)
         prefix = unquote(query.get("prefix", [""])[0])
@@ -838,9 +881,285 @@ def test_a_403_does_not_blame_credentials_bia_has_none(monkeypatch):
     assert exc.value.used_credentials is False
     assert exc.value.source is None
     # It must not claim the *archive* needs no credentials. BioStudies lets a
-    # submitter read their own unreleased study; archivefs is the part that
-    # cannot carry that access. Telling a depositor otherwise would say their
-    # working access is irrelevant.
+    # submitter read their own unreleased study, and archivefs can now carry that
+    # access — so the message that used to end "authenticated reads are not
+    # implemented" has to end with how to supply the key instead.
     assert "needs no credentials" not in message
     assert "anonymously" in message
-    assert "not implemented" in message
+    assert "not implemented" not in message
+    assert "BIA_KEY" in message
+    assert "S-BIAD3080" in message  # names the study, not a placeholder
+
+
+def test_a_refused_key_is_not_reported_as_an_embargo(monkeypatch, tmp_path):
+    """Two different 403s, and conflating them sends people the wrong way.
+
+    With no key, "check the credentials" is unactionable — there is nothing to
+    check. With one, the embargo explanation is actively wrong: access *was*
+    attempted and refused, and the likely causes are a revoked link or a key filed
+    under the wrong accession.
+    """
+
+    def server(method, url, headers, kwargs):
+        return FakeResponse(403, json={"errorMessage": "Study not accessible"})
+
+    monkeypatch.setattr(base_mod, "requests", FakeRequestsModule(server))
+    monkeypatch.setenv("BIA_KEY", "aaaaaaaa-0000-0000-0000-000000000000")
+    fs = BIAFileSystem(skip_instance_cache=True)
+    with pytest.raises(AuthenticationError) as exc:
+        fs.ls("S-BIAD3080")
+    message = str(exc.value)
+    assert "was refused" in message
+    assert "S-BIAD3080" in message
+    assert "embargoed" not in message
+    # and never the key itself, in any message
+    assert "aaaaaaaa" not in message
+
+
+# ------------------------------------ pre-publication studies and their keys
+
+
+@pytest.fixture
+def private(fake_bia, monkeypatch, tmp_path):
+    """An unreleased study, plus a way to file its key like a real user would."""
+    server = fake_bia(key=KEY, released=False)
+    monkeypatch.delenv("BIA_KEY", raising=False)
+
+    def key_file(payload: dict) -> str:
+        path = tmp_path / "bia.json"
+        path.write_text(json.dumps(payload))
+        path.chmod(0o600)
+        return str(path)
+
+    server.key_file = key_file  # type: ignore[attr-defined]
+    return server
+
+
+def keyed_fs(path: str | None = None, **options):
+    """A filesystem whose only credential file is `path`, if given.
+
+    `Credential` is frozen, so this replaces the declaration rather than mutating
+    it — which also keeps one test's key file from leaking into the next.
+    """
+    import dataclasses
+
+    fs = BIAFileSystem(skip_instance_cache=True, **options)
+    if path is not None:
+        declared = fs.creds.credentials["key"]
+        fs.creds.credentials["key"] = dataclasses.replace(declared, files=(path,))
+        fs.creds._cache.clear()
+    return fs
+
+
+def test_an_unreleased_study_explains_itself_rather_than_404ing(private):
+    """403, not 404 — the study exists, you just cannot see it.
+
+    That distinction is why the backend checks `/studies/{acc}/info` for existence
+    and not `/files/{acc}`: the files endpoint answers an unkeyed request with
+    `200 {}`, so a private study and a missing one look identical there.
+    """
+    fs = keyed_fs()
+    with pytest.raises(AuthenticationError) as exc:
+        fs.ls(ACC)
+    assert "BIA_KEY" in str(exc.value)
+    assert ACC in str(exc.value)
+
+
+def test_the_key_from_the_environment_unlocks_the_study(private, monkeypatch):
+    monkeypatch.setenv("BIA_KEY", KEY)
+    fs = keyed_fs()
+    assert fs.ls(ACC, detail=False)
+    assert KEY in private.keys_seen, "the key never reached the API"
+
+
+def test_a_key_file_is_scoped_per_study(private):
+    """One key opens one study, which is the shape of the thing.
+
+    EGA hands out one username and password for every dataset you are authorised
+    for; BioStudies hands out a reviewer link per deposit. A single value stops
+    working the moment you have two private studies, so the file is a mapping.
+    """
+    path = private.key_file({"keys": {ACC: KEY, "S-BIAD0000": "wrong"}})
+    assert keyed_fs(path).ls(ACC, detail=False)
+
+
+def test_a_key_filed_under_another_study_does_not_unlock_this_one(private):
+    path = private.key_file({"keys": {"S-BIAD0000": KEY}})
+    with pytest.raises(AuthenticationError):
+        keyed_fs(path).ls(ACC)
+
+
+def test_a_flat_key_in_the_file_is_a_catch_all(private):
+    """The common case is exactly one private study; it should not need a mapping."""
+    path = private.key_file({"key": KEY})
+    assert keyed_fs(path).ls(ACC, detail=False)
+
+
+def test_a_scoped_key_beats_the_catch_all(private):
+    path = private.key_file({"key": "wrong", "keys": {ACC: KEY}})
+    assert keyed_fs(path).ls(ACC, detail=False)
+
+
+def test_a_key_file_anyone_can_read_is_refused(private, tmp_path):
+    """Same rule as every other credential file, for the same reason."""
+    path = tmp_path / "loose.json"
+    path.write_text(json.dumps({"key": KEY}))
+    path.chmod(0o644)
+    with pytest.raises(CredentialSourceError) as exc:
+        keyed_fs(str(path)).ls(ACC)
+    assert "readable by others" in str(exc.value)
+
+
+def test_the_key_cannot_be_passed_as_an_option(private):
+    """The standing rule: `-o key=…` would reach a .dvc file as deps[].fs_config."""
+    with pytest.raises(CredentialSourceError) as exc:
+        BIAFileSystem(key=KEY, skip_instance_cache=True)
+    assert "cannot be passed as an option" in str(exc.value)
+
+
+def test_key_is_not_a_dvc_settable_option():
+    """Belt and braces: absent from the profile, so DVC's own validator refuses it.
+
+    `--fs-config key=…` fails inside DVC's config schema before archivefs is
+    reached, which is the half of the guard that works even if the check above is
+    ever bypassed.
+    """
+    from archivefs.registry import PROTOCOLS
+
+    assert "key" not in PROTOCOLS["bia"].config
+
+
+# ------------------------------------------- the key must not leak, anywhere
+
+
+def test_the_private_path_is_masked_in_provenance(private, monkeypatch):
+    """`archivefs stat` prints this, and stdout ends up in logs too."""
+    monkeypatch.setenv("BIA_KEY", KEY)
+    info = keyed_fs().info(ACC)
+    relpath = info["bia"]["relpath"]
+    assert relpath is not None
+    assert ".private/<key>" in relpath
+    assert KEY not in relpath
+    assert KEY[:8] not in relpath
+
+
+def test_the_key_never_appears_in_an_error_message(private, monkeypatch):
+    """Both shapes it takes in a URL, not just the obvious one.
+
+    The first version of `_redact` masked the `.private/` path and missed the
+    `?key=` query parameter — which archivefs itself adds — so the error handler
+    written to stop the leak was leaking through it. Hence both directions here.
+    """
+    monkeypatch.setenv("BIA_KEY", KEY)
+    fs = keyed_fs()
+    with pytest.raises(ArchiveNotFoundError) as exc:
+        fs.info(f"{ACC}/does/not/exist.tif")
+    assert KEY not in str(exc.value)
+
+    private.key = "a-different-key"  # now our key is refused
+    fs = keyed_fs()
+    with pytest.raises(AuthenticationError) as exc2:
+        fs.ls(ACC)
+    assert KEY not in str(exc2.value)
+
+
+def test_reading_bytes_needs_no_key_because_the_path_carries_it(private, monkeypatch):
+    """Verified against the live archive: a ranged GET on the private path is 206
+    with no key parameter. That is what makes the URL a capability rather than an
+    address, and it is why every message has to be redacted."""
+    monkeypatch.setenv("BIA_KEY", KEY)
+    fs = keyed_fs()
+    body = fs.cat_file(f"{ACC}/images/plate1/a.tif")
+    assert body == BODIES["images/plate1/a.tif"]
+    assert all("key=" not in url for url in private.fetched_urls)
+    assert any(".private/" in url for url in private.fetched_urls)
+
+
+# --------------------------- the point of all of it: an invariant .dvc file
+
+
+#: The only fields DVC keeps out of an `info()` dict — `dvc_data.hashfile.meta`'s
+#: `Meta.from_info`. Everything else archivefs reports, including the whole `bia`
+#: provenance block, is dropped before anything is written.
+DVC_RECORDS = ("type", "size", "md5", "etag", "checksum", "version_id", "mtime")
+
+
+def test_the_recorded_fields_are_identical_before_and_after_publication(fake_bia,
+                                                                       monkeypatch):
+    """The requirement: one `.dvc` file, valid on both sides of the release date.
+
+    A reviewer with a key and a stranger after publication must be able to use the
+    *same* file. That holds only if nothing publication-dependent is recorded — and
+    plenty is publication-dependent: `relPath` gains a `.private/<key>` prefix,
+    `httpLink` changes host and path, `isPublic` flips. All of those are resolved at
+    read time from `/info` and none of them is in the recorded set.
+    """
+    monkeypatch.setenv("BIA_KEY", KEY)
+    path = f"{ACC}/images/plate1/a.tif"
+
+    fake_bia(key=KEY, released=False)
+    before = BIAFileSystem(skip_instance_cache=True).info(path)
+    fake_bia(released=True)
+    after = BIAFileSystem(skip_instance_cache=True).info(path)
+
+    assert before["name"] == after["name"]
+    assert {k: before.get(k) for k in DVC_RECORDS} == {
+        k: after.get(k) for k in DVC_RECORDS
+    }
+    # and the things that *do* differ are confined to provenance DVC discards
+    fake_bia(key=KEY, released=False)
+    private_study = BIAFileSystem(skip_instance_cache=True).info(ACC)
+    fake_bia(released=True)
+    public_study = BIAFileSystem(skip_instance_cache=True).info(ACC)
+    assert private_study["bia"]["public"] != public_study["bia"]["public"]
+    assert private_study["bia"]["relpath"] != public_study["bia"]["relpath"]
+
+
+def test_dvc_itself_agrees_that_nothing_publication_dependent_is_recorded(fake_bia,
+                                                                          monkeypatch):
+    """The same claim, but asked of DVC rather than of a list maintained here.
+
+    `DVC_RECORDS` above could drift from what `Meta.from_info` actually keeps. This
+    puts both infos through the real thing, so the invariance claim rests on DVC's
+    code and not on our reading of it.
+    """
+    pytest.importorskip("dvc_data")
+    from dvc_data.hashfile.meta import Meta
+
+    monkeypatch.setenv("BIA_KEY", KEY)
+    path = f"{ACC}/images/plate1/a.tif"
+
+    fake_bia(key=KEY, released=False)
+    before = Meta.from_info(BIAFileSystem(skip_instance_cache=True).info(path), "bia")
+    fake_bia(released=True)
+    after = Meta.from_info(BIAFileSystem(skip_instance_cache=True).info(path), "bia")
+    assert before == after
+
+
+@pytest.mark.network
+def test_live_private_study_needs_and_accepts_a_sharing_key():
+    """Against the real service, with a key supplied out of band.
+
+    Gated on `$BIA_KEY` rather than shipped with one: a sharing key is a live
+    capability and has no business in a repository. Set it to a key for
+    `$ARCHIVEFS_TEST_BIA_STUDY` to run this.
+    """
+    accession = os.environ.get("ARCHIVEFS_TEST_BIA_STUDY")
+    if not (accession and os.environ.get("BIA_KEY")):
+        pytest.skip(
+            "set ARCHIVEFS_TEST_BIA_STUDY=S-BIADnnnn and BIA_KEY=<uuid> to run"
+        )
+    fs = BIAFileSystem(skip_instance_cache=True)
+    names = fs.ls(accession, detail=False)
+    assert names
+
+    # and without the key, the same study refuses with something actionable
+    bare = BIAFileSystem(skip_instance_cache=True)
+    bare.creds.credentials["key"] = dataclasses.replace(
+        bare.creds.credentials["key"], env=(), files=()
+    )
+    bare.creds._cache.clear()
+    with pytest.raises(AuthenticationError) as exc:
+        bare.ls(accession)
+    assert "BIA_KEY" in str(exc.value)
+    assert os.environ["BIA_KEY"] not in str(exc.value)

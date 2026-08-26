@@ -6,6 +6,7 @@
 |---|---|
 | import someone's imaging deposit, start to finish | [`importing-from-bia.md`](importing-from-bia.md) |
 | use any archive as a DVC dependency | [`using-with-dvc.md`](using-with-dvc.md) |
+| set a default once instead of per command | [`configuration.md`](configuration.md) |
 | set up EGA (or restricted Zenodo) access safely | [`credentials.md`](credentials.md) |
 | know why something is built the way it is | [`design.md`](design.md), [`decisions.md`](decisions.md) |
 
@@ -22,9 +23,15 @@ One page per subcommand: syntax, every option, worked scenarios, exit codes.
 | [`archivefs check`](cli-check.md) | has the *deposit* drifted from its manifest? |
 | [`archivefs verify`](cli-verify.md) | do the files on *my disk* match the manifest? |
 | [`archivefs dvc`](cli-dvc.md) | register the protocols with DVC — required once per environment |
+| [`archivefs config`](configuration.md) | the configuration layers, and what they resolve to |
 | [`archivefs cache`](cli-cache.md) | the on-disk block cache that lets an interrupted import resume |
 
 Every command that takes a URL also takes `-o KEY=VALUE`.
+
+Every option below can also be a **default**, in a layered config file rather than on
+every command line — see [`configuration.md`](configuration.md). Which layer may set
+which option is not uniform: only the committed `.archivefs.json` may set anything
+that changes *what the data is*, because only that one travels with the data.
 
 ## Storage options (`-o KEY=VALUE`)
 

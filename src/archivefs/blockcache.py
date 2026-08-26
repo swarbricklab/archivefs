@@ -106,26 +106,51 @@ _pruned: set[str] = set()
 _warned: set[str] = set()
 
 
-def cache_root(explicit: Any = None) -> Path | None:
+def _resolve(sources: tuple[Any, ...], what: str) -> Path | None:
+    """First source that says anything decides, including saying "off".
+
+    Precedence, not merging: ``cache_dir=false`` on one command has to beat an
+    enabled environment variable, and the environment has to beat a config file, and
+    each of those is a *decision* rather than a value to be combined. So the first
+    non-``None`` source wins even when what it says is "nowhere".
+    """
+    for value in sources:
+        if value is None:
+            continue
+        if value is False:
+            return None
+        if isinstance(value, str) and value.strip().lower() in _DISABLED:
+            return None
+        if value is True:
+            raise ValueError(f"{what} needs a directory, not a bare true")
+        return Path(value).expanduser()
+    return None
+
+
+def cache_root(explicit: Any = None, configured: Any = None) -> Path | None:
     """Where persistent blocks go, or ``None`` for "do not persist".
 
-    ``explicit`` (a filesystem's ``cache_dir``) wins over the environment so that a
-    single import can opt out of a globally enabled cache, which is the direction
-    that has to work: turning it *off* for one command must not require unsetting a
+    Chain: the filesystem's ``cache_dir`` argument, then ``$ARCHIVEFS_CACHE_DIR``,
+    then the config layers. Each step can also say *off*, which is the direction that
+    has to work — turning the cache off for one command must not mean unsetting a
     variable the rest of the shell depends on.
+
+    **``$XDG_CACHE_HOME`` is deliberately not in that chain**, though it was for a
+    while. XDG names a *location* for caches; it is not consent for an entry the size
+    of the archive. Someone exporting it is thinking about pip wheels and font caches,
+    and on a cluster the directory they point it at is shared project space — so
+    honouring it here would enable a 20 GB cache nobody asked for, which is exactly
+    what D29 declined to do by default. Anyone who does want it on for every import
+    now has a better way to say so than a generic variable: one line in the config
+    file, visible in ``archivefs config``.
     """
-    if explicit is None:
-        explicit = os.environ.get(CACHE_DIR_ENV)
-    if explicit is None or explicit is False:
-        return None
-    if isinstance(explicit, str) and explicit.strip().lower() in _DISABLED:
-        return None
-    if explicit is True:
-        raise ValueError("cache_dir needs a directory, not a bare true")
-    return Path(explicit).expanduser()
+    return _resolve(
+        (explicit, os.environ.get(CACHE_DIR_ENV), configured),
+        "cache_dir",
+    )
 
 
-def scratch_root(explicit: Any = None) -> Path | None:
+def scratch_root(explicit: Any = None, configured: Any = None) -> Path | None:
     """Where the ephemeral sparse file goes, or ``None`` for ``tempfile``'s own choice.
 
     Separate from :func:`cache_root` because it answers a different question. That one
@@ -136,15 +161,9 @@ def scratch_root(explicit: Any = None) -> Path | None:
     Gadi is a 63 GB **tmpfs**. Inheriting a default that might be RAM is not a choice
     anyone made on purpose.
     """
-    if explicit is None:
-        explicit = os.environ.get(SCRATCH_DIR_ENV)
-    if explicit is None or explicit is False:
-        return None
-    if isinstance(explicit, str) and explicit.strip().lower() in _DISABLED:
-        return None
-    if explicit is True:
-        raise ValueError("scratch_dir needs a directory, not a bare true")
-    return Path(explicit).expanduser()
+    return _resolve(
+        (explicit, os.environ.get(SCRATCH_DIR_ENV), configured), "scratch_dir"
+    )
 
 
 def _warn_if_under_home(root: Path, option: str) -> None:
@@ -175,9 +194,9 @@ def _warn_if_under_home(root: Path, option: str) -> None:
     )
 
 
-def scratch_options(explicit: Any = None) -> dict:
+def scratch_options(explicit: Any = None, configured: Any = None) -> dict:
     """``{"scratch": dir}`` for the ephemeral file, ``{}`` to let ``tempfile`` pick."""
-    root = scratch_root(explicit)
+    root = scratch_root(explicit, configured)
     if root is None:
         return {}
     try:
@@ -191,10 +210,15 @@ def scratch_options(explicit: Any = None) -> dict:
     return {"scratch": str(root)}
 
 
-def _max_age_seconds() -> float:
+def _max_age_seconds(configured: Any = None) -> float:
+    """Environment, then config, then the built-in fortnight."""
+    raw = os.environ.get(MAX_AGE_ENV)
+    if raw is None:
+        raw = configured
     try:
-        days = float(os.environ.get(MAX_AGE_ENV, DEFAULT_MAX_AGE_DAYS))
-    except ValueError:
+        days = DEFAULT_MAX_AGE_DAYS if raw is None else float(raw)
+    except (TypeError, ValueError):
+        logger.warning("ignoring unreadable cache max age %r", raw)
         days = DEFAULT_MAX_AGE_DAYS
     return max(0.0, days) * 86400
 
@@ -333,7 +357,9 @@ def _read_index(index: Path, data: Path, identity: dict) -> set[int] | None:
     return blocks
 
 
-def prepare(root: Path | None, identity: dict | None) -> dict | None:
+def prepare(
+    root: Path | None, identity: dict | None, max_age_days: Any = None
+) -> dict | None:
     """Cache options for a resumable cache, or ``None`` to use a private one.
 
     Every failure here is a fallback rather than an error: a cache is an
@@ -345,7 +371,7 @@ def prepare(root: Path | None, identity: dict | None) -> dict | None:
     data, index, lock = _paths(root, identity)
     try:
         data.parent.mkdir(parents=True, exist_ok=True)
-        prune(root)
+        prune(root, _max_age_seconds(max_age_days))
         handle = _lock(lock)
     except OSError as exc:
         logger.debug("cannot use the block cache at %s: %s", root, exc)

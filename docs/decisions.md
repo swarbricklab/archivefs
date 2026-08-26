@@ -2040,3 +2040,210 @@ would reintroduce the amplification #10 fixed.
 **Cost to change my mind:** the cache is one `cache_type` string. Returning `"mmap", {}`
 unconditionally from `block_cache_options` restores the previous behaviour exactly, and
 `tests/test_blockcache.py` fails loudly rather than silently if it is ever half-wired.
+
+---
+
+## D30 — configuration is **layered**, and only the layer that travels may change the data
+
+Three environment variables appeared in one afternoon — `ARCHIVEFS_CACHE_DIR`,
+`ARCHIVEFS_SCRATCH_DIR`, `ARCHIVEFS_CACHE_MAX_AGE_DAYS` — which is where ad-hoc stops
+scaling. A setting you have to remember to `export` is a setting you discover you
+needed the day after it would have helped, and D29's cache is exactly that shape: the
+property you want is "my three-hour import survives an interruption", and you want it
+*before* the interruption.
+
+Four layers, XDG-shaped, lowest precedence first — `system`
+(`$XDG_CONFIG_DIRS/archivefs/config.json`), `user`
+(`$XDG_CONFIG_HOME/archivefs/config.json`), `project` (`.archivefs.json`, committed),
+`local` (`.archivefs.local.json`, gitignored) — with the environment above every file
+and an explicit option above that. The same order `credentials.py` uses for secrets, so
+learning it once is enough. Details and worked setups:
+[`configuration.md`](configuration.md).
+
+### The decision that is not obvious
+
+**Only a layer that travels with the data may change what the data is.**
+
+`--fs-config extract_zips=true` is written into the `.dvc` file, so it travels: a
+colleague's `dvc pull` reproduces the same tree. The same setting arriving from
+`~/.config/archivefs/config.json` would leave the `.dvc` file with **no record of it**,
+and that identical file would then resolve to a different tree on a different machine —
+silently. That is the reproducibility hole this whole project is arranged to avoid,
+reached sideways through a convenience.
+
+So options are classified, and a layer that cannot honour a class refuses it:
+
+| kind | examples | settable from | refused in |
+|---|---|---|---|
+| machine — changes cost | `cache_dir`, `scratch_dir`, `max_concurrent_reads`, `api_url`, `credentials_file` | `system`, `user`, `local` | `project` |
+| content — changes what comes back | `extract_zips`, `strip_components`, `view`, `layout`, `chiro` | `project` only | everywhere else |
+| credentials | `password`, `token` | nowhere | everywhere |
+
+The `project` refusal has the mirror-image justification: a committed `/scratch/...`
+path is wrong for everyone who did not write it.
+
+That split is what makes refusing content keys in the user config a *design* rather
+than a restriction. Without `project`, the answer to "I want `extract_zips` on by
+default" would just be no. With it, the answer is "yes, and committed, so your
+collaborators get it too" — which is the answer that was wanted anyway.
+
+### Refused, not warned; and unknown keys too
+
+Every failure here has the same shape: the setting looks applied and is not, or is
+applied somewhere it will not follow the data. A warning in a pipeline log is invisible
+at exactly the moment it matters, which is the argument `credentials.py` already makes
+for refusing a password on the command line rather than discouraging one. So a bad key
+raises `ConfigError` at filesystem construction, naming the file, the layer, and where
+the setting does belong.
+
+That extends to typos. `cach_dir` silently doing nothing is the failure mode config
+models are famous for, so an unknown key is an error listing the ones that would work,
+and a misspelled protocol section (`"zendo": {…}`) is caught rather than skipped as
+though it were a container.
+
+`test_every_backend_option_is_classified` is what keeps the two key sets honest: a new
+backend option cannot be added without deciding whether it changes the data. That guard
+is the only reason it is safe for those sets to be hand-written lists rather than
+another field on `registry.Backend`.
+
+### JSON, and `None` defaults
+
+JSON rather than TOML: `requires-python` is 3.9 so there is no `tomllib`, the CLI is
+deliberately stdlib-only, and credential files are already JSON — one syntax to learn.
+
+The unglamorous half of this change is that every configurable option's signature
+default became `None`. With `extract_zips: bool = False` there is no way to distinguish
+"the user said no" from "the user said nothing", so a configured `true` would be
+silently overridden by the signature — and `strip_components: int = 1` has the same
+problem at `0`. Both are pinned by tests, because it is the kind of bug that looks like
+the config file not being read at all.
+
+### Cost of being wrong
+
+### One thing this made worse before it made it better
+
+The first version of the chain ended at `$XDG_CACHE_HOME`, on the reasoning that XDG
+already answers "where do caches go" and honouring a standard beats inventing a
+variable. That was wrong, and the config model is what makes it clearly wrong: XDG
+names a *location*, not consent for an entry the size of the archive. Someone
+exporting `XDG_CACHE_HOME` is thinking about pip wheels and font caches, and on a
+cluster the directory they point it at is shared project space — on this one, 78% full
+and at 85% of its inode quota. Honouring it would have enabled a 20 GB cache for
+anyone following ordinary XDG advice, which is exactly what D29 declined to do by
+default, arrived at through a standard instead of a hardcoded path.
+
+It is dropped. The `system` layer is the better answer to the same wish — lab-wide,
+explicit, one file, and visible in `archivefs config`.
+
+`archivefs config` shows every layer and what it resolved to, which is the diagnostic
+that makes a layered model debuggable rather than mysterious. If the classification
+turns out to be too strict, moving a key between `MACHINE_KEYS` and `CONTENT_KEYS` is
+one line and the test above will notice. If layering turns out to be unwanted, deleting
+`config.py` and the `_setting` calls restores exactly the environment-variable
+behaviour that preceded it.
+
+---
+
+## D31 — BioStudies' **sharing key** is a credential, and the `.dvc` file survives publication
+
+A depositor sharing an unreleased BioImage Archive study sends a link with a key on
+it: `…/studies/S-BIAD3080?key=<uuid>`. Reviewers get the same link. The requirement
+that came with it is sharper than "support the key": **one committed `.dvc` file that
+works for a reviewer holding a key before release, for the depositor, and for anyone
+at all afterwards.**
+
+### The API behaviour, which upstream does not document
+
+Measured against the live service, because the help pages and the REST docs do not
+mention it:
+
+| request | no key | `?key=` |
+|---|---|---|
+| `/api/v1/studies/{acc}/info` | **403** | 200 |
+| `/api/v1/studies/{acc}` | **403** | 200 |
+| `/api/v1/files/{acc}?…` | **200 `{}`** | 200, full listing |
+
+Three things fall out of that table:
+
+* **Query parameter only.** `X-Session-Token: <key>` is refused with 403.
+* **`/files` does not 403; it returns an empty object.** So a private study and a
+  missing one are indistinguishable there — which is why `study_info` uses
+  `/studies/{acc}/info` as the existence check (a decision made for a different
+  reason, and it pays again here).
+* **A stale key is harmless.** A released study answers 200 with a key that is wrong,
+  expired, or nonsense. So archivefs sends the key whenever it holds one, without
+  first checking whether the study is public: nothing is gained by asking twice, and a
+  depositor's key can stay in place after release.
+
+BioStudies' own name for it, in the `/info` payload, is `seckey`.
+
+### The URL *is* the capability
+
+The important discovery is not the query parameter. An unreleased study is served from
+a path that contains the key:
+
+    relPath = .private/aa/aaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/S-BIAD/080/S-BIAD3080
+
+that is `key[:2]/key[2:]`. A ranged GET on it returns **206 with no key parameter at
+all**, and the same path minus the key is 404. It is a presigned URL that never
+expires — so the key leaks through anything that prints a URL, which for this codebase
+means every error message: `_request` interpolates the URL into `AuthenticationError`
+and `ArchiveNotFoundError`.
+
+Hence `_redact`, a new hook on `ArchiveFileSystem` — identity everywhere except BIA,
+which masks both shapes. **Both**, and that was not the first version: the first masked
+only the `.private/` path, and a test caught the `?key=` query parameter — which
+archivefs itself adds — leaking through the very handler written to stop it.
+
+### Decision
+
+`key` is a declared `Credential` with `secret=True`, `required=False`, and a new
+`scoped=True`. Scoping is the shape of the thing rather than a nicety: EGA issues one
+username and password for every dataset you are authorised for, while BioStudies issues
+a link per deposit, so a single value stops working at the second private study. The
+file holds a mapping, with a flat entry beside it as the catch-all for the reviewer who
+has exactly one:
+
+    {"keys": {"S-BIAD3080": "…"}}      # several
+    {"key": "…"}                        # one, applies to whatever you ask for
+
+Everything else follows the existing policy unchanged: `secret=True` keeps `key` out of
+`registry.Backend.config`, so `--fs-config key=…` dies inside DVC's own config
+validator; `-o key=…` is refused by `CredentialResolver`; the file's mode is checked.
+
+### Why the `.dvc` file is invariant
+
+Not by care — by construction, and this is the part worth being precise about.
+`dvc_data`'s `Meta.from_info` keeps a **fixed** field set out of an `info()` dict
+(`size`, `md5`, `etag`, `checksum`, `version_id`, `mtime`, …). Everything else archivefs
+reports, including the whole `bia` provenance block, is discarded before anything is
+written. So of the things that change at publication —
+
+| field | changes at release? | recorded? |
+|---|---|---|
+| accession + interior path | no | **yes** (`deps[].path`) |
+| content md5 | no | **yes** |
+| size | no | **yes** |
+| `relPath` / `httpLink` | **yes** — gains/loses `.private/<key>` | no |
+| `isPublic`, `released` | **yes** | no |
+
+— none of the mutable ones is in the file. Verified end to end against the live private
+study: `dvc import-url` succeeded with the key, and the key and the string `.private`
+appear in **no** file DVC wrote — not the `.dvc`, not `.dvc/config`, not `.dvc/tmp`.
+
+`relpath` survives in the provenance block, masked to `.private/<key>` rather than
+dropped: that a deposit is unreleased is worth reporting, and `archivefs stat` prints
+it to stdout, which ends up in logs as readily as stderr does.
+
+### What this does *not* buy
+
+BIA-submitted still declares no immutability basis, so it is not version-aware and DVC
+will not treat it as fallback storage (D6/D17/D23). A reviewer cannot `dvc pull` a
+depositor's completed import from BIA; they run `dvc import-url` themselves with their
+own copy of the key. That is arguably correct rather than merely unfinished — an
+unreleased deposit is *mutable*, so treating it as immutable storage would be a lie —
+and a `.chiro` sidecar is the route to changing it, since it supplies the checksums BIA
+does not.
+
+**Cost to change my mind:** the credential declaration is one list entry; deleting it
+returns BIA to anonymous-only, and `_redact` becomes dead code rather than wrong code.

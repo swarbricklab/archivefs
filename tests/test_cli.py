@@ -361,3 +361,61 @@ def test_cache_dir_overrides_the_environment(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("ARCHIVEFS_CACHE_DIR", str(tmp_path / "from-env"))
     assert main(["cache", "path", "--dir", str(tmp_path / "explicit")]) == 0
     assert capsys.readouterr().out.strip() == str(tmp_path / "explicit")
+
+
+# ------------------------------------------------ `archivefs config` (the model)
+
+
+def test_config_lists_the_layers_highest_first(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setenv("XDG_CONFIG_DIRS", str(tmp_path / "etc"))
+    monkeypatch.chdir(tmp_path)
+    assert main(["config"]) == 0
+    out = capsys.readouterr().out
+    assert out.index("user") < out.index("system")
+    assert "nothing configured" in out
+
+
+def test_config_shows_what_each_layer_resolved_to(tmp_path, monkeypatch, capsys):
+    from archivefs import config
+
+    (tmp_path / ".git").mkdir()
+    user = tmp_path / "xdg" / config.XDG_NAME
+    user.parent.mkdir(parents=True)
+    user.write_text(
+        json.dumps({"cache_dir": "/mine", "zenodo": {"api_url": "https://m"}})
+    )
+    (tmp_path / config.PROJECT_NAME).write_text(
+        json.dumps({"zenodo": {"extract_zips": True}})
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setenv("XDG_CONFIG_DIRS", str(tmp_path / "etc"))
+    monkeypatch.chdir(tmp_path)
+
+    assert main(["config", "--json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["layers"][0]["name"] == "local"
+    assert report["settings"]["zenodo"]["extract_zips"] is True
+    assert report["settings"]["zenodo"]["api_url"] == "https://m"
+    assert report["settings"]["geo"]["cache_dir"] == "/mine"
+
+
+def test_config_path_names_the_user_layer_for_an_editor(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.chdir(tmp_path)
+    assert main(["config", "path"]) == 0
+    assert capsys.readouterr().out.strip().endswith("archivefs/config.json")
+
+
+def test_a_refused_config_key_is_reported_not_raised(tmp_path, monkeypatch, capsys):
+    """ConfigError is an ArchiveFSError, so the CLI prints it instead of a traceback."""
+    from archivefs import config
+
+    user = tmp_path / "xdg" / config.XDG_NAME
+    user.parent.mkdir(parents=True)
+    user.write_text(json.dumps({"extract_zips": True}))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setenv("XDG_CONFIG_DIRS", str(tmp_path / "etc"))
+    monkeypatch.chdir(tmp_path)
+    assert main(["config"]) == 2
+    assert "may not set 'extract_zips'" in capsys.readouterr().err

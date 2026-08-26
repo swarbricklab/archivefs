@@ -66,9 +66,25 @@ from urllib.parse import quote
 from xml.etree import ElementTree
 
 from archivefs.base import ArchiveFileSystem
+from archivefs.credentials import Credential
 from archivefs.errors import ArchiveNotFoundError, NotSupportedError
 
 logger = logging.getLogger(__name__)
+
+#: The two shapes a sharing key takes in a URL, both of which must be masked before
+#: the URL can appear in a message.
+#:
+#: **The query parameter** is how archivefs sends it. **The path** is how BioStudies
+#: serves an unreleased study: ``.private/<key[:2]>/<key[2:]>/…``, which makes the URL
+#: itself the capability — a ranged GET on it needs no key parameter at all.
+#:
+#: Both, and not just the obvious one: the first version of this masked only the path
+#: and a test caught the query parameter leaking through the very error handler added
+#: to stop it.
+KEY_IN_URL = (
+    re.compile(r"([?&]key=)[^&\s]+"),
+    re.compile(r"(\.private/)[0-9a-fA-F]{2}/[0-9a-fA-F][0-9a-fA-F-]{8,}"),
+)
 
 DEFAULT_API_URL = "https://www.ebi.ac.uk/biostudies/api/v1"
 #: The Embassy S3 bucket holding BIA's own conversions. Anonymous, no signing.
@@ -136,7 +152,14 @@ class SubmittedView(BIAView):
         404s for another. This is also the existence check, because the *files*
         endpoint answers an unknown accession with an empty list rather than a 404.
         """
-        info = self.fs._get_json(f"{self.fs.api_url}/studies/{accession}/info") or {}
+        info = (
+            self.fs._get_json(
+                self.fs._keyed(
+                    f"{self.fs.api_url}/studies/{accession}/info", accession
+                )
+            )
+            or {}
+        )
         if not info.get("relPath") and not info.get("httpLink"):
             raise ArchiveNotFoundError(
                 f"BioStudies has no study {accession} (or it is not public). Note "
@@ -156,7 +179,11 @@ class SubmittedView(BIAView):
     def _page(self, accession: str, start: int, length: int) -> tuple[list[dict], int]:
         payload = (
             self.fs._get_json(
-                f"{self.fs.api_url}/files/{accession}?start={start}&length={length}"
+                self.fs._keyed(
+                    f"{self.fs.api_url}/files/{accession}"
+                    f"?start={start}&length={length}",
+                    accession,
+                )
             )
             or {}
         )
@@ -435,7 +462,32 @@ class BIAFileSystem(ArchiveFileSystem):
     protocol = "bia"
     archive_name = "BioImage Archive"
     #: Anonymous: public BioStudies data needs no credential.
-    credentials: ClassVar[list] = []
+    #: BioStudies shares an unreleased study through a link carrying ``?key=<uuid>``
+    #: — the reviewer link a depositor sends out. Undocumented in the REST API and
+    #: verified against it (D31): every endpoint answers 403 without the key and 200
+    #: with it, as a **query parameter only** (an ``X-Session-Token`` header is
+    #: refused). BioStudies' own name for it, in the ``/info`` payload, is ``seckey``.
+    #:
+    #: Scoped per accession, because that is the shape of the thing: one key opens
+    #: one study, not an account. ``secret=True`` keeps it out of
+    #: ``registry.Backend.config``, so ``--fs-config key=…`` dies inside DVC's own
+    #: validator and ``-o key=…`` is refused here — which is what lets the *same*
+    #: `.dvc` file serve a reviewer holding a key and everyone else after release.
+    credentials: ClassVar[list] = [
+        Credential(
+            name="key",
+            env=("BIA_KEY",),
+            files=("~/.config/archivefs/bia.json",),
+            file_key="keys",
+            scoped=True,
+            required=False,
+            help=(
+                "the key from a BioStudies sharing link "
+                "(…/studies/S-BIAD3080?key=<uuid>). Only needed before the study "
+                "is released; harmless afterwards."
+            ),
+        )
+    ]
     views: ClassVar[dict[str, type[BIAView]]] = {
         "submitted": SubmittedView,
         "derived": DerivedView,
@@ -443,12 +495,15 @@ class BIAFileSystem(ArchiveFileSystem):
 
     def __init__(
         self,
-        view: str = "submitted",
-        api_url: str = DEFAULT_API_URL,
-        s3_url: str = DEFAULT_S3_URL,
+        view: str | None = None,
+        api_url: str | None = None,
+        s3_url: str | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
+        view = self._setting("view", view, "submitted")
+        api_url = self._setting("api_url", api_url, DEFAULT_API_URL)
+        s3_url = self._setting("s3_url", s3_url, DEFAULT_S3_URL)
         if view not in self.views:
             raise ValueError(
                 f"unknown BIA view {view!r}; known views: "
@@ -616,7 +671,12 @@ class BIAFileSystem(ArchiveFileSystem):
                 "released": info.get("released"),
                 "modified": info.get("modified"),
                 "public": info.get("isPublic"),
-                "relpath": info.get("relPath"),
+                # Masked, not dropped: knowing the deposit is served from a private
+                # path is useful, and the path itself embeds the study's key. DVC
+                # keeps only a fixed field set out of `info` (`dvc_data`'s
+                # `Meta.from_info`), so this never reached a `.dvc` file — but it
+                # does reach `archivefs stat`, and stdout ends up in logs too.
+                "relpath": self._redact(info.get("relPath") or "") or None,
             },
         }
 
@@ -659,6 +719,62 @@ class BIAFileSystem(ArchiveFileSystem):
         ]
 
     # --------------------------------------------------------------- transfer
+
+    def _key_for(self, accession: str) -> str | None:
+        """This study's sharing key, if one is configured for it."""
+        return self.creds.get("key", scope=accession)
+
+    def _keyed(self, url: str, accession: str) -> str:
+        """Add ``?key=`` if we hold a key for ``accession``.
+
+        Sent whenever we have one, without first checking whether the study is
+        public — measured, a public study answers 200 with a stale or even a
+        nonsense key, so there is nothing to be gained by asking twice and a
+        depositor's key can stay in place after release without breaking the pull.
+        """
+        key = self._key_for(accession)
+        if not key:
+            return url
+        return f"{url}{'&' if '?' in url else '?'}key={quote(key)}"
+
+    def _redact(self, url: str) -> str:
+        for pattern in KEY_IN_URL:
+            url = pattern.sub(r"\1<key>", url)
+        return url
+
+    def _auth_remediation(self, status: int, url: str) -> str:
+        """Two different 403s, and conflating them sends people the wrong way.
+
+        Without a key, "check the credentials" is unactionable — there is nothing to
+        check. With one, the embargo explanation is wrong, because access was
+        attempted and refused. So the two are answered separately, and the accession
+        comes out of the URL so the message can name the study it means.
+        """
+        if status not in (401, 403):
+            return super()._auth_remediation(status, url)
+        match = re.search(r"/(?:studies|files)/([^/?]+)", url)
+        accession = match.group(1) if match else "S-BIADnnnn"
+        if self._key_for(accession):
+            return (
+                f"the sharing key archivefs holds for {accession} was refused. It "
+                f"came from {self.creds.describe(['key'])}. Sharing keys are per "
+                f"study and can be revoked, so check the link is current and that "
+                f"its key is filed under {accession} and not another accession."
+            )
+        return (
+            f"archivefs read {self.archive_name} anonymously, so it can only see "
+            f"released studies. Most often {accession} is embargoed, not yet "
+            f"released, restricted or withdrawn — check its landing page for a "
+            f"release date.\n"
+            f"  If it is unreleased and you have a sharing link for it "
+            f"(.../studies/{accession}?key=<uuid>), archivefs can use that key:\n"
+            f"    export BIA_KEY=<uuid>\n"
+            f"  or, for more than one study, ~/.config/archivefs/bia.json at "
+            f"chmod 600:\n"
+            f'    {{"keys": {{"{accession}": "<uuid>"}}}}\n'
+            f"  The key is a secret: it cannot be passed as an option and never "
+            f"reaches a .dvc file. See docs/credentials.md."
+        )
 
     def _data_url(self, info: dict) -> str:
         return self.view.data_url(info)

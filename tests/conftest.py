@@ -36,10 +36,17 @@ def isolated_home(request, monkeypatch, tmp_path_factory):
         return
     empty = tmp_path_factory.mktemp("home")
     monkeypatch.setenv("HOME", str(empty))
-    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     # Same argument, one directory over: a developer who has turned the block
     # cache on would otherwise have every test resuming from *their* cache, and
     # "did this read go to the network" is the question half of them ask.
     monkeypatch.delenv("ARCHIVEFS_CACHE_DIR", raising=False)
     monkeypatch.delenv("ARCHIVEFS_SCRATCH_DIR", raising=False)
     monkeypatch.delenv("ARCHIVEFS_CACHE_MAX_AGE_DAYS", raising=False)
+    # And the config layers, for the same reason one directory further out: a
+    # developer with `extract_zips` or a `cache_dir` in their own config would
+    # otherwise change the answer to "did this read go to the network", which is the
+    # question half these tests ask. `XDG_CONFIG_DIRS` is pointed at an empty
+    # directory rather than unset, because unset means `/etc/xdg`.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(empty / ".config"))
+    monkeypatch.setenv("XDG_CONFIG_DIRS", str(empty / "etc"))
+    monkeypatch.delenv("ARCHIVEFS_CONFIG", raising=False)
