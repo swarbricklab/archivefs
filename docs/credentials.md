@@ -61,11 +61,56 @@ Per archive:
 |---|---|---|
 | EGA | `$EGA_USERNAME`, `$EGA_PASSWORD` | `~/.pyega3/credentials.json`, `~/.config/archivefs/ega.json` |
 | Zenodo | `$ZENODO_TOKEN` | `~/.config/archivefs/zenodo.json` |
+| BIA | `$BIA_KEY` | `~/.config/archivefs/bia.json` — **per study**, see below |
 | dbGaP | `$DBGAP_NGC` (a *path*) | — |
 
 `~/.pyega3/credentials.json` is read for compatibility, so an existing pyega3 setup
 works unchanged — archivefs does not depend on pyega3 itself
 ([`decisions.md`](decisions.md) D2).
+
+## BIA: a key per study, not per account
+
+Every other credential here opens an *account*. A BioStudies sharing key opens **one
+study** — it is the reviewer link a depositor sends out before publication:
+
+```
+https://www.ebi.ac.uk/biostudies/bioimages/studies/S-BIAD3080?key=aaaaaaaa-…
+```
+
+So one value stops being enough as soon as you have two private deposits, and the
+file is a mapping:
+
+```console
+$ mkdir -p ~/.config/archivefs
+$ install -m 600 /dev/null ~/.config/archivefs/bia.json
+$ cat > ~/.config/archivefs/bia.json <<'JSON'
+{
+  "keys": {
+    "S-BIAD3080": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    "S-BIAD1234": "…"
+  }
+}
+JSON
+```
+
+For the common case of exactly one — a reviewer with one link — a flat entry works
+and applies to whatever you ask for:
+
+```json
+{ "key": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" }
+```
+
+A key filed under a specific accession wins over the flat one. `$BIA_KEY` is the
+one-study shortcut and beats both.
+
+**Only needed before release, and harmless after.** Measured against the live API, a
+released study answers `200` even with a stale or nonsense key, so a depositor can
+leave the key in place and nothing breaks when the study goes public.
+
+**The key never reaches a `.dvc` file**, which is the point of the whole arrangement:
+a reviewer holding a key and a stranger after publication use the *same* `.dvc` file.
+See [`importing-from-bia.md`](importing-from-bia.md) and
+[`decisions.md`](decisions.md) D31.
 
 ## What is refused, and by whom
 
