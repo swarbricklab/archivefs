@@ -1594,6 +1594,13 @@ authority when the declared size is stale.
 
 ## D26 — archives throttle **per connection**, so one block is fetched over several
 
+> **Corrected by [D27](#d27--a-range-is-cut-into-fixed-2-mib-pieces-not-one-piece-per-connection).**
+> The conclusion below holds — splitting a range across connections is the win, and 8
+> is the right bound. The *reason* given for the 512 KiB floor does not: "the fixed
+> cost of a request here is seconds" reads a rate as a price. One connection moves
+> ~0.30 MB/s at **any** request size, so the 11.3 s below is 4.2 MB at 0.37 MB/s, and
+> the real per-request cost is ~0.1 s. D27 has the measurement and what it changed.
+
 **Measured, three trials each, one 4 MiB block of a Zenodo object:**
 
 | | median | throughput |
@@ -1666,3 +1673,146 @@ applies everywhere, the splitting does not.
 
 **Cost to change my mind:** `max_concurrent_reads=1` restores single-request reads
 exactly, per filesystem, with no code change.
+
+## D27 — 🩹 a range is cut into **fixed 2 MiB pieces**, not one piece per connection
+
+Issue #12 proposed scaling the ZIP block size with the container — 32 MiB blocks on a
+20 GB archive, so that eight parallel pieces are 4 MiB each instead of 512 KiB — on the
+premise, taken from D26, that "Zenodo's per-request overhead is *seconds*".
+
+**The premise is false, and the proposal is a pessimisation.** Both were measured
+before any code was written, which is what the issue asked for.
+[`evidence/zenodo-piece-size-2026-08-25.md`](evidence/zenodo-piece-size-2026-08-25.md)
+has the four probes; the short version:
+
+| pieces, 8 connections, 64 MiB, 3 rotated trials | median |
+|---|---|
+| 128 × 512 KiB *(what we shipped)* | 5.76 MB/s |
+| **32 × 2 MiB** | **9.70 MB/s** |
+| 16 × 4 MiB *(issue #12's proposal)* | 5.05 MB/s |
+| 8 × 8 MiB | 2.49 MB/s |
+
+### What D26 got wrong
+
+D26 read "one 4 MiB block takes 11.3 s as a single request" as a per-request price. It
+is not: a single connection to Zenodo moves **~0.30 MB/s whatever you ask it for** —
+0.25 MiB in 0.96 s, 8 MiB in 26.8 s, a flat line — so 11.3 s was 4.2 MB at the rate.
+The real fixed cost of a request is about **0.1 s**. That misreading is what put a
+512 KiB floor in `split_span`, and what issue #12 then reasoned from.
+
+Neither cheap explanation for the concurrency effect survived either: the fast
+conditions do not open more sockets (7, reused, all to `zenodo.org`), and socket age is
+irrelevant (eight sequential 2 MiB reads take 46.4 s on one reused socket and 46.9 s on
+a fresh socket each).
+
+### What actually predicts throughput: bytes in flight
+
+Sorting every measured cell by `connections × piece size` gives a single curve with a
+peak at **16 MiB in flight** and a cliff past it — and it does not matter which lever
+gets you there. 8×2 MiB is 9.70–14.03 MB/s; 8×4 MiB, 16×2 MiB and 8×8 MiB (32, 32 and
+64 MiB in flight) are 5.05, 4.08 and 2.49. Below the peak the levers are *not*
+interchangeable — 1 connection × 2 MiB is 0.95 MB/s against 4 × 512 KiB's 4.09 — so
+both are needed, but above it either one alone ruins the transfer.
+
+That shape on a ~280 ms path looks like a congestion-limited link. **We did not confirm
+the mechanism**, and the decision does not rest on one: it rests on the peak.
+
+### Decision
+
+`split_span` cuts a range into pieces of a **fixed size**, `TARGET_PARALLEL_PIECE`
+(2 MiB), rather than into `max_concurrent_reads` pieces of whatever size falls out:
+
+    piece  = clamp(MAX_BYTES_IN_FLIGHT / max_concurrent_reads, 512 KiB, 2 MiB)
+    pieces = ceil(length / (max_concurrent_reads × piece)) × max_concurrent_reads
+    block  = clamp(max_concurrent_reads × piece, blocksize, container / 8)  # mmap only
+
+The division by the connection bound is what keeps a raised `max_concurrent_reads` from
+walking into the cliff: at 16 connections the piece becomes 1 MiB, holding the bytes in
+flight at the peak instead of doubling past it.
+
+**Whole rounds, and that line was bought the hard way.** The first version cut by piece
+size alone, which turns a 23 MB member into 12 pieces — eight connections, then four,
+with half of them idle for the second round. Measured end to end it was **slower than
+not capping the piece size at all** (1.74 MB/s against 2.08), which is the sort of
+result that looks like the whole idea is wrong. Rounding the count up to a multiple of
+the connection bound gives 16 pieces of 1.44 MB: the same two rounds, none of them
+half-empty.
+
+### End to end, on nine cold archives
+
+Nine sibling `spaceranger_*.zip` from record 17411292 (495–707 MB each), one
+configuration per archive, assigned by a Latin square, each read exactly once:
+
+| | median | range |
+|---|---|---|
+| before | 3.87 MB/s | 2.67–13.33 |
+| piece cap only | 8.69 MB/s | 8.54–10.36 |
+| **both** | **18.00 MB/s** | 9.26–19.27 |
+
+Path calibration 5.89 MB/s before the run and 6.32 after, so the path held still.
+**"Several-fold", not 4.65x**: individual archives vary ~2x whatever the setting, three
+archives per configuration is a small sample, and one of nine comparisons crosses over.
+
+The spread is a result in itself. `before`'s pieces are `range / 8` and the range
+depends on how `zipfile` happens to read a member — a *stored* member is read whole, so
+the pieces are enormous; a *deflated* one is read incrementally, so they are 512 KiB.
+Hence 2.67 to 13.33 MB/s across nine archives from one depositor. Capping the piece
+tightens that to 8.54–10.36 before the block size adds anything.
+
+**Each archive must be cold, and finding that out cost a run.** The first version read
+one archive three times, rotating the order; in both rounds whichever configuration ran
+*last* won, calibration flat either side. Zenodo's origin warms to an object across
+re-reads and the warming outlives the round, so a repeated-measures design over one
+object measures the origin. Both scripts are kept —
+[`…-before-after`](evidence/zenodo-split-before-after-2026-08-25.py) for the lesson,
+[`…-cold-archives`](evidence/zenodo-split-cold-archives-2026-08-25.py) for the answer.
+
+**The container's size bounds the block**, which is the one part of issue #12's shape
+that survived. Not to make blocks *bigger* on large archives — they already reach the
+ceiling — but to stop them getting big on small ones: a flat 16 MiB block would mean
+one 7-byte member of a 25 MB archive fetching two blocks that between them span the
+whole archive, which is D25's eager container fetch arrived at sideways. An eighth of
+the container caps a single-member read at a quarter of it, and Zenodo publishes the
+size in the record, so consulting it costs no request. A 25 MB archive therefore keeps
+the 4 MiB block and the 8.2 MB single-member cost it has today; nothing gets worse than
+what shipped.
+
+### The bug this fixes is not the one the issue described
+
+`MMapCache` consolidates every consecutive missing block into **one range**. So reading
+a 100 MB member asked for 100 MB at once, and the old rule cut that into 8 pieces of
+12.5 MB — 100 MB in flight, four times past the cliff, on the exact case issue #12 was
+raised for. Block size was never the variable there: measured end to end on a 395 MB
+archive of 23 MB members, 4 / 8 / 16 MiB blocks gave **2.09 / 2.09 / 2.19 MB/s** — a
+tie, because the pieces are `member/8` at any block size
+([`evidence/zenodo-zip-blocksize-2026-08-25.py`](evidence/zenodo-zip-blocksize-2026-08-25.py)).
+
+Block size still earns its change for the *other* half — members smaller than a block,
+where one block is one round of pieces and 4 MiB of it means 512 KiB pieces.
+
+### The cost, as a number
+
+The reading view's block is up to 4x bigger, and D25's single-member cost scales with
+it — bounded by the container clamp above:
+
+| container | block | one small member costs | share of the archive |
+|---|---|---|---|
+| 25 MB | 4 MiB *(unchanged)* | 8.4 MB *(unchanged)* | 34% |
+| 395 MB | 16 MiB | 33.6 MB | 8% |
+| 20 GB | 16 MiB | 33.6 MB | 0.2% |
+
+A full traversal is unaffected — every block is read once at either size. So the cost
+lands where D25's did, on `archivefs get <big.zip>/<one small file>`, and only for
+archives big enough that it is a small fraction of them.
+
+An explicitly chosen `block_size` is never enlarged — a caller asking for small blocks
+is asking for cheap small reads, and every test that reasons about which blocks were
+fetched sets one. `ideas.md`'s "seed the reading cache from the listing view" would
+remove one of the two blocks entirely; it is worth more now than it was.
+
+**Cost to change my mind:** `TARGET_PARALLEL_PIECE = 512 * 1024` restores the old piece
+size, and `parallel_block_size` returning `self.blocksize` restores the old block. Both
+are one line. The measurement is re-runnable in ~10 minutes from the persistent
+session, and **must** be re-run rather than trusted: Zenodo's absolute throughput to
+this host moved 4x within one afternoon, and every number above is a within-run,
+order-rotated comparison for that reason.
