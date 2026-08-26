@@ -2141,3 +2141,109 @@ turns out to be too strict, moving a key between `MACHINE_KEYS` and `CONTENT_KEY
 one line and the test above will notice. If layering turns out to be unwanted, deleting
 `config.py` and the `_setting` calls restores exactly the environment-variable
 behaviour that preceded it.
+
+---
+
+## D31 — BioStudies' **sharing key** is a credential, and the `.dvc` file survives publication
+
+A depositor sharing an unreleased BioImage Archive study sends a link with a key on
+it: `…/studies/S-BIAD3080?key=<uuid>`. Reviewers get the same link. The requirement
+that came with it is sharper than "support the key": **one committed `.dvc` file that
+works for a reviewer holding a key before release, for the depositor, and for anyone
+at all afterwards.**
+
+### The API behaviour, which upstream does not document
+
+Measured against the live service, because the help pages and the REST docs do not
+mention it:
+
+| request | no key | `?key=` |
+|---|---|---|
+| `/api/v1/studies/{acc}/info` | **403** | 200 |
+| `/api/v1/studies/{acc}` | **403** | 200 |
+| `/api/v1/files/{acc}?…` | **200 `{}`** | 200, full listing |
+
+Three things fall out of that table:
+
+* **Query parameter only.** `X-Session-Token: <key>` is refused with 403.
+* **`/files` does not 403; it returns an empty object.** So a private study and a
+  missing one are indistinguishable there — which is why `study_info` uses
+  `/studies/{acc}/info` as the existence check (a decision made for a different
+  reason, and it pays again here).
+* **A stale key is harmless.** A released study answers 200 with a key that is wrong,
+  expired, or nonsense. So archivefs sends the key whenever it holds one, without
+  first checking whether the study is public: nothing is gained by asking twice, and a
+  depositor's key can stay in place after release.
+
+BioStudies' own name for it, in the `/info` payload, is `seckey`.
+
+### The URL *is* the capability
+
+The important discovery is not the query parameter. An unreleased study is served from
+a path that contains the key:
+
+    relPath = .private/aa/aaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/S-BIAD/080/S-BIAD3080
+
+that is `key[:2]/key[2:]`. A ranged GET on it returns **206 with no key parameter at
+all**, and the same path minus the key is 404. It is a presigned URL that never
+expires — so the key leaks through anything that prints a URL, which for this codebase
+means every error message: `_request` interpolates the URL into `AuthenticationError`
+and `ArchiveNotFoundError`.
+
+Hence `_redact`, a new hook on `ArchiveFileSystem` — identity everywhere except BIA,
+which masks both shapes. **Both**, and that was not the first version: the first masked
+only the `.private/` path, and a test caught the `?key=` query parameter — which
+archivefs itself adds — leaking through the very handler written to stop it.
+
+### Decision
+
+`key` is a declared `Credential` with `secret=True`, `required=False`, and a new
+`scoped=True`. Scoping is the shape of the thing rather than a nicety: EGA issues one
+username and password for every dataset you are authorised for, while BioStudies issues
+a link per deposit, so a single value stops working at the second private study. The
+file holds a mapping, with a flat entry beside it as the catch-all for the reviewer who
+has exactly one:
+
+    {"keys": {"S-BIAD3080": "…"}}      # several
+    {"key": "…"}                        # one, applies to whatever you ask for
+
+Everything else follows the existing policy unchanged: `secret=True` keeps `key` out of
+`registry.Backend.config`, so `--fs-config key=…` dies inside DVC's own config
+validator; `-o key=…` is refused by `CredentialResolver`; the file's mode is checked.
+
+### Why the `.dvc` file is invariant
+
+Not by care — by construction, and this is the part worth being precise about.
+`dvc_data`'s `Meta.from_info` keeps a **fixed** field set out of an `info()` dict
+(`size`, `md5`, `etag`, `checksum`, `version_id`, `mtime`, …). Everything else archivefs
+reports, including the whole `bia` provenance block, is discarded before anything is
+written. So of the things that change at publication —
+
+| field | changes at release? | recorded? |
+|---|---|---|
+| accession + interior path | no | **yes** (`deps[].path`) |
+| content md5 | no | **yes** |
+| size | no | **yes** |
+| `relPath` / `httpLink` | **yes** — gains/loses `.private/<key>` | no |
+| `isPublic`, `released` | **yes** | no |
+
+— none of the mutable ones is in the file. Verified end to end against the live private
+study: `dvc import-url` succeeded with the key, and the key and the string `.private`
+appear in **no** file DVC wrote — not the `.dvc`, not `.dvc/config`, not `.dvc/tmp`.
+
+`relpath` survives in the provenance block, masked to `.private/<key>` rather than
+dropped: that a deposit is unreleased is worth reporting, and `archivefs stat` prints
+it to stdout, which ends up in logs as readily as stderr does.
+
+### What this does *not* buy
+
+BIA-submitted still declares no immutability basis, so it is not version-aware and DVC
+will not treat it as fallback storage (D6/D17/D23). A reviewer cannot `dvc pull` a
+depositor's completed import from BIA; they run `dvc import-url` themselves with their
+own copy of the key. That is arguably correct rather than merely unfinished — an
+unreleased deposit is *mutable*, so treating it as immutable storage would be a lie —
+and a `.chiro` sidecar is the route to changing it, since it supplies the checksums BIA
+does not.
+
+**Cost to change my mind:** the credential declaration is one list entry; deleting it
+returns BIA to anonymous-only, and `_redact` becomes dead code rather than wrong code.

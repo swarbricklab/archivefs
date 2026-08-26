@@ -284,6 +284,20 @@ class ArchiveFileSystem(AbstractFileSystem):
         """
         return False
 
+    def _redact(self, url: str) -> str:
+        """Mask any secret the URL itself carries, before it reaches a message.
+
+        Identity for every archive where a URL is just an address. It is not one
+        everywhere: BioStudies serves a pre-publication study from a path that
+        *contains* the study's access key, so the URL is the capability — like a
+        presigned URL that never expires. Interpolating that into an exception, which
+        is what every error here does, would put a working credential into whatever
+        log caught it, and a pipeline log is the one place nobody thinks to check.
+
+        Subclasses override; see :meth:`BIAFileSystem._redact`.
+        """
+        return url
+
     def _auth_remediation(self, status: int, url: str) -> str:
         if not type(self).credentials:
             # Careful about the claim here. *archivefs* sends no credentials to
@@ -355,16 +369,17 @@ class ArchiveFileSystem(AbstractFileSystem):
                 # blaming a credential that was never sent.
                 uses_credentials = bool(auth_headers)
                 origin = (self.creds.describe() or None) if uses_credentials else None
+                safe = self._redact(url)
                 raise AuthenticationError(
                     self.archive_name,
-                    f"HTTP {status} for {url}",
-                    self._auth_remediation(status, url),
+                    f"HTTP {status} for {safe}",
+                    self._auth_remediation(status, safe),
                     source=origin,
                     used_credentials=uses_credentials,
                 )
             if status == 404:
                 raise ArchiveNotFoundError(
-                    f"{self.archive_name} has no such resource: {url}"
+                    f"{self.archive_name} has no such resource: {self._redact(url)}"
                 )
             if status in self.retry_statuses:
                 if attempt > self.max_retries:

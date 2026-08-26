@@ -210,8 +210,8 @@ PROTOCOLS: dict[str, Backend] = {
         class_path="archivefs.backends.bia.BIAFileSystem",
         extra=None,
         summary=(
-            "BioImage Archive via BioStudies (open; submitted files + OME-Zarr "
-            "conversions)"
+            "BioImage Archive via BioStudies (submitted files + OME-Zarr "
+            "conversions; unreleased studies via a sharing key)"
         ),
         requires=("requests",),
         config={
