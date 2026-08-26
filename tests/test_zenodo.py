@@ -701,6 +701,165 @@ def test_a_failed_piece_fails_the_read_rather_than_leaving_a_hole(zipped, monkey
         fs.cat_file(f"{RECID}/archive.zip/a.bin")
 
 
+# ------------------------------------------------ plain files (issue #14)
+
+#: Bigger than one 16 MiB round, so a whole-object read has to window rather than
+#: put every piece of it on the wire at once.
+PLAIN = os.urandom(20 << 20)
+
+
+@pytest.fixture
+def plain(fake_zenodo):
+    """Serve one plain (non-ZIP) object big enough to be worth splitting."""
+
+    def make(**options):
+        fake_zenodo.bodies["big.bin"] = PLAIN
+        fake_zenodo.record["files"].append(
+            {
+                "id": "ccc",
+                "key": "big.bin",
+                "size": len(PLAIN),
+                "checksum": f"md5:{hashlib.md5(PLAIN).hexdigest()}",  # noqa: S324
+                "links": {
+                    "self": f"https://zenodo.org/api/records/{RECID}/files/big.bin/content"
+                },
+            }
+        )
+        return ZenodoFileSystem(skip_instance_cache=True, **options)
+
+    return make
+
+
+def rounds_issued(fs) -> list[list[tuple[int, int]]]:
+    """Record each parallel round `fs` issues, without changing what it fetches."""
+    seen: list[list[tuple[int, int]]] = []
+    real = fs.fetch_ranges
+
+    def spy(info, spans):
+        seen.append(list(spans))
+        return real(info, spans)
+
+    fs.fetch_ranges = spy
+    return seen
+
+
+def test_a_plain_file_is_read_over_many_connections(plain):
+    """Issue #14: `fetch_ranges` and `split_span` were reachable from one place.
+
+    Only Zenodo's ZIP member view had a `multi_fetcher`, so a plain object went out
+    as a single request — and a single connection sustains ~0.30 MB/s whatever it is
+    asked for, against 9.70-14.03 for the same bytes cut into 2 MiB pieces. A 2.5 GB
+    `.ome.tif` was hours where it should be minutes.
+    """
+    fs = plain()
+    rounds = rounds_issued(fs)
+    assert fs.cat_file(f"{RECID}/big.bin") == PLAIN
+    spans = [span for round_ in rounds for span in round_]
+    assert len(spans) > 8, f"only {len(spans)} pieces for 20 MiB"
+    assert all(end - start <= TARGET_PARALLEL_PIECE for start, end in spans)
+    # contiguous and complete: no gap, no overlap, nothing beyond the object
+    assert spans[0][0] == 0 and spans[-1][1] == len(PLAIN)
+    assert all(a[1] == b[0] for a, b in zip(spans, spans[1:]))
+
+
+def test_a_whole_object_read_holds_only_one_round_in_flight(plain):
+    """The split has to be windowed or it trades slowness for a memory blow-up.
+
+    20 MiB is 10 pieces; a 2.5 GB `.ome.tif` is 1250, all live at once before the
+    join, so the peak would be the file twice over. Windowing at one round keeps
+    that flat — and one round is `MAX_BYTES_IN_FLIGHT`, the measured peak of the
+    throughput curve, so the same bound does both jobs.
+    """
+    fs = plain()
+    rounds = rounds_issued(fs)
+    fs.cat_file(f"{RECID}/big.bin")
+    assert len(rounds) > 1, "20 MiB went out as one round; nothing was windowed"
+    for round_ in rounds:
+        in_flight = sum(end - start for start, end in round_)
+        assert in_flight <= MAX_BYTES_IN_FLIGHT, in_flight
+
+
+def test_reading_a_plain_file_through_open_splits_each_block(plain):
+    """`fs.open()` is the streaming path — the CLI's `get` and DVC's hashing.
+
+    It never reaches `cat_file`, so splitting there alone would leave every actual
+    download exactly as slow as it was.
+    """
+    fs = plain()
+    rounds = rounds_issued(fs)
+    with fs.open(f"{RECID}/big.bin", "rb") as handle:
+        body = handle.read()
+    assert body == PLAIN
+    assert sum(len(round_) for round_ in rounds) > 8
+    assert all(
+        end - start <= TARGET_PARALLEL_PIECE for round_ in rounds for start, end in round_
+    )
+
+
+def test_a_large_plain_file_gets_a_block_that_fills_every_connection(fs, monkeypatch):
+    """A block is one round of pieces, so 4 MiB of it was 8 x 512 KiB.
+
+    Measured, that is 5.76 MB/s where 8 x 2 MiB is 9.70-14.03 — the block has to
+    follow the connection count, not stay at fsspec's class default.
+    """
+    real = fs.info
+    monkeypatch.setattr(
+        fs, "info", lambda path, **kw: {**real(path, **kw), "size": 2_000_000_000}
+    )
+    with fs.open(f"{RECID}/samples.csv", "rb") as handle:
+        assert handle.blocksize == MAX_BYTES_IN_FLIGHT
+
+
+def test_a_small_plain_file_keeps_a_small_block(plain):
+    """The eighth-of-the-object bound is what stops this being an eager fetch.
+
+    Enlarging every block would mean a 100-byte peek at a modest file dragged 16 MiB
+    behind it — D25's eager container fetch, arrived at from the other side.
+    """
+    fs = plain()
+    with fs.open(f"{RECID}/samples.csv", "rb") as handle:
+        assert handle.blocksize == fs.blocksize
+
+
+def test_one_connection_is_still_one_request(plain):
+    """`max_concurrent_reads=1` is how a caller opts out; it must stay an opt-out.
+
+    Windowing an unsplit read would turn one request into forty small ones, each
+    with a ~0.1 s fixed cost, which is a regression handed to the person who asked
+    to be gentle.
+    """
+    fs = plain(max_concurrent_reads=1)
+    requests = {"n": 0}
+    real = fs._fetch_range_locked
+
+    def counted(info, start, end):
+        requests["n"] += 1
+        return real(info, start, end)
+
+    fs._fetch_range_locked = counted
+    assert fs.cat_file(f"{RECID}/big.bin") == PLAIN
+    assert requests["n"] == 1, requests["n"]
+
+
+def test_a_short_piece_fails_closed_rather_than_sliding_the_file(plain):
+    """Assembly places each piece at *its own* offset and checks the length.
+
+    Appending at a running offset instead would absorb a short piece by shifting
+    every later byte left — producing a file of the wrong length that still looks
+    like data, which then gets hashed and committed.
+    """
+    fs = plain()
+    real = fs.fetch_ranges
+
+    def shorten(info, spans):
+        pieces = real(info, spans)
+        return [pieces[0][:-16], *pieces[1:]]
+
+    fs.fetch_ranges = shorten
+    with pytest.raises(OSError, match="refusing to assemble a short read"):
+        fs.cat_file(f"{RECID}/big.bin")
+
+
 # ------------------------------------------------- the wrapper directory (D24)
 
 ZIP = f"{RECID}/archive.zip"

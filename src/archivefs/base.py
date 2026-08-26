@@ -719,6 +719,53 @@ class ArchiveFileSystem(AbstractFileSystem):
             # returning short data here would corrupt a member with no error.
             return list(pool.map(lambda span: self._fetch_range(info, *span), spans))
 
+    def fetch_span(self, info: dict, start: int, end: int) -> bytes:
+        """Fetch one contiguous run over several connections, with bounded memory.
+
+        :meth:`fetch_ranges` is the parallel primitive; this is what to call when
+        what you have is *a run*, which is what every ordinary read is. It cuts the
+        run with :meth:`split_span` and — the part that is not one line — fetches it
+        a **window at a time** rather than all at once.
+
+        Without the window a whole-object read is worse than the slowness it fixes:
+        `archivefs get` of a 2.5 GB file cuts into 1250 pieces of 2 MiB, every one
+        of them live at the same instant, and then joins them. The window holds
+        `max_concurrent_reads x piece` in flight instead, which is
+        :data:`MAX_BYTES_IN_FLIGHT` — so the bound that keeps memory flat is the
+        same bound that makes the transfer fast (§4 of
+        ``docs/evidence/zenodo-piece-size-2026-08-25.md``).
+
+        The result is still assembled whole, because that is :meth:`cat_file`'s
+        contract. Streaming a large object to disk wants ``fs.open()``, which reads
+        a block at a time and gets the same parallelism within each block.
+
+        At ``max_concurrent_reads == 1`` this is the single request it always was:
+        opting out of concurrency should not buy a stream of small requests instead.
+        """
+        size = info.get("size")
+        if size is not None:
+            end = min(end, size)
+        if end <= start:
+            return b""
+        window = self.max_concurrent_reads * self.parallel_piece_size()
+        if self.max_concurrent_reads < 2 or end - start <= window:
+            return b"".join(self.fetch_ranges(info, self.split_span(start, end)))
+        out = bytearray(end - start)
+        buffer = memoryview(out)
+        for base in range(start, end, window):
+            spans = self.split_span(base, min(base + window, end))
+            for (first, last), piece in zip(spans, self.fetch_ranges(info, spans)):
+                if len(piece) != last - first:
+                    # Placing a short piece at a running offset would slide every
+                    # later byte and yield a plausible, wrong file. Fail closed.
+                    raise OSError(
+                        f"{self.archive_name} returned {len(piece)} bytes where "
+                        f"{last - first} were requested at offset {first} of "
+                        f"{info.get('name')}; refusing to assemble a short read."
+                    )
+                buffer[first - start : last - start] = piece
+        return bytes(out)
+
     def parallel_piece_size(self) -> int:
         """Bytes per parallel request: the measured optimum, or less if that would
         put more than :data:`MAX_BYTES_IN_FLIGHT` on the wire at once.
@@ -755,9 +802,10 @@ class ArchiveFileSystem(AbstractFileSystem):
         the idea that the container's size belongs in this decision was right. Zenodo
         publishes it in the record metadata, so it costs no request to consult.
 
-        Only for caches that split (Zenodo's ``mmap`` member view today). The listing
-        view must keep the small exact-range cache or ``ls`` stops being free (D25),
-        and an explicitly chosen block size is returned untouched.
+        For any cache whose misses are fetched in parallel: Zenodo's ``mmap`` member
+        view, and — since #14 — every plain file opened through :meth:`_open`. The
+        ZIP *listing* view must keep the small exact-range cache or ``ls`` stops
+        being free (D25), and an explicitly chosen block size is returned untouched.
         """
         if self._block_size_chosen:
             return self.blocksize
@@ -937,7 +985,9 @@ class ArchiveFileSystem(AbstractFileSystem):
         size = self._size_of(info)
         begin = 0 if start is None else (start if start >= 0 else max(0, size + start))
         finish = size if end is None else min(size, end if end >= 0 else size + end)
-        return self._fetch_range(info, begin, finish)
+        # Split, and windowed: this asks for the *whole* range, so before #14 a
+        # `cat_file` of a 2.5 GB object was one HTTP request at ~0.30 MB/s.
+        return self.fetch_span(info, begin, finish)
 
     def _open(
         self,
@@ -960,7 +1010,11 @@ class ArchiveFileSystem(AbstractFileSystem):
             self,
             info,
             mode=mode,
-            block_size=block_size or self.blocksize,
+            # A block is one round of parallel pieces, so the default follows the
+            # connection count rather than staying at the class's 4 MiB: 8 x 512 KiB
+            # measured 5.76 MB/s where 8 x 2 MiB measured 9.70-14.03. Bounded by an
+            # eighth of the object, so a small read of a small file stays small.
+            block_size=block_size or self.parallel_block_size(info.get("size")),
             cache_options=cache_options,
             **kwargs,
         )
@@ -1012,7 +1066,10 @@ class ArchiveFile(AbstractBufferedFile):
         super().__init__(fs, info["name"], size=fs._size_of(info), **kwargs)
 
     def _fetch_range(self, start: int, end: int) -> bytes:
-        return self.fs._fetch_range(self._info, start, min(end, self.size))
+        # One block, but carried by several connections. A single connection to
+        # these archives sustains ~0.30 MB/s whatever size it is asked for, so an
+        # unsplit block is the whole of the 30x gap in issue #14.
+        return self.fs.fetch_span(self._info, start, min(end, self.size))
 
     def _upload_chunk(self, final: bool = False) -> None:
         raise NotSupportedError(f"{self.fs.archive_name} files are read-only")
