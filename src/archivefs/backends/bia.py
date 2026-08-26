@@ -62,7 +62,7 @@ from __future__ import annotations
 import logging
 import re
 from typing import Any, ClassVar
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlparse
 from xml.etree import ElementTree
 
 from archivefs.base import ArchiveFileSystem
@@ -481,6 +481,10 @@ class BIAFileSystem(ArchiveFileSystem):
             file_key="keys",
             scoped=True,
             required=False,
+            # A capability, not an identity: BioStudies issues it per study so the
+            # depositor can mail it to reviewers. The only credential archivefs will
+            # put into a bundle — see docs/reviewer-access.md.
+            shareable=True,
             help=(
                 "the key from a BioStudies sharing link "
                 "(…/studies/S-BIAD3080?key=<uuid>). Only needed before the study "
@@ -741,6 +745,41 @@ class BIAFileSystem(ArchiveFileSystem):
         for pattern in KEY_IN_URL:
             url = pattern.sub(r"\1<key>", url)
         return url
+
+    @classmethod
+    def grants_from_link(cls, url: str) -> list[tuple[str, str | None, str]]:
+        """Pull the study and its key out of a BioStudies sharing link.
+
+        The link is the thing a depositor already has and already sends —
+        ``…/studies/S-BIAD3080?key=<uuid>`` — so a reviewer pasting it back is the
+        shortest path from "I was emailed access" to "dvc pull works", with no second
+        artefact to mislay.
+
+        The accession is read out of the path so the key lands scoped to one study.
+        A link with a key and no recognisable accession still yields a grant, with
+        ``None`` for the scope: the resolver treats a flat entry as a catch-all, and
+        refusing a working key because we could not name what it opens would be
+        pedantry. The caller says which it got.
+        """
+        parsed = urlparse(url.strip())
+        keys = parse_qs(parsed.query).get("key") or []
+        if not keys or not keys[0]:
+            return []
+        parts = [part for part in parsed.path.split("/") if part]
+        if parsed.scheme == cls.protocol and parsed.netloc:
+            # bia://S-BIAD3080?key=… — the accession is the netloc, not a path part.
+            parts = [parsed.netloc, *parts]
+        accession = next(
+            (
+                candidate
+                for previous, candidate in zip(parts, parts[1:])
+                if previous in ("studies", "files") and ACCESSION_RE.match(candidate)
+            ),
+            None,
+        )
+        if accession is None and parts and ACCESSION_RE.match(parts[0]):
+            accession = parts[0]
+        return [("key", accession, keys[0])]
 
     def _auth_remediation(self, status: int, url: str) -> str:
         """Two different 403s, and conflating them sends people the wrong way.

@@ -2247,3 +2247,141 @@ does not.
 
 **Cost to change my mind:** the credential declaration is one list entry; deleting it
 returns BIA to anonymous-only, and `_redact` becomes dead code rather than wrong code.
+
+## D32 — a credential bundle carries **capabilities, never identities**, and is derived from the repository
+
+D31 made an unreleased BioStudies study readable with a sharing key. The next question
+is operational: how does a depositor get that key to three reviewers? The ask was "a
+zip file of the credentials they need, set up in one go", and the mechanics of that are
+easy. The security shape of it is the part worth writing down.
+
+### The distinction the feature turns on
+
+Ask archivefs to "bundle up the credentials" and, run naively over one researcher's
+configuration, it would produce a file containing their EGA account password, their
+Zenodo personal access token, and their dbGaP `.ngc` — addressed to four strangers.
+None of those grants access to a *deposit*. They grant access to a *person*.
+
+So `Credential` gained one field, `shareable`, defaulting to `False`:
+
+| | capability | identity |
+|---|---|---|
+| example | BioStudies per-study sharing key | EGA password, Zenodo token, dbGaP `.ngc` |
+| opens | one named deposit | everything the account can reach |
+| revoked by | regenerating that deposit's link | rotating the account |
+| in a bundle | **yes** | **refused, with no flag** |
+
+Exactly one credential in archivefs is marked, and
+`test_exactly_one_credential_is_shareable_and_it_is_a_per_study_key` enumerates the
+answer so that marking a second one has to come past a test whose reviewer is looking
+at the security question rather than at plumbing. A companion test asserts that
+`shareable` implies `scoped`, because unscoped-and-shareable is a contradiction: it
+would open everything.
+
+The flag lives on the declaration rather than in the exporter deliberately — the person
+who knows whether a new archive's secret is safe to hand on is the person adding that
+archive, and a default of `False` means forgetting to think about it fails closed.
+
+**Import enforces it too**, not just export. A hand-edited manifest carrying
+`ega:password` is refused at install with "whoever sent this should rotate it". The
+producer and the consumer are on different machines and only one of them is ours.
+
+### Derived from the repository, not from the credential store
+
+The bundle is built by scanning the project's `*.dvc`, `dvc.lock`, `dvc.yaml` and
+`.dvc/config` for archivefs URLs and exporting keys for exactly the deposits found.
+A depositor with three papers in review has three keys in one file; reviewers of the
+first get one.
+
+Text matching, not YAML parsing: the CLI is deliberately stdlib-only and has no YAML
+reader, and "does this repo mention `bia://S-BIAD3080`" does not need one. It
+over-matches rather than under-matches — a URL in a `desc:` field counts — which is the
+safe direction, since a spurious row costs a line of output where a missed one costs a
+reviewer their access.
+
+The report is the second half of the value, and it covers the deposits a bundle
+*cannot* help with:
+
+```
+  bia://S-BIAD3080          included     key from ~/.config/archivefs/bia.json (S-BIAD3080)
+  ega://EGAD00001006673     personal     password, username authenticate an account, not a
+                                         deposit — a reviewer needs their own …
+  geo://GSE12345            public       needs no credential; nothing to hand over
+  zenodo://1486184          personal     public unless this deposit is restricted; …
+```
+
+An "included" row names its *source*, not just that a value was found, because a scoped
+credential can resolve from a flat one: `$BIA_KEY` answers for any accession asked of
+it. Exporting on that basis pins one study's key to another, and the failure surfaces
+as a 403 on the reviewer's machine with nothing connecting it to the depositor's
+environment. So the row says `from $BIA_KEY, which is not per-study — check it is this
+deposit's`.
+
+### No crypto, on purpose
+
+There is no `--password`. Python's `zipfile` cannot *write* encrypted archives at all,
+and the legacy ZipCrypto it can read has been broken for decades; adding `pyzipper` to
+a stdlib-only CLI would buy weaker protection than the alternative. The alternative is
+that the bundle reads and writes stdin/stdout, so `age` or `gpg` composes and does the
+job properly:
+
+```console
+archivefs credentials export --out - | age -r age1… > pack.age
+age -d pack.age | archivefs credentials import -
+```
+
+What archivefs does instead is the accident-proofing, because the realistic threat is
+not an interceptor, it is `git add -A`:
+
+* `0600` on write, via an atomic temp file whose mode is set *before* the content goes
+  in, so there is no window at the default umask;
+* **refused inside a git repository** unless the path is already ignored — `git
+  check-ignore` is asked rather than `.gitignore` re-implemented — because rewriting
+  history does not un-publish a key;
+* refused onto a terminal, where binary output is useless and the keys would be in the
+  scrollback;
+* no value in any human-readable output, in any mode: not the report, not
+  `credentials list`, not the conflict error, not `--json`. Asserted directly against
+  the literal secret in tests, because "we do not print it" decays one helpful error
+  message at a time.
+
+### Import merges, and never overwrites silently
+
+A key differing from one already held is a **conflict**: nothing is written, the error
+names the deposit, and `--force` is required. The failure that prevents — a stale key
+quietly replacing a working one — surfaces much later as an unexplained 403. Same
+argument as D30's refusal to warn: an invisible action is worse than a loud stop.
+
+`test_what_import_writes_is_what_the_resolver_reads` pins the two halves together.
+They live in different modules and read the same declaration, and nothing else would
+notice them drifting apart until a reviewer's pull failed.
+
+### The route with no artefact
+
+For BioStudies the URL *is* the capability (D31), so a sharing link is already a
+bundle. `credentials import -` accepts one:
+
+```console
+echo 'https://www.ebi.ac.uk/biostudies/…/studies/S-BIAD3080?key=…' \
+  | archivefs credentials import -
+```
+
+Parsed by `ArchiveFileSystem.grants_from_link`, a classmethod on the backend — the
+inverse of `_redact` and, for the same reason, the backend's business rather than the
+bundler's. **stdin, not an argument**: an argument lands in shell history and the
+process table, which would sit oddly beside D16's refusal of credentials on the command
+line.
+
+Prefer this when it applies. It is the whole feature in one line of a cover letter,
+with nothing to mislay and nothing to go stale.
+
+### Naming
+
+`archivefs credentials`, not `archivefs config import` as originally sketched.
+D30's config model raises `ConfigError` on a credential key by design; a `config`
+subcommand whose job is installing secrets would undercut the one sentence that model
+is built to make true.
+
+**Cost to change my mind:** the `shareable` flag is one line per credential. Deleting
+`bundle.py` and its subcommand removes the feature entirely; nothing else imports it,
+and the sharing-key support from D31 stands on its own without it.

@@ -8,6 +8,7 @@
 | use any archive as a DVC dependency | [`using-with-dvc.md`](using-with-dvc.md) |
 | set a default once instead of per command | [`configuration.md`](configuration.md) |
 | set up EGA (or restricted Zenodo) access safely | [`credentials.md`](credentials.md) |
+| give reviewers access to an unreleased deposit | [`reviewer-access.md`](reviewer-access.md) |
 | know why something is built the way it is | [`design.md`](design.md), [`decisions.md`](decisions.md) |
 
 ## Command reference
@@ -25,6 +26,7 @@ One page per subcommand: syntax, every option, worked scenarios, exit codes.
 | [`archivefs dvc`](cli-dvc.md) | register the protocols with DVC — required once per environment |
 | [`archivefs config`](configuration.md) | the configuration layers, and what they resolve to |
 | [`archivefs cache`](cli-cache.md) | the on-disk block cache that lets an interrupted import resume |
+| [`archivefs credentials`](reviewer-access.md) | what access you hold, and how to hand it to a reviewer |
 
 Every command that takes a URL also takes `-o KEY=VALUE`.
 

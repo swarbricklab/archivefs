@@ -101,7 +101,16 @@ and applies to whatever you ask for:
 ```
 
 A key filed under a specific accession wins over the flat one. `$BIA_KEY` is the
-one-study shortcut and beats both.
+one-study shortcut and beats both — but being flat, it answers for *any* accession,
+which matters when packaging keys for reviewers
+([`reviewer-access.md`](reviewer-access.md)).
+
+You do not have to write this file by hand. Paste the link instead:
+
+```console
+$ echo 'https://www.ebi.ac.uk/biostudies/…/studies/S-BIAD3080?key=…' \
+    | archivefs credentials import -
+```
 
 **Only needed before release, and harmless after.** Measured against the live API, a
 released study answers `200` even with a stale or nonsense key, so a depositor can
@@ -111,6 +120,41 @@ leave the key in place and nothing breaks when the study goes public.
 a reviewer holding a key and a stranger after publication use the *same* `.dvc` file.
 See [`importing-from-bia.md`](importing-from-bia.md) and
 [`decisions.md`](decisions.md) D31.
+
+## Capability or identity: which of your credentials may be handed on
+
+A per-study key and an account password are both "credentials", and treating them
+alike is how a researcher ends up mailing four reviewers their own EGA password.
+archivefs keeps them apart in the declaration:
+
+| | capability | identity |
+|---|---|---|
+| example | BioStudies sharing key | EGA password, Zenodo token, dbGaP `.ngc` |
+| opens | one named deposit | everything your account can reach |
+| revoked by | regenerating that deposit's link | rotating your account |
+| may be packaged and sent | **yes** | **refused** |
+
+`Credential.shareable` marks the first kind, defaults to `False`, and only BIA's
+`key` sets it. Nothing in archivefs will put anything else into a bundle, whatever
+flags you pass. See [`reviewer-access.md`](reviewer-access.md) for the commands, and
+`test_exactly_one_credential_is_shareable_and_it_is_a_per_study_key` for the tripwire
+that keeps the list honest.
+
+```console
+$ archivefs credentials list
+credentials archivefs can see. Values are never shown.
+
+  bia://     key        shareable  ~/.config/archivefs/bia.json  [S-BIAD3080]
+  ega://     username   personal   $EGA_USERNAME
+             password   personal   $EGA_PASSWORD
+  geo://     public; needs no credential
+  zenodo://  token      personal   not found (optional)
+```
+
+Installing one you were sent is `archivefs credentials import`, which writes `0600`,
+merges rather than replaces, and refuses to overwrite a differing value. Between
+them these are the only commands that *write* a credential; everything else in
+archivefs only reads.
 
 ## What is refused, and by whom
 
@@ -258,6 +302,7 @@ An `archivefs check-config` that automates this is [`ideas.md`](ideas.md) #17.
 
 ## See also
 
+[`reviewer-access.md`](reviewer-access.md) for handing access to reviewers ·
 [`using-with-dvc.md`](using-with-dvc.md) · [`cli-dvc.md`](cli-dvc.md) ·
 [`decisions.md`](decisions.md) D16 for why this is enforced rather than documented,
 D1–D3 for EGA specifics · `src/archivefs/credentials.py` if you want the enforcement
