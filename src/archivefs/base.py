@@ -798,6 +798,12 @@ class ArchiveFileSystem(AbstractFileSystem):
         the failure mode config models are famous for. Anything *else* going wrong
         while looking for one is not: a filesystem must still open on a machine with
         an exotic ``$XDG_CONFIG_DIRS`` or an unreadable cwd.
+
+        Read once per filesystem and deliberately **not** memoised across them: the
+        layers depend on the working directory and on four environment variables, so a
+        process-wide cache would need all five in its key and would still be a stale
+        answer waiting to happen. Measured, this is ~0.45 ms of a 1.8 ms construction,
+        and construction happens once per filesystem rather than once per read.
         """
         from archivefs import config
         from archivefs.errors import ConfigError
