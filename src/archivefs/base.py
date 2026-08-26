@@ -298,6 +298,21 @@ class ArchiveFileSystem(AbstractFileSystem):
         """
         return url
 
+    @classmethod
+    def grants_from_link(cls, url: str) -> list[tuple[str, str | None, str]]:
+        """Credentials carried *inside* a share link this archive issues.
+
+        The inverse of :meth:`_redact`, and it exists for the same reason: some
+        archives put the capability in the URL. A depositor already has such a link
+        — it is what they paste into a cover letter — so the cheapest possible
+        handover is for a reviewer to paste it straight back at us rather than be
+        sent a second artefact to look after.
+
+        Returns ``(credential name, scope, value)`` triples; empty for every archive
+        whose URLs are only addresses. Never fetches anything: this parses a string.
+        """
+        return []
+
     def _auth_remediation(self, status: int, url: str) -> str:
         if not type(self).credentials:
             # Careful about the claim here. *archivefs* sends no credentials to

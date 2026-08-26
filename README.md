@@ -144,7 +144,8 @@ run is entirely offline.
   how-to, from `conda env update` to a committed `.dvc` file.
 - **Using any archive with DVC:** [`docs/using-with-dvc.md`](docs/using-with-dvc.md) ·
   **credentials:** [`docs/credentials.md`](docs/credentials.md)
-- **Decisions and deviations:** [`docs/decisions.md`](docs/decisions.md) — seventeen
+  **reviewer access:** [`docs/reviewer-access.md`](docs/reviewer-access.md)
+- **Decisions and deviations:** [`docs/decisions.md`](docs/decisions.md) — thirty-two
   entries, including the resolved EGA checksum question, several undocumented archive
   behaviours worth knowing about, the credential routes closed off in D16, why a
   reviewer can only pull from the archive for a *partial* import (D17), and the silent

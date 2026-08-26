@@ -229,9 +229,22 @@ $ archivefs ls -l bia://S-BIAD3080 | head -3
 $ dvc import-url 'bia://S-BIAD3080/images/he/…/P17_Xe5k_matrix.csv' matrix.csv
 ```
 
-For more than one private study, or to avoid a variable in your shell history, use
-`~/.config/archivefs/bia.json` at `chmod 600` —
-[`credentials.md`](credentials.md) has the shape.
+For more than one private study, or to avoid a variable in your shell history, let
+archivefs file the link for you — it writes `~/.config/archivefs/bia.json` at
+`chmod 600`, reading from stdin so the key never reaches your shell history:
+
+```console
+$ echo 'https://www.ebi.ac.uk/biostudies/bioimages/studies/S-BIAD3080?key=…' \
+    | archivefs credentials import -
+```
+
+[`credentials.md`](credentials.md) has the file's shape if you would rather write it
+yourself.
+
+**Sending access to reviewers or co-authors** is
+[`reviewer-access.md`](reviewer-access.md): `archivefs credentials export` packages
+the keys this repository's deposits need — and only those — and tells you which of
+its dependencies no key can open.
 
 ### The `.dvc` file does not change at publication
 

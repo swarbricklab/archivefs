@@ -79,11 +79,30 @@ class Credential:
     #: accession to secret, and a flat ``name`` entry beside it still works as a
     #: catch-all for the common case of exactly one private study::
     #:
-    #:     {"keys": {"S-BIAD3080": "d62f…", "S-BIAD1234": "…"}}
-    #:     {"key": "d62f…"}          # applies to whatever you ask for
+    #:     {"keys": {"S-BIAD3080": "aaaaaaaa-…", "S-BIAD1234": "…"}}
+    #:     {"key": "aaaaaaaa-…"}     # applies to whatever you ask for
     scoped: bool = False
     #: is this a secret (must never be committed) or a plain identifier?
     secret: bool = True
+    #: May this value be *given to someone else*?
+    #:
+    #: Two things wear the word "credential" and they are not the same, which only
+    #: becomes load-bearing once something offers to package them up
+    #: (``archivefs credentials export``):
+    #:
+    #: * a **capability** — issued deliberately so it can be handed over, scoped to
+    #:   named data, revocable without touching your account. BioStudies' per-study
+    #:   sharing key is one: the depositor mails it to reviewers, and it opens that
+    #:   one unreleased study and nothing else.
+    #: * an **identity** — Zenodo's personal access token, an EGA password, a dbGaP
+    #:   ``.ngc``. Passing one to a reviewer does not grant them access to your data;
+    #:   it makes them you, for every deposit you can reach, until you rotate it.
+    #:
+    #: Default ``False``, so a new backend is un-shareable until someone writes down
+    #: why it is safe. The export path refuses anything not marked, which is why the
+    #: distinction lives here beside the declaration rather than in the exporter: the
+    #: person who knows the answer is the person adding the backend.
+    shareable: bool = False
     #: is the value a filesystem path that must exist? (dbGaP's ``.ngc``)
     is_path: bool = False
     required: bool = True
