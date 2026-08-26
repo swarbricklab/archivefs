@@ -97,6 +97,12 @@ starting again ([`cli-cache.md`](cli-cache.md)).
 Neither ever defaults to `$HOME`, and pointing either there warns: one entry is as
 large as the archive it caches, and a home quota is not (10 GB on Gadi).
 
+`$XDG_CACHE_HOME` is **not** consulted, deliberately. XDG names a location for caches;
+it is not consent for an entry the size of the archive. Someone exporting it is
+thinking about pip wheels and font caches, and on a cluster the directory is usually
+shared project space — so honouring it would turn this on for everyone who follows
+ordinary XDG advice. Say it here instead, where `archivefs config` will show it.
+
 ### A site default for everyone on the cluster
 
 `$XDG_CONFIG_DIRS` is already set to a shared directory on many HPC setups, which makes

@@ -2120,6 +2120,21 @@ the config file not being read at all.
 
 ### Cost of being wrong
 
+### One thing this made worse before it made it better
+
+The first version of the chain ended at `$XDG_CACHE_HOME`, on the reasoning that XDG
+already answers "where do caches go" and honouring a standard beats inventing a
+variable. That was wrong, and the config model is what makes it clearly wrong: XDG
+names a *location*, not consent for an entry the size of the archive. Someone
+exporting `XDG_CACHE_HOME` is thinking about pip wheels and font caches, and on a
+cluster the directory they point it at is shared project space — on this one, 78% full
+and at 85% of its inode quota. Honouring it would have enabled a 20 GB cache for
+anyone following ordinary XDG advice, which is exactly what D29 declined to do by
+default, arrived at through a standard instead of a hardcoded path.
+
+It is dropped. The `system` layer is the better answer to the same wish — lab-wide,
+explicit, one file, and visible in `archivefs config`.
+
 `archivefs config` shows every layer and what it resolved to, which is the diagnostic
 that makes a layered model debuggable rather than mysterious. If the classification
 turns out to be too strict, moving a key between `MACHINE_KEYS` and `CONTENT_KEYS` is

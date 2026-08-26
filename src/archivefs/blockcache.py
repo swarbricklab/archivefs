@@ -131,29 +131,23 @@ def cache_root(explicit: Any = None, configured: Any = None) -> Path | None:
     """Where persistent blocks go, or ``None`` for "do not persist".
 
     Chain: the filesystem's ``cache_dir`` argument, then ``$ARCHIVEFS_CACHE_DIR``,
-    then the config layers, then ``$XDG_CACHE_HOME``. Each step can also say *off*,
-    which is the direction that has to work — turning the cache off for one command
-    must not mean unsetting a variable the rest of the shell depends on.
+    then the config layers. Each step can also say *off*, which is the direction that
+    has to work — turning the cache off for one command must not mean unsetting a
+    variable the rest of the shell depends on.
 
-    ``$XDG_CACHE_HOME`` is honoured **only when it is set**. The XDG default for it is
-    ``~/.cache``, and one entry here is as large as the archive it caches, so falling
-    back to that default would put 20 GB against a home quota nobody sized for it.
-    Standards-compliant when the user has pointed it somewhere; never on its own.
+    **``$XDG_CACHE_HOME`` is deliberately not in that chain**, though it was for a
+    while. XDG names a *location* for caches; it is not consent for an entry the size
+    of the archive. Someone exporting it is thinking about pip wheels and font caches,
+    and on a cluster the directory they point it at is shared project space — so
+    honouring it here would enable a 20 GB cache nobody asked for, which is exactly
+    what D29 declined to do by default. Anyone who does want it on for every import
+    now has a better way to say so than a generic variable: one line in the config
+    file, visible in ``archivefs config``.
     """
     return _resolve(
-        (
-            explicit,
-            os.environ.get(CACHE_DIR_ENV),
-            configured,
-            _xdg_cache_dir(),
-        ),
+        (explicit, os.environ.get(CACHE_DIR_ENV), configured),
         "cache_dir",
     )
-
-
-def _xdg_cache_dir() -> str | None:
-    home = os.environ.get("XDG_CACHE_HOME")
-    return os.path.join(home, "archivefs") if home else None
 
 
 def scratch_root(explicit: Any = None, configured: Any = None) -> Path | None:

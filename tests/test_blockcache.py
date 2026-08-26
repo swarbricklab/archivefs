@@ -440,3 +440,18 @@ def test_pointing_either_directory_at_home_warns_but_is_allowed(
         else:
             assert blockcache.prepare(under_home, identity()) is not None
     assert "inside your home directory" in caplog.text
+
+
+def test_xdg_cache_home_does_not_enable_the_cache(tmp_path, monkeypatch):
+    """XDG names a place for caches; it is not consent for a 20 GB entry.
+
+    Someone exporting `XDG_CACHE_HOME` on a cluster is thinking about pip wheels, and
+    the directory is usually shared project space. Honouring it here would turn the
+    cache on for everyone who follows ordinary XDG advice — which is the "quietly
+    filling a shared filesystem" outcome D29 declined. The config file is the way to
+    ask for it, and it is visible in `archivefs config`.
+    """
+    monkeypatch.delenv(blockcache.CACHE_DIR_ENV, raising=False)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    assert blockcache.cache_root() is None
+    assert blockcache.cache_root(configured=str(tmp_path / "asked-for")) is not None
