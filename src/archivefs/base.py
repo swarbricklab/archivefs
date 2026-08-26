@@ -986,7 +986,8 @@ class ArchiveFileSystem(AbstractFileSystem):
         begin = 0 if start is None else (start if start >= 0 else max(0, size + start))
         finish = size if end is None else min(size, end if end >= 0 else size + end)
         # Split, and windowed: this asks for the *whole* range, so before #14 a
-        # `cat_file` of a 2.5 GB object was one HTTP request at ~0.30 MB/s.
+        # `cat_file` of a 2.5 GB object was one HTTP request — at the 0.36 MB/s a
+        # single connection gets out of an object Zenodo has not served recently.
         return self.fetch_span(info, begin, finish)
 
     def _open(
@@ -1012,8 +1013,9 @@ class ArchiveFileSystem(AbstractFileSystem):
             mode=mode,
             # A block is one round of parallel pieces, so the default follows the
             # connection count rather than staying at the class's 4 MiB: 8 x 512 KiB
-            # measured 5.76 MB/s where 8 x 2 MiB measured 9.70-14.03. Bounded by an
-            # eighth of the object, so a small read of a small file stays small.
+            # measured 5.76 MB/s against 8 x 2 MiB's 9.70-14.03 (D27, on a warm
+            # object). Bounded by an eighth of the object, so a small read of a small
+            # file stays small.
             block_size=block_size or self.parallel_block_size(info.get("size")),
             cache_options=cache_options,
             **kwargs,
@@ -1066,9 +1068,9 @@ class ArchiveFile(AbstractBufferedFile):
         super().__init__(fs, info["name"], size=fs._size_of(info), **kwargs)
 
     def _fetch_range(self, start: int, end: int) -> bytes:
-        # One block, but carried by several connections. A single connection to
-        # these archives sustains ~0.30 MB/s whatever size it is asked for, so an
-        # unsplit block is the whole of the 30x gap in issue #14.
+        # One block, but carried by several connections. Measured on five cold
+        # Zenodo objects, that is worth 6.48x (0.36 -> 2.32 MB/s); on a warm one it
+        # is worth nothing, and an import only ever reads cold. See D28.
         return self.fs.fetch_span(self._info, start, min(end, self.size))
 
     def _upload_chunk(self, final: bool = False) -> None:

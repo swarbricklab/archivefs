@@ -1816,3 +1816,92 @@ are one line. The measurement is re-runnable in ~10 minutes from the persistent
 session, and **must** be re-run rather than trusted: Zenodo's absolute throughput to
 this host moved 4x within one afternoon, and every number above is a within-run,
 order-rotated comparison for that reason.
+
+---
+
+## D28 — 🩹 a **plain file** is read over several connections too, in bounded windows
+
+Everything D26 and D27 built — `fetch_ranges`, `split_span`, the shared semaphore —
+was reachable from exactly one place: the `multi_fetcher` on Zenodo's ZIP member view.
+A plain file went out over a single connection, and `cat_file` was worse: it passed the
+**whole object** as one range, so reading a 2.5 GB `.ome.tif` was one HTTP request.
+Issue #14, found while measuring #12 and filed rather than folded in.
+
+### What it is worth, and what the issue got wrong
+
+Issue #14 predicted **30x**, inheriting #12's numbers. Measured, it is **6.48x** —
+and the gap between those two figures is the interesting part.
+
+[`evidence/zenodo-plain-file-split-2026-08-26.md`](evidence/zenodo-plain-file-split-2026-08-26.md)
+has both probes. The first, against the 2.53 GB object every earlier measurement used,
+found **no effect at all** (0.93x on the range primitive, 1.06x through `fs.open()`) —
+and a single request moving 10 MB/s, which is 30x what D27 §2 says one connection can
+do.
+
+The trial order explains it: 0.37, 6.52, 20.21, 10.11, 10.02, 9.27 MB/s, in that
+sequence. The first fetch took 179.9 s for 64 MiB and nothing afterwards took more than
+10.3. **Zenodo's origin warms to an object, and the warming outlives the run**, so
+rotating conditions cannot cancel it — the same trap
+`zenodo-split-before-after-2026-08-25.py` was kept as a lesson for, one level up: there
+it was a re-read of the same *range*, here of the same *object*.
+
+Repeated on the five other objects in that record that nobody had touched, interleaved
+16 MiB chunks so both conditions meet the same temperature:
+
+| | median | across five cold objects |
+|---|---|---|
+| before: one request per range | 0.36 MB/s | 0.33–0.42 |
+| **after: 2 MiB pieces, 8 connections** | **2.32 MB/s** | 2.21–2.36 |
+
+**"One connection sustains ~0.30 MB/s" is a property of a cold object, not of a
+connection.** Warm, one connection does 8–10 MB/s. D26 and D27 measured a warm object
+throughout and were therefore measuring the warm ceiling, which splitting does not
+raise because it was never the binding constraint there. Splitting does not make a cold
+object fast either — eight connections get 2.32 MB/s out of one, not 9.7–14.0. The cold
+object is the limit; concurrency extracts about 6.5x more from it.
+
+None of that changes D27's constants, which were chosen from within-run comparisons at
+one temperature. It does mean **the absolute MB/s figures in D26 and D27 describe warm
+objects** and should not be quoted for a first read.
+
+### Decision
+
+`fetch_span(info, start, end)` is the seam: it cuts a contiguous run with `split_span`
+and fetches it a **window at a time**, one round of `max_concurrent_reads × piece`.
+`cat_file` and `ArchiveFile._fetch_range` both route through it, so the streaming path
+— `archivefs get`, `dvc import-url`, dvc's hashing — gets it as well.
+
+The window is not an optimisation, it is what makes the change safe. Without it a
+whole-object read cuts a 2.5 GB file into 1250 pieces of 2 MiB, all live at the same
+instant, and then joins them: the peak would be the file twice over. One round is
+`MAX_BYTES_IN_FLIGHT`, so **the bound that keeps memory flat is the same bound that
+makes the transfer fast** — which is the only reason a single constant can do both jobs
+honestly.
+
+`_open`'s default block now comes from `parallel_block_size(size)` rather than fsspec's
+4 MiB class default, on D27's reasoning: a block is one round of pieces, and 4 MiB of it
+is eight connections carrying 512 KiB each. The eighth-of-the-object clamp is what stops
+that being an eager fetch — a small read of a small file still costs 4 MiB, and a
+100-byte peek at a 100 MB file costs 12 MiB rather than a flat 16.
+
+### Failing closed
+
+Assembly places each piece at **its own** offset and checks the length. Appending at a
+running offset would absorb a short piece by sliding every later byte left, producing a
+file of the wrong length that still looks like data — and it would then be hashed and
+committed. `_fetch_checked` already refuses short reads, so this guard should be
+unreachable; it is there because "should be unreachable" and "is not written to disk"
+are different claims.
+
+`max_concurrent_reads == 1` is unchanged: one request per range, exactly as before.
+Opting out of concurrency must not buy a stream of small requests instead.
+
+### Not measured
+
+EGA and BIA inherit this and neither was tested — no live EGA credentials here, and
+BIA's S3 path has its own throttling behaviour. What is new for them is only that plain
+reads now use a bound (`max_concurrent_reads`, default 8) they already had.
+
+**Cost to change my mind:** `max_concurrent_reads=1` restores the old behaviour per
+filesystem without a code change; `fetch_span` returning `self._fetch_range(info, start,
+end)` restores it globally, in one line.

@@ -499,26 +499,25 @@ them, and a single "import this study" operation becomes possible. The Chirograp
 registry design is the natural home for the link data; the archivefs side is small.
 Worth revisiting once the imminent multi-part deposit exists as a concrete example.
 
-## Split ordinary file reads too, not only ZIP blocks
+## ~~Split ordinary file reads too, not only ZIP blocks~~ — done, and worth 6.5x not 30x
 
-*Filed as [issue #14](https://github.com/swarbricklab/archivefs/issues/14).*
+**Shipped as [D28](decisions.md); issue #14 closed.** Kept for the part that turned
+out to be wrong.
 
-Everything D26 and D27 built — `fetch_ranges`, `split_span`, the shared semaphore — is
-reachable from exactly one place: the `multi_fetcher` on Zenodo's ZIP member view.
-**A plain file is still read over a single connection.** `ArchiveFile._fetch_range`
-and `cat_file` call `_fetch_range` directly, and `cat_file` passes the *whole file* as
-one range, so `archivefs get zenodo://…/big.tif` is one request for 2.5 GB.
+The estimate here was **30x**, from "a single connection sustains ~0.30 MB/s at any
+request size, against 9.7–14.0 MB/s across eight". Measured on five cold Zenodo
+objects it is **6.48x** — 0.36 MB/s against 2.32.
 
-The measured size of that gap: a single connection sustains ~0.30 MB/s at any request
-size, against 9.7–14.0 MB/s for the same bytes cut into 2 MiB pieces across eight
-(`evidence/zenodo-piece-size-2026-08-25.md`). That is up to **30x, on every plain
-download from every backend** — EGA and BIA included, where nothing splits today.
+The 0.30 and the 9.7–14.0 are both real and they are not comparable. Every earlier
+probe used one 2.53 GB object, repeatedly; **Zenodo's origin warms to an object**, and
+warm, a single connection does 8–10 MB/s. So 0.30 is a cold measurement and 9.7–14.0 a
+warm one, and dividing them measured the temperature rather than the parallelism. The
+first attempt at the follow-up probe reproduced the mistake in the other direction and
+found *no effect at all* (0.93x) before the trial order gave it away.
 
-The change looks like two lines (`_fetch_range` → `fetch_ranges(split_span(...))`) and
-it is not, quite: the semaphore already bounds concurrency, but `cat_file` on a large
-file would hold every piece in memory before joining, and the pieces of a 2.5 GB file
-are 1250 of them. Wants a streaming rejoin, or a cap on how much of a single range is
-split at once. Worth doing — it is the largest measured win left in the transfer path.
+The concurrency is worth having — an import always reads cold — but the lesson is the
+one D27 already flagged and this went on to demonstrate: **absolute MB/s against
+Zenodo means nothing outside a within-run comparison at one temperature.**
 
 ## Seed the ZIP reading cache from the listing view
 
