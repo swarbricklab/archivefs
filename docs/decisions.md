@@ -2385,3 +2385,72 @@ is built to make true.
 **Cost to change my mind:** the `shareable` flag is one line per credential. Deleting
 `bundle.py` and its subcommand removes the feature entirely; nothing else imports it,
 and the sharing-key support from D31 stands on its own without it.
+
+## D33 — `dvc import-url` moves BIA data **three times**, and the fix is a checksum
+
+Measured, not inferred. A `dvc import-url` of one 24.5 MiB BIA file fetched
+77,054,409 bytes — **3.00x** — and instrumenting `fetch_span` with the DVC call chain
+attributes every third of it:
+
+| | reads | chain |
+|---|---|---|
+| 1 | 1.00x | `sync_import > save_deps > … > file_md5` |
+| 2 | 1.00x | `sync_import > download > … > get_file` |
+| 3 | 1.00x | `imp_url > save > save_deps > … > file_md5` |
+
+Phase 2 is the transfer. Phases 1 and 3 are DVC hashing the *dependency* over the
+network, because `info()` offers no digest — and phase 3 does it a second time, from
+`Repo.imp_url`'s own `stage.save()`, after `_sync_import` has already hashed it and a
+verified local copy exists. On an 800 GiB deposit that is 1.6 TiB of avoidable traffic.
+
+It also explains a symptom that looked like a different bug. DVC's per-file promotion
+*is* atomic — `as_atomic` writes to a temp name in the destination's own parent and
+renames — so completed files should survive a kill. They do not, because a job killed
+early is still in phase 1, where no output file exists yet. Nothing is broken; the
+useful work simply starts a third of the way in.
+
+### Is there really no published checksum?
+
+Verified three ways against S-BIAD3080 rather than assumed:
+
+* `/files/{acc}` returns 14 keys per row and none is a digest.
+* the study record is 1,851 bytes with zero occurrences of `md5`/`checksum`/`sha`/`digest`.
+* the object's HTTP `ETag` is `"187eb43-64dfaf2d57cc9"`, and `0x187eb43` is exactly
+  its `Content-Length` — Apache's size-mtime token. It is not a content digest, and
+  offering it as one would be a lie DVC acts on.
+
+**But not categorically**, and this is the part that was being thrown away: the file
+table's columns are the **depositor's**, not BioStudies' — S-BIAD3080's are `Assay`,
+`Tissue`, `Donor`, `Target`. A depositor can put an md5 there, and `_make_info`
+hardcoded `"md5": None`, discarding it. So archivefs now reads one when it is offered,
+matched loosely on the column name (there is no schema to match strictly) and gated on
+the value being 32 hex digits — a sha256 is 64, a CRC32 is 8, and a truncated paste is
+neither.
+
+Guessing at column names is the better failure here: a wrong digest fails *loudly* at
+the next `archivefs check` or `dvc status`, where discarding a right one silently costs
+a full extra read of the deposit — three, under `import-url`.
+
+`registry` still declares `published_checksum=None` for `bia`, deliberately. That field
+is the archive's *capability*, and "sometimes, if the depositor bothered" is not one.
+
+### What is deliberately not built yet
+
+Closing phases 1 and 3 in the general case means archivefs supplying a checksum it
+computed itself, by hashing in flight during a read it was doing anyway. That is
+deferred, because it hands DVC a digest whose authority is *ours*: `dvc status` and
+`dvc update` would then trust our memo rather than the archive, and a stale memo makes
+DVC report no change — the same silent shape as `_log_unversioned` in D6/D17/D23.
+Candidate guards, in decreasing strength: the size-mtime ETag (a useless digest but an
+excellent change detector, one HEAD per file), the study's `modified` timestamp (free,
+coarser), or in-process only (no persistence, no hazard, and still enough to kill phase
+3). Undecided on purpose.
+
+The `.chiro` manifest is the designed answer and is **blocked, not rejected**:
+`chirograph` is declared in `pyproject.toml` as `chirograph>=0.1` but is unpublished
+and not installed anywhere, so the manifest schema is not available to write against.
+Emitting a hand-rolled file that claims to be a `.chiro.json` would be exactly the
+plausible-but-wrong artefact this project refuses to produce.
+
+**Cost to change my mind:** the md5 column reader is one method and one constant;
+deleting them restores the old behaviour with no other effect.
