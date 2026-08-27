@@ -1163,3 +1163,31 @@ def test_live_private_study_needs_and_accepts_a_sharing_key():
         bare.ls(accession)
     assert "BIA_KEY" in str(exc.value)
     assert os.environ["BIA_KEY"] not in str(exc.value)
+
+
+def test_stat_never_prints_the_sharing_key(private, monkeypatch, capsys):
+    """The leak that got through #19: `url` is a field, and the URL is the key.
+
+    #19 redacted the error paths and the `relpath` provenance field, and missed
+    `info()["url"]` — which has to stay real because it is what we fetch with, and
+    which `archivefs stat` dumped verbatim to stdout. Asserting on the *rendered
+    output* rather than on a named field is deliberate: a field-by-field check is
+    what missed it the first time.
+    """
+    from archivefs.cli import main
+
+    monkeypatch.setenv("BIA_KEY", KEY)
+    assert main(["stat", f"bia://{ACC}/images/plate1/a.tif"]) == 0
+    out = capsys.readouterr().out
+    assert KEY not in out
+    assert "<key>" in out
+    # the path is still legible enough to debug with
+    assert ".private/<key>" in out or "?key=<key>" in out
+
+
+def test_ls_json_never_prints_the_sharing_key(private, monkeypatch, capsys):
+    from archivefs.cli import main
+
+    monkeypatch.setenv("BIA_KEY", KEY)
+    assert main(["ls", "--json", f"bia://{ACC}/images/plate1"]) == 0
+    assert KEY not in capsys.readouterr().out
