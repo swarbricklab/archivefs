@@ -1191,3 +1191,77 @@ def test_ls_json_never_prints_the_sharing_key(private, monkeypatch, capsys):
     monkeypatch.setenv("BIA_KEY", KEY)
     assert main(["ls", "--json", f"bia://{ACC}/images/plate1"]) == 0
     assert KEY not in capsys.readouterr().out
+
+
+# ------------------------------------ a depositor-published md5 in the file list
+
+
+DEPOSITOR_MD5 = "0123456789abcdef0123456789abcdef"
+
+
+def _row(**extra):
+    row = {"path": "images/x.tif", "Name": "x.tif", "Size": 10, "type": "file",
+           "isDirectory": "false"}
+    row.update(extra)
+    return row
+
+
+def test_a_depositor_published_md5_is_used():
+    """BioStudies' file table is the depositor's, so it can carry a real checksum.
+
+    Discarding one costs a full extra read of the deposit — three, under
+    `dvc import-url`, which hashes the dependency over the network twice.
+    """
+    fs = BIAFileSystem(skip_instance_cache=True)
+    info = fs._make_info(ACC, "images/x.tif", _row(md5=DEPOSITOR_MD5), FIRE)
+    assert info["md5"] == DEPOSITOR_MD5
+    assert info["checksum"] == DEPOSITOR_MD5
+    assert "published by the depositor" in info["checksum_source"]
+    assert "'md5'" in info["checksum_source"]
+
+
+@pytest.mark.parametrize(
+    "column", ["md5", "MD5", "md5sum", "MD5 Checksum", "file_md5", "checksum"]
+)
+def test_the_column_name_is_matched_loosely(column):
+    """There is no schema to read, so case and separators cannot be relied on."""
+    fs = BIAFileSystem(skip_instance_cache=True)
+    info = fs._make_info(ACC, "images/x.tif", _row(**{column: DEPOSITOR_MD5}), FIRE)
+    assert info["md5"] == DEPOSITOR_MD5
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "a" * 64,                              # sha256 — not an md5
+        "deadbeef",                            # CRC32 — not an md5
+        "0123456789abcdef0123456789abcde",     # 31 chars, a truncated paste
+        "0123456789abcdef0123456789abcdefx",   # 33 chars
+        "not a checksum at all",
+        "",
+    ],
+)
+def test_anything_not_md5_shaped_is_refused(value):
+    """The shape check is what makes reading an unschema'd column safe.
+
+    Handing DVC a sha256 as an md5 would be a lie it then acts on.
+    """
+    fs = BIAFileSystem(skip_instance_cache=True)
+    info = fs._make_info(ACC, "images/x.tif", _row(checksum=value), FIRE)
+    assert info["md5"] is None
+    assert "none —" in info["checksum_source"]
+
+
+def test_with_no_md5_column_the_source_says_why_and_names_the_etag():
+    fs = BIAFileSystem(skip_instance_cache=True)
+    info = fs._make_info(ACC, "images/x.tif", _row(), FIRE)
+    assert info["md5"] is None
+    assert "size-mtime" in info["checksum_source"]
+    assert ".chiro" in info["checksum_source"]
+
+
+def test_an_md5_column_still_reaches_the_attributes_block():
+    """It is metadata as well as a checksum; dropping it from provenance loses it."""
+    fs = BIAFileSystem(skip_instance_cache=True)
+    info = fs._make_info(ACC, "images/x.tif", _row(md5=DEPOSITOR_MD5), FIRE)
+    assert info["bia"]["attributes"]["md5"] == DEPOSITOR_MD5
