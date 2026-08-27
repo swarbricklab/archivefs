@@ -160,7 +160,7 @@ def cmd_ls(args: argparse.Namespace) -> int:
                 for e in entries
             ]
     if args.json:
-        print(json.dumps(entries, indent=2, default=str))
+        _emit(fs, entries)
         return 0
     for entry in sorted(entries, key=lambda e: e["name"]):
         if args.long:
@@ -171,9 +171,26 @@ def cmd_ls(args: argparse.Namespace) -> int:
     return 0
 
 
+def _emit(fs: Any, payload: Any) -> None:
+    """Print a filesystem's own metadata as JSON, with any secret in it masked.
+
+    Serialise first, then redact the *text*. Applying the backend's ``_redact`` to
+    the whole document rather than to a named field is the point: for BioStudies an
+    unreleased study's URL literally contains the sharing key
+    (``.private/<key[:2]>/<key[2:]>/…``), and that URL has to stay real inside
+    ``info()`` because it is what we fetch with. So the capability is allowed to
+    exist in the dict and is never allowed to reach a stream — and doing it by field
+    name would have missed ``url`` exactly as it was missed once already, then missed
+    the next field someone adds.
+
+    Identity for every archive whose URLs are only addresses.
+    """
+    print(fs._redact(json.dumps(payload, indent=2, default=str)))
+
+
 def cmd_stat(args: argparse.Namespace) -> int:
     fs, path = _filesystem(args.url, args.option)
-    print(json.dumps(fs.info(path), indent=2, default=str))
+    _emit(fs, fs.info(path))
     return 0
 
 
