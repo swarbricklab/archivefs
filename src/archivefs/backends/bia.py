@@ -86,6 +86,30 @@ KEY_IN_URL = (
     re.compile(r"(\.private/)[0-9a-fA-F]{2}/[0-9a-fA-F][0-9a-fA-F-]{8,}"),
 )
 
+#: Column names a depositor might use for a per-file MD5 in their submitted file
+#: list. BioStudies' file table is **depositor-defined** — measured against
+#: S-BIAD3080, whose columns are ``Assay``, ``Tissue``, ``Donor``, ``Target`` — so
+#: there is no fixed schema to read and the only options are to guess at names or to
+#: throw away a checksum the depositor took the trouble to publish. Guessing is the
+#: better failure: a wrong digest here fails *loudly* at the next `archivefs check`
+#: or `dvc status`, where discarding a right one silently costs a full extra read of
+#: the deposit (three, under `dvc import-url` — see docs/decisions.md D33).
+MD5_COLUMNS = (
+    "md5",
+    "md5sum",
+    "md5_checksum",
+    "file_md5",
+    "content_md5",
+    # Last, and only if it is md5-shaped: a `checksum` column could hold a sha256 or
+    # a CRC, and calling one of those an md5 would be a lie DVC acts on.
+    "checksum",
+)
+
+#: 32 lowercase hex digits and nothing else. The shape check is what makes reading an
+#: unschema'd column safe: a sha256 is 64, a CRC32 is 8, and a truncated paste is
+#: neither.
+MD5_VALUE = re.compile(r"^[0-9a-f]{32}$")
+
 DEFAULT_API_URL = "https://www.ebi.ac.uk/biostudies/api/v1"
 #: The Embassy S3 bucket holding BIA's own conversions. Anonymous, no signing.
 DEFAULT_S3_URL = "https://uk1s3.embassy.ebi.ac.uk/bia-integrator-data"
@@ -560,10 +584,28 @@ class BIAFileSystem(ArchiveFileSystem):
                 f"bia://S-BIAD599 (BioImages) or bia://S-BSST123."
             )
 
+    @staticmethod
+    def _published_md5(entry: dict) -> tuple[str | None, str | None]:
+        """``(md5, which column it came from)`` if the depositor published one."""
+        normalised = {
+            str(key).strip().lower().replace(" ", "_").replace("-", "_"): (key, value)
+            for key, value in entry.items()
+        }
+        for candidate in MD5_COLUMNS:
+            found = normalised.get(candidate)
+            if not found:
+                continue
+            column, value = found
+            text = str(value).strip().lower()
+            if MD5_VALUE.match(text):
+                return text, str(column)
+        return None, None
+
     def _make_info(
         self, accession: str, path: str, entry: dict, base: str
     ) -> dict:
         size = entry.get("Size")
+        md5, md5_column = self._published_md5(entry)
         # Everything BioStudies knows about the file *except* the plumbing — organism,
         # channels, labels, gene identifiers. No other archive here hands out
         # per-file experimental metadata, and throwing it away would be a waste.
@@ -579,14 +621,21 @@ class BIAFileSystem(ArchiveFileSystem):
             "type": "file",
             "size": int(size) if isinstance(size, int | str) and str(size).isdigit()
             else None,
-            # BIA publishes no per-file digest for submitted files. Say so rather
-            # than offering the FIRE ETag, which is an inode-size-mtime token and
-            # says nothing about the bytes.
-            "md5": None,
-            "checksum": None,
+            # BioStudies itself publishes no per-file digest, and the FIRE ETag is
+            # not one: measured, it is `"187eb43-64dfaf2d57cc9"` where 0x187eb43 is
+            # the byte count — Apache's size-mtime token, which says nothing about
+            # the bytes. But the file table's columns are the *depositor's*, so a
+            # conscientious one can put an md5 there, and that is a published
+            # checksum in the sense that matters.
+            "md5": md5,
+            "checksum": md5,
             "checksum_source": (
-                "none — BioStudies publishes no per-file checksum for submitted "
-                "files; supply a .chiro manifest for download-free verification"
+                f"md5 published by the depositor in the {md5_column!r} column of "
+                f"the submitted file list"
+                if md5
+                else "none — BioStudies publishes no per-file checksum for submitted "
+                "files, and the FIRE ETag is a size-mtime token, not a digest; "
+                "supply a .chiro manifest for download-free verification"
             ),
             # quote: deposited imaging paths really do contain '#', which truncates
             # an unquoted URL at what urlsplit reads as a fragment.
