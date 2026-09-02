@@ -2431,6 +2431,13 @@ Guessing at column names is the better failure here: a wrong digest fails *loudl
 the next `archivefs check` or `dvc status`, where discarding a right one silently costs
 a full extra read of the deposit — three, under `import-url`.
 
+This is the *reader* half. The **writer** half — a standing recommendation that our own
+BIA deposits carry an `md5` column, with a `.chiro` manifest as the fallback for imports
+that publish nothing and whose file list we cannot edit — is documented for depositors
+in [`importing-from-bia.md`](importing-from-bia.md) §4c. Reading stays liberal (six
+column names); the recommendation is specific (`md5`), so what we write is consistent
+without narrowing what we accept.
+
 `registry` still declares `published_checksum=None` for `bia`, deliberately. That field
 is the archive's *capability*, and "sometimes, if the depositor bothered" is not one.
 
