@@ -59,7 +59,7 @@ One accession, two quite different sets of bytes:
 
 | view | what it is | checksums | address |
 |---|---|---|---|
-| `submitted` (default) | exactly what the depositor uploaded — the TIFFs, the metadata spreadsheets | ❌ BioStudies publishes none | `bia://S-BIAD599/<deposited/path>` |
+| `submitted` (default) | exactly what the depositor uploaded — the TIFFs, the metadata spreadsheets | ❌ none from BioStudies — unless the depositor published an `md5` column (§4c) | `bia://S-BIAD599/<deposited/path>` |
 | `derived` | BIA's own OME-Zarr pyramids + thumbnails, keyed by image UUID | ✅ real MD5s, download-free | `bia://S-BIAD599/<image-uuid>/…` with `view=derived` |
 
 Pick `submitted` if you want the original images the authors analysed. Pick
@@ -273,9 +273,13 @@ nothing afterwards.
 
 ### What you still do not get before release
 
-**No checksums, so no cheap `--no-download`.** BIA publishes no md5 for submitted
-files at any point (`decisions.md` D8), so DVC computes one by streaming the whole
-file — the cost described in D14. That is unchanged by the key.
+**No checksums from BIA, so no cheap `--no-download` by default.** BIA publishes no
+md5 for submitted files at any point (`decisions.md` D8), so DVC computes one by
+streaming the whole file — the cost described in D14, unchanged by the key. The
+exception is entirely in your hands: if *you* deposited the study and published an
+`md5` column (§4c), archivefs reads it here too, and `--no-download` is cheap even
+before release — the file list is exactly what the key unlocks, so a depositor-supplied
+md5 is the *only* download-free checksum available on an unreleased submitted deposit.
 
 **Not a pull-through remote.** BIA-submitted declares no immutability basis, so it is
 not version-aware and DVC will not treat it as fallback storage: a reviewer cannot
@@ -285,6 +289,60 @@ changing that, since it supplies the checksums BIA does not.
 
 **Derived view is release-only.** BIA's OME-Zarr conversions are built after
 publication, so `-o view=derived` has nothing to find on an unreleased study.
+
+## 4c. If you deposited the data: publish an `md5` column
+
+Everything above assumes someone else's deposit. When the deposit is *yours* — which
+for this project it usually is — you can remove the submitted tier's one real weakness
+at the source, by putting a checksum in the file list.
+
+BioStudies has no field for a per-file digest, but a file list's columns after `Files`
+are the depositor's to choose (they are exactly the `attributes` §3's `stat` prints).
+So add one named `md5`, holding the lowercase-hex MD5 of each file:
+
+```
+Files	Type	Donor	…	md5
+images/cytassist/visium/P01_Vis_cytassist.tif	cytassist image	P01	…	9f8e7d6c5b4a39281706f5e4d3c2b1a0
+```
+
+(the digest shown is illustrative; use the real `md5sum` of each file). archivefs reads
+the column with no configuration. `md5` is the name to standardise on; it also accepts
+`md5sum`, `md5_checksum`, `file_md5`, `content_md5`, and a `checksum` column *if* the
+value is 32 hex digits — but pick `md5` so your deposits are consistent and a human
+reading the record knows what it is. Anything that is not 32 lowercase hex is ignored,
+not trusted (`decisions.md` D33).
+
+With the column present, the submitted tier gains exactly what §4 said it lacked:
+
+* `stat` and `info` report the md5 and name its source
+  (`checksum_source: "md5 published by the depositor in the 'md5' column…"`).
+* `dvc import-url --no-download` records that md5 **without transferring the file** —
+  the D33 cost, three reads of the whole deposit, drops to zero.
+* a collaborator can `dvc pull` your import straight from BIA with no copy hosted by
+  you — the same thing a `.chiro` sidecar buys, but with nothing to commit beside the
+  `.dvc` and nothing that can drift from the archive, because the checksum *is* in the
+  archive.
+
+**Two tracks, one policy.** Publish an `md5` column for data **you deposit**; fall back
+to a **`.chiro` manifest** (Chirograph) for data you **import** that publishes no
+checksum and whose file list you cannot edit — someone else's BIA deposit without the
+column, or a GEO supplementary file. Both hand DVC a real digest; the only difference is
+who authored it and where it lives.
+
+**Keep it honest — this is the one discipline the convention asks of you.** The md5 is
+your word, trusted on sight (gated only on shape), so a file you re-upload must have its
+md5 updated in the *same* resubmission. Because the checksum lives in the archive record
+rather than in a memo of ours, that update is atomic with the bytes and cannot silently
+outlive them — the staleness hazard that blocks archivefs computing its own digest
+(D33) does not arise here. But a column left stale *is* a wrong checksum, and
+`--no-download` would not catch it until a later `dvc pull`.
+
+**Before betting a large deposit on it**, confirm BIA's curation preserves the column.
+Depositor columns survive verbatim in every case measured (S-BIAD3080's do), and an
+`md5` column fits BIA's own "descriptive names, at least two distinct values" guidance —
+but that a header literally called `md5` is not normalised or dropped in curation has
+not been tested against a released study, and cannot be against a private one. One
+`archivefs stat` on the study after it releases settles it.
 
 ## 5. Without DVC
 
