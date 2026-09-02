@@ -664,27 +664,6 @@ class ZenodoFileSystem(ArchiveFileSystem):
             self._member_views[zip_path] = view
         return self._member_views[zip_path]
 
-    def _fetch_block_ranges(
-        self, info: dict, spans: list[tuple[int, int]]
-    ) -> list[bytes]:
-        """fsspec's ``multi_fetcher``: one bytes object per requested range.
-
-        Each range is cut into parallel pieces, every piece across every range is
-        fetched together, and the pieces are then rejoined per range. Splitting
-        *within* a range is the part that matters: a sequential reader misses one
-        block at a time, so without it there would never be more than one request
-        in flight.
-        """
-        cuts = [self.split_span(start, end) for start, end in spans]
-        flat = [piece for pieces in cuts for piece in pieces]
-        fetched = self.fetch_ranges(info, flat)
-        out: list[bytes] = []
-        at = 0
-        for pieces in cuts:
-            out.append(b"".join(fetched[at : at + len(pieces)]))
-            at += len(pieces)
-        return out
-
     def _close_member_view(self, zip_path: str) -> None:
         """Drop one member view, releasing its sparse temp file."""
         view = self._member_views.pop(zip_path, None)

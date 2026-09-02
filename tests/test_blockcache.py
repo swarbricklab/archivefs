@@ -75,6 +75,33 @@ def test_one_command_can_opt_out_of_a_globally_enabled_cache(
     assert blockcache.cache_root(value) is None
 
 
+def test_the_dvc_default_is_consulted_last_and_never_overrides(monkeypatch, tmp_path):
+    """The zero-config default (a dir beside the DVC cache) is a *fallback*.
+
+    It turns resume on when nobody configured anything, but every explicit decision
+    still wins: an argument, the environment, a config value — and `cache_dir=false`
+    at any of those layers keeps it off even though a default was offered.
+    """
+    monkeypatch.delenv(blockcache.CACHE_DIR_ENV, raising=False)
+    default = tmp_path / "beside-dvc-cache"
+
+    # nobody else said anything -> the default is used
+    assert blockcache.cache_root(None, None, str(default)) == default
+    # an argument, the environment, or config each beat it
+    assert blockcache.cache_root(str(tmp_path / "arg"), None, str(default)) == (
+        tmp_path / "arg"
+    )
+    monkeypatch.setenv(blockcache.CACHE_DIR_ENV, str(tmp_path / "env"))
+    assert blockcache.cache_root(None, None, str(default)) == tmp_path / "env"
+    monkeypatch.delenv(blockcache.CACHE_DIR_ENV)
+    assert blockcache.cache_root(None, str(tmp_path / "cfg"), str(default)) == (
+        tmp_path / "cfg"
+    )
+    # off at any higher layer wins over the default
+    assert blockcache.cache_root("false", None, str(default)) is None
+    assert blockcache.cache_root(None, "off", str(default)) is None
+
+
 def test_an_object_with_no_published_checksum_gets_no_persistent_cache():
     """Without a checksum, "same path, same size" is not evidence of same bytes.
 
@@ -130,6 +157,40 @@ def test_a_partial_read_resumes_and_fetches_only_the_rest(root):
     assert fill(second, 0, 4096) == body
     # blocks 0-1 came from disk; only 2-3 were bought again
     assert calls == [(2048, 4096)]
+    second.release()
+
+
+def test_a_read_past_the_last_block_does_not_poison_the_index(root):
+    """fsspec marks ``end // blocksize`` present even when that block starts past EOF.
+
+    A whole-file read whose ``end`` is rounded up to a block boundary records a block
+    that cannot exist — which DVC's download does, though a plain chunked read does
+    not. Left in the index, ``_read_index`` then rejects the *entire* file on the next
+    run (a block past the end is its corruption signal), so a completed 20 GB import
+    resumes from zero. Regression for the plain-file open path (D29 follow-up).
+    """
+    body = os.urandom(3500)  # 3.42 blocks of 1024: the real blocks are 0..3
+    ident = identity(size=3500, blocksize=1024)
+    first = build(root, ident, 3500, 1024, lambda s, e: body[s:e])
+    # end rounds up to 4096, one block past the 3500-byte file
+    assert fill(first, 0, 4096) == body
+    assert first.blocks == {0, 1, 2, 3}, first.blocks  # not {0, 1, 2, 3, 4}
+    first.release()
+
+    # the index reloads rather than being discarded wholesale
+    data, index, _ = blockcache._paths(root, ident)
+    assert blockcache._read_index(index, data, ident) == {0, 1, 2, 3}
+
+    calls = []
+
+    def fetch(start, end):
+        calls.append((start, end))
+        return body[start:end]
+
+    second = build(root, ident, 3500, 1024, fetch)
+    assert second.blocks == {0, 1, 2, 3}
+    assert fill(second, 0, 3500) == body
+    assert calls == [], "a resumed file was re-fetched because of a phantom block"
     second.release()
 
 

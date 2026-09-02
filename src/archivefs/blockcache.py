@@ -127,13 +127,20 @@ def _resolve(sources: tuple[Any, ...], what: str) -> Path | None:
     return None
 
 
-def cache_root(explicit: Any = None, configured: Any = None) -> Path | None:
+def cache_root(
+    explicit: Any = None, configured: Any = None, fallback: Any = None
+) -> Path | None:
     """Where persistent blocks go, or ``None`` for "do not persist".
 
     Chain: the filesystem's ``cache_dir`` argument, then ``$ARCHIVEFS_CACHE_DIR``,
-    then the config layers. Each step can also say *off*, which is the direction that
-    has to work — turning the cache off for one command must not mean unsetting a
-    variable the rest of the shell depends on.
+    then the config layers, then ``fallback`` — a default supplied by the caller and
+    consulted **last**, so it never overrides a decision anyone made. The DVC
+    integration passes the directory beside the repository's own cache there (D29's
+    "which filesystem" question, answered by one the user already chose for large
+    data), and ``cache_dir=false`` on a single command still turns everything off.
+    Each earlier step can also say *off*, which is the direction that has to work —
+    turning the cache off for one command must not mean unsetting a variable the rest
+    of the shell depends on.
 
     **``$XDG_CACHE_HOME`` is deliberately not in that chain**, though it was for a
     while. XDG names a *location* for caches; it is not consent for an entry the size
@@ -145,7 +152,7 @@ def cache_root(explicit: Any = None, configured: Any = None) -> Path | None:
     file, visible in ``archivefs config``.
     """
     return _resolve(
-        (explicit, os.environ.get(CACHE_DIR_ENV), configured),
+        (explicit, os.environ.get(CACHE_DIR_ENV), configured, fallback),
         "cache_dir",
     )
 
@@ -542,6 +549,16 @@ class ResumableBlockCache(MMapCache):
             # Whatever was optimistically marked present did not arrive.
             self.blocks = known
             raise
+        # fsspec computes the last block as ``end // blocksize`` and marks it present,
+        # even when ``end`` falls in the block that begins at or past EOF — which
+        # happens on a whole-file read whose end is rounded up to a block boundary, as
+        # DVC's download does but a plain chunked read does not. That block holds no
+        # bytes (MMapCache clamps its data range to the file size), so recording it is
+        # harmless in-process but poisons the *persisted* index: ``_read_index``
+        # rejects the whole file if any block sits past the end. Keeping only real
+        # blocks is exactly this class's stated invariant.
+        nblocks = -(-self.size // self.blocksize) if self.blocksize else 0
+        self.blocks = {block for block in self.blocks if block < nblocks}
         if self.index and self.blocks != known:
             self._persist()
         return data

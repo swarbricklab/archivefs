@@ -421,6 +421,38 @@ def test_ranged_reads(fs):
         assert handle.read(20) == body[1000:1020]
 
 
+def test_a_plain_read_resumes_only_when_the_cache_can_persist(fs, monkeypatch, tmp_path):
+    """`_open` routes through the resumable block cache — and only when it is safe.
+
+    A cache directory *and* a published checksum, both required (D29): without the
+    checksum, resuming into a re-deposited file would hash cleanly against the wrong
+    bytes. This is what a depositor md5 column (D33) newly unlocks for BIA. Every
+    other case keeps fsspec's read-ahead cache, so nothing changes for a caller that
+    has not opted in.
+    """
+    from archivefs.blockcache import ResumableBlockCache
+
+    base = {"name": f"{ACC}/x.tif", "type": "file", "size": 10_000_000}
+
+    def cache_of(md5, cache_dir):
+        monkeypatch.setattr(fs, "info", lambda path: {**base, "md5": md5})
+        monkeypatch.setattr(fs, "cache_dir", cache_dir)
+        handle = fs._open(f"{ACC}/x.tif")
+        try:
+            return type(handle.cache).__name__
+        finally:
+            getattr(handle.cache, "release", lambda: None)()
+            handle.close()
+
+    resumable = ResumableBlockCache.__name__
+    # cache dir + published md5 -> resumable
+    assert cache_of(DEPOSITOR_MD5, str(tmp_path)) == resumable
+    # no cache dir -> read-ahead, unchanged
+    assert cache_of(DEPOSITOR_MD5, None) != resumable
+    # cache dir but no published checksum -> not persistable, so read-ahead
+    assert cache_of(None, str(tmp_path)) != resumable
+
+
 # ------------------------------------------------------------------ metadata
 
 
