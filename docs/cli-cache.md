@@ -27,14 +27,29 @@ Point `ARCHIVEFS_CACHE_DIR` somewhere and those blocks survive the process.
 
 ## Turning it on
 
-**Off by default, and it stays off until you name a directory.** A cache of 20 GB
-archives that nobody asked for is a way to fill a shared filesystem, and there is no
-default size cap that is both useful — bigger than the archive you are importing —
-and safe on someone else's quota.
+**Under DVC it is already on — no `export` needed.** A `dvc import-url` caches to a
+directory beside the repository's own DVC cache (`.dvc/cache/archivefs`), so an
+interrupted import resumes with no configuration at all. That is safe to default
+precisely because the DVC cache is a filesystem you already chose for large data
+(`decisions.md` D29, follow-up). The cost, paid by default: one copy of the imported
+bytes on that filesystem, which ages out on the 14-day eviction — `archivefs cache
+clear` removes it sooner.
+
+**Everywhere else it stays off until you name a directory.** A plain
+`fsspec.filesystem(...)` or `archivefs get` has no cache to sit beside and no way to
+know your quota, so it caches nothing unless told to:
 
 ```console
 $ export ARCHIVEFS_CACHE_DIR=/scratch/$PROJECT/$USER/archivefs-cache
-$ dvc import-url 'zenodo://17411292/spaceranger_P15.zip' data/p15
+$ archivefs get 'zenodo://17411292/spaceranger_P15.zip' data/p15
+```
+
+Set `cache_dir` once in `~/.config/archivefs/config.json` (`{"cache_dir": "…"}`) to
+apply it to every command, DVC or not, without an environment variable. To send DVC's
+imports somewhere other than beside its cache, name it explicitly:
+
+```console
+$ dvc import-url --fs-config cache_dir=/g/data/$PROJECT/blocks 'bia://S-BIAD3080/…' out
 ```
 
 Somewhere with room, and **not** `$HOME`: these entries are as large as the archive.
@@ -47,9 +62,9 @@ $ archivefs get -o cache_dir=/scratch/tmp/blocks 'zenodo://17411292/big.zip' big
 $ dvc import-url --fs-config cache_dir=/scratch/tmp/blocks 'zenodo://…' out
 ```
 
-`cache_dir` also turns it **off** for one command when the environment has it on —
-`-o cache_dir=false` — which is the direction that has to work without unsetting a
-variable the rest of your shell depends on.
+`cache_dir` also turns it **off** for one command — `-o cache_dir=false` — whether it
+was on from the environment or from the DVC default. That is the direction that has to
+work without unsetting a variable the rest of your shell depends on.
 
 ## Where the bytes go when you *don't* turn it on
 

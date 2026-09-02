@@ -2041,6 +2041,41 @@ would reintroduce the amplification #10 fixed.
 unconditionally from `block_cache_options` restores the previous behaviour exactly, and
 `tests/test_blockcache.py` fails loudly rather than silently if it is ever half-wired.
 
+### Follow-up: plain files, and a default that needs no `export`
+
+Two things were added after the fact, both measured end to end against a live BIA
+deposit (S-BIAD3080) once its depositor md5 column existed (D33):
+
+**Plain files now use this cache too, not only ZIP member views.** `_open` routes a
+read through the resumable cache when — and only when — it can persist: a cache
+directory *and* a published checksum, the same two conditions as before. This closes
+the gap this decision's "What this does not cover" named. It surfaced a real bug on the
+way: fsspec marks the block at `end // blocksize` present, and a *whole-file* read whose
+end rounds up to a block boundary (DVC's download does; a chunked read does not) marks a
+block past EOF — which `_read_index` then treats as corruption and discards the entire
+index, resuming a completed import from zero. Fixed at the recording point
+(`ResumableBlockCache._fetch` keeps only in-range blocks), `_read_index` left strict;
+`test_a_read_past_the_last_block_does_not_poison_the_index` pins it. Measured: a killed
+`dvc import-url` re-run went from a full re-fetch to **0 bytes**.
+
+**The cache is on by default under DVC**, which reverses this decision's headline for the
+one context where the objection does not apply. "Off by default" stood on *"no default
+byte cap is safe on a filesystem whose quota we do not know"* — but the DVC cache is a
+filesystem the user has already designated for large content-addressed data, so the
+block cache sits beside it (`<dvc-cache>/archivefs`, a sibling of DVC's `files/` store
+that `dvc gc` leaves alone — verified). It is wired only in the DVC layer
+(`dvcfs.py::_dvc_block_cache_dir`, passed as `cache_dir_default`), so a plain
+`fsspec.filesystem(...)` or `archivefs get` stays off, and it is consulted **last**:
+`-o cache_dir=<path>` overrides it and `-o cache_dir=false` turns it off, both still
+first-wins in `cache_root`. The honest cost, unchanged and now paid by default: one copy
+of the imported bytes on that filesystem, ageing out on the 14-day eviction, since it
+cannot be cleaned on success without breaking a directory import's resume (DVC re-reads
+every file on restart). `archivefs cache clear` remains the manual escape.
+
+**Cost to change my mind:** `cache_dir_default` back to `None` in `dvcfs.py::fs` restores
+off-by-default everywhere, in one line, leaving the config-file and `$ARCHIVEFS_CACHE_DIR`
+routes exactly as they were.
+
 ---
 
 ## D30 — configuration is **layered**, and only the layer that travels may change the data

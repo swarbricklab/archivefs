@@ -59,6 +59,44 @@ def _dvc_filesystem_base() -> Any:
     return FileSystem
 
 
+def _dvc_block_cache_dir() -> str | None:
+    """A block-cache directory beside the repository's DVC cache, or ``None``.
+
+    The zero-configuration half of resumable imports. It is passed as
+    ``cache_dir_default`` — a *last resort* that :func:`blockcache.cache_root`
+    consults only when no argument, environment variable or config file named a
+    location — so ``-o cache_dir=…`` and ``-o cache_dir=false`` both still win.
+
+    Placed inside the DVC cache the user already pointed at their large-data
+    filesystem, which is the filesystem question D29 could not answer for a generic
+    default and the reason it stayed off. A sibling of DVC's own ``files/`` store, so
+    ``dvc gc`` (which only walks content-addressed objects) leaves it alone —
+    verified. ``None`` outside a repository, so nothing turns on where there is no
+    cache to sit beside; the cost is one copy of the imported bytes, ageing out on
+    the 14-day eviction, which is why this is scoped to DVC rather than every reader.
+    """
+    import contextlib
+    import os
+
+    try:
+        from dvc.repo import Repo
+
+        repo = Repo()
+    except Exception:  # noqa: BLE001 - no repo, or DVC changed under us: just no default
+        return None
+    try:
+        store = repo.cache.local.path  # <cache_dir>/files/md5
+        cache_dir = os.path.dirname(os.path.dirname(store))
+    except Exception:  # noqa: BLE001 - a cache layout we do not recognise
+        return None
+    finally:
+        with contextlib.suppress(Exception):
+            repo.close()
+    if not cache_dir:
+        return None
+    return os.path.join(cache_dir, "archivefs")
+
+
 def _make_dvc_class(name: str, protocol: str, fsspec_class_path: str) -> type:
     """Build a DVC ``FileSystem`` wrapper for one archivefs protocol.
 
@@ -90,7 +128,12 @@ def _make_dvc_class(name: str, protocol: str, fsspec_class_path: str) -> type:
         return _import_class(fsspec_class_path)
 
     def fs(self: Any) -> Any:
-        return _fsspec_class()(**self.fs_args)
+        args = dict(self.fs_args)
+        # The zero-config resume default, and only here in the DVC layer so a plain
+        # `fsspec.filesystem(...)` or `archivefs get` stays off (D29). Lowest
+        # precedence: `cache_root` reaches it only if nothing else set `cache_dir`.
+        args.setdefault("cache_dir_default", _dvc_block_cache_dir())
+        return _fsspec_class()(**args)
 
     def _strip_protocol(cls: Any, path: str) -> str:
         # DVC's default is the identity, which leaves "zenodo://1486184" as the

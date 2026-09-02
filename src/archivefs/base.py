@@ -128,6 +128,7 @@ class ArchiveFileSystem(AbstractFileSystem):
         max_concurrent_reads: int = 8,
         cache_dir: str | None = None,
         scratch_dir: str | None = None,
+        cache_dir_default: str | None = None,
         **kwargs: Any,
     ) -> None:
         # Anything a subclass declared as a credential is consumed here rather
@@ -172,6 +173,13 @@ class ArchiveFileSystem(AbstractFileSystem):
         #: which on Gadi is a tmpfs and therefore RAM. Neither this nor `cache_dir`
         #: ever defaults to `$HOME`.
         self.scratch_dir = scratch_dir
+        #: A cache location of *last* resort, consulted only when no argument,
+        #: environment variable or config file named one. The DVC integration passes
+        #: the directory beside the repository's own cache here, so an import resumes
+        #: with no configuration at all — while an explicit ``cache_dir`` (including
+        #: ``cache_dir=false``) still wins. Never set for plain fsspec use, so
+        #: ``archivefs get`` and library callers stay off by default, as D29 chose.
+        self._cache_dir_default = cache_dir_default
         #: Whether the caller chose a block size, as opposed to inheriting the class
         #: default. :meth:`parallel_block_size` enlarges the latter and must not
         #: touch the former — a caller who asks for small blocks is usually asking
@@ -884,7 +892,11 @@ class ArchiveFileSystem(AbstractFileSystem):
         if isinstance(protocol, (list, tuple)):
             protocol = protocol[0]
         options = blockcache.prepare(
-            blockcache.cache_root(self.cache_dir, self.configured.get("cache_dir")),
+            blockcache.cache_root(
+                self.cache_dir,
+                self.configured.get("cache_dir"),
+                self._cache_dir_default,
+            ),
             blockcache.identity_of(str(protocol), info, block_size),
             self.configured.get("cache_max_age_days"),
         )
@@ -893,6 +905,51 @@ class ArchiveFileSystem(AbstractFileSystem):
                 self.scratch_dir, self.configured.get("scratch_dir")
             )
         return blockcache.ResumableBlockCache.name, options
+
+    def _fetch_block_ranges(
+        self, info: dict, spans: list[tuple[int, int]]
+    ) -> list[bytes]:
+        """fsspec's ``multi_fetcher``: one bytes object per requested range.
+
+        Each range is cut into parallel pieces, every piece across every range is
+        fetched together, and the pieces are rejoined per range — so a cache that
+        misses several blocks at once fills them over every connection rather than one
+        at a time. The block cache (Zenodo's ZIP view, and now a plain file with a
+        persistent cache) is the only caller; a plain sequential read misses one block
+        at a time and never puts more than one range in flight without it.
+        """
+        cuts = [self.split_span(start, end) for start, end in spans]
+        flat = [piece for pieces in cuts for piece in pieces]
+        fetched = self.fetch_ranges(info, flat)
+        out: list[bytes] = []
+        at = 0
+        for pieces in cuts:
+            out.append(b"".join(fetched[at : at + len(pieces)]))
+            at += len(pieces)
+        return out
+
+    def _resumable_cache_is_available(self, info: dict, block_size: int) -> bool:
+        """Whether a *persistent* block cache can be built for this object.
+
+        Two conditions, both from D29: a cache directory is configured, and the object
+        carries a published checksum. Without the checksum, "same path, same size" is
+        not evidence of the same bytes, so resuming into a re-deposited file would hash
+        cleanly against the wrong bytes — and there is no point routing a plain read
+        through the block cache only to keep nothing. This is what BIA's depositor md5
+        column (D33) newly satisfies: before it, a BIA file had no published checksum
+        and so could never persist.
+        """
+        from archivefs import blockcache
+
+        protocol = type(self).protocol
+        if isinstance(protocol, (list, tuple)):
+            protocol = protocol[0]
+        root = blockcache.cache_root(
+            self.cache_dir, self.configured.get("cache_dir"), self._cache_dir_default
+        )
+        if root is None:
+            return False
+        return blockcache.identity_of(str(protocol), info, block_size) is not None
 
     def parallel_piece_size(self) -> int:
         """Bytes per parallel request: the measured optimum, or less if that would
@@ -1135,17 +1192,34 @@ class ArchiveFileSystem(AbstractFileSystem):
         info = self.info(path)
         if info.get("type") == "directory":
             raise IsADirectoryError(path)
+        # A block is one round of parallel pieces, so the default follows the
+        # connection count rather than staying at the class's 4 MiB: 8 x 512 KiB
+        # measured 5.76 MB/s against 8 x 2 MiB's 9.70-14.03 (D27, on a warm object).
+        # Bounded by an eighth of the object, so a small read of a small file stays
+        # small.
+        block_size = block_size or self.parallel_block_size(info.get("size"))
+        options = dict(cache_options or {})
+        cache_type = kwargs.pop("cache_type", None)
+        # Route a plain read through the resumable block cache when — and only when —
+        # it can actually persist (a cache directory is set and the object publishes a
+        # checksum). Then an interrupted read resumes from local disk instead of the
+        # network, which is what lets a multi-hour BIA/EGA download survive a kill
+        # (issue #15 for ZIPs; this extends it to plain files, D29's open follow-up).
+        # Every caller that has not opted in keeps fsspec's read-ahead cache exactly.
+        if cache_type is None and self._resumable_cache_is_available(info, block_size):
+            options["multi_fetcher"] = lambda spans: self._fetch_block_ranges(
+                info, spans
+            )
+            cache_type, resumable = self.block_cache_options(info, block_size)
+            options.update(resumable)
+        if cache_type is not None:
+            kwargs["cache_type"] = cache_type
         return ArchiveFile(
             self,
             info,
             mode=mode,
-            # A block is one round of parallel pieces, so the default follows the
-            # connection count rather than staying at the class's 4 MiB: 8 x 512 KiB
-            # measured 5.76 MB/s against 8 x 2 MiB's 9.70-14.03 (D27, on a warm
-            # object). Bounded by an eighth of the object, so a small read of a small
-            # file stays small.
-            block_size=block_size or self.parallel_block_size(info.get("size")),
-            cache_options=cache_options,
+            block_size=block_size,
+            cache_options=options,
             **kwargs,
         )
 

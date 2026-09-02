@@ -526,3 +526,27 @@ def test_the_module_imports_without_dvc_installed(tmp_path):
 def test_unknown_attributes_still_raise_attribute_error():
     with pytest.raises(AttributeError):
         dvcfs.NoSuchFileSystem  # noqa: B018
+
+
+# ------------------------------------ the zero-config resume default (D29 follow-up)
+
+
+def test_the_block_cache_default_sits_inside_the_dvc_cache(tmp_path, monkeypatch):
+    """Zero-config resume: a directory beside DVC's own object store.
+
+    Passed as ``cache_dir_default`` (a last resort), so nothing turns on unless the
+    caller left ``cache_dir`` unset — and it lands on the filesystem the user already
+    chose for large data, which is what let this be on by default at all.
+    """
+    from dvc.repo import Repo
+
+    Repo.init(str(tmp_path), no_scm=True).close()
+    monkeypatch.chdir(tmp_path)
+    default = dvcfs._dvc_block_cache_dir()
+    assert default == str(tmp_path / ".dvc" / "cache" / "archivefs")
+
+
+def test_no_block_cache_default_outside_a_dvc_repo(tmp_path, monkeypatch):
+    """Off where there is no cache to sit beside — so plain use never surprises."""
+    monkeypatch.chdir(tmp_path)
+    assert dvcfs._dvc_block_cache_dir() is None
