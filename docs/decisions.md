@@ -2496,3 +2496,73 @@ plausible-but-wrong artefact this project refuses to produce.
 
 **Cost to change my mind:** the md5 column reader is one method and one constant;
 deleting them restores the old behaviour with no other effect.
+
+## D34 — concept vs version, and why verification is the consumer's job
+
+The full model is in [`concepts-and-versions.md`](concepts-and-versions.md) and the
+per-archive table in [`archive-capabilities.md`](archive-capabilities.md). This records
+the decision and the measurements that forced it.
+
+### The distinction, made load-bearing
+
+A **concept reference** (a bare `bia://`, `geo://`, or a Zenodo *concept* DOI) is
+mutable — "the record as it is now". A **version reference** (a Zenodo *version* DOI, a
+`chiro://` manifest) is an immutable, content-addressed snapshot. They drive opposite
+DVC behaviour and must never be conflated: `dvc update` on a concept reference
+correctly tracks latest; on a version reference it is correctly a no-op, because a
+content-addressed name cannot also move. This is the Git commit-vs-branch split, and
+Zenodo's concept-vs-version DOI is the archive-native instance of it.
+
+An archive is **version-capable only when its source is immutable** — a name that
+cannot serve other bytes. Zenodo (version DOI) and EGA (stable controlled-access
+accession) qualify; BIA-submitted and GEO **mutate in place** and do not. That single
+property is why `immutability_basis` stays `None` for `bia` and `geo`, and it is not a
+conservatism that can be relaxed — see the measurements below.
+
+### Measured: DVC does not verify an import fetch, so a concept reference is unsafe to pin
+
+Established end-to-end against a live BIA deposit (`S-BIAD3080`) with DVC driving
+archivefs:
+
+* **DVC fetches with `verify = False`.** `dvc_data`'s `DEFAULT_VERIFY` is `False`, and
+  `_load_storage_from_import` builds the read-only import `FileStorage` without a verify
+  flag. On `dvc pull` in a fresh clone, a source that serves **different bytes than the
+  `.dvc` records is accepted silently** — the recorded md5 is intent, not enforced.
+* Corrupting one file at the source and pulling was silently accepted with
+  `version_id = mtime`, with `version_id = md5`, **and** with the plain partial-import
+  route. The token type is irrelevant; DVC does not re-hash on the import fetch.
+* Therefore **mtime is a valid change *trigger* but an invalid integrity *token***, and
+  so is an md5 *at the DVC layer* — neither is checked. Making `bia` version-aware to
+  get pull-through would hand DVC a token it trusts without verifying, against a source
+  that mutates. That is the silent-wrong-data failure this project exists to avoid.
+
+Safe for Zenodo/EGA (the source is immutable, so "trust the source" is sound); unsafe
+for BIA/GEO. Hence: **concept-only archives stay `immutability_basis=None`**, a
+completed import of them is *not* a reproducible pin, and a reviewer's `dvc pull` gets
+*current* bytes — verified only if the consumer verifies.
+
+### Verification is the consumer's job — and the one place the implementation still trails
+
+The archive's published checksum is worth only what archivefs enforces, because DVC
+will not:
+
+* **`archivefs get` already verifies** — it streams, hashes, and refuses on a mismatch
+  against `info()`'s md5 (`cli.py::cmd_get`). ✅
+* **The fsspec / DVC read path does not.** `_fetch_checked` verifies *length*, not
+  content, and `dvc pull` goes through `fs.open()`, not the CLI. So a DVC pull of a
+  concept reference has **no integrity gate**. Closing this — verify-on-read against
+  `info()`'s md5 in the filesystem, covering the buffered `open()`/`get_file` path DVC
+  uses, not only the CLI — is the identified gap. It is deferred here rather than rushed
+  because the seam (a seekable buffered file vs. a full sequential download) needs its
+  own careful implementation and tests, like the block cache did.
+
+Even closed, verify-on-read checks the fetched bytes against the archive's **current**
+md5 — it catches **corruption**, not **drift from your commit**, because the filesystem
+never sees the `.dvc`'s recorded value. Drift-detection needs a pin that *travels with
+the `.dvc` and is enforced on the fetch*: a committed Chirograph manifest. This is why,
+for a mutable, checksum-less archive, Chirograph is not an optimisation but the only
+route to a reproducible, drift-detecting dependency.
+
+**Cost to change my mind:** if DVC ever exposes `verify=True` on an import's fallback
+storage, the "consumer must verify" burden shifts back to DVC for the corruption case —
+but the drift case still needs the committed pin, so Chirograph's role is unchanged.
