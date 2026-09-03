@@ -9,6 +9,8 @@
 | set a default once instead of per command | [`configuration.md`](configuration.md) |
 | set up EGA (or restricted Zenodo) access safely | [`credentials.md`](credentials.md) |
 | give reviewers access to an unreleased deposit | [`reviewer-access.md`](reviewer-access.md) |
+| know whether a `.dvc` is reproducible, pullable, verified | [`concepts-and-versions.md`](concepts-and-versions.md) |
+| see what each archive can and cannot promise | [`archive-capabilities.md`](archive-capabilities.md) |
 | know why something is built the way it is | [`design.md`](design.md), [`decisions.md`](decisions.md) |
 
 ## Command reference
@@ -88,6 +90,11 @@ system: [`decisions.md`](decisions.md) D14.
 
 ## Background
 
+* [`concepts-and-versions.md`](concepts-and-versions.md) — the concept-vs-version model
+  that decides reproducibility, pull-through and verification; and why some archives
+  need Chirograph
+* [`archive-capabilities.md`](archive-capabilities.md) — the per-archive table of what
+  each one can promise, along those axes
 * [`design.md`](design.md) — architecture: the shared base, the manifest layer, why
   each backend is only a byte-fetcher
 * [`decisions.md`](decisions.md) — every deviation from the plan, and the archive

@@ -281,11 +281,18 @@ exception is entirely in your hands: if *you* deposited the study and published 
 before release — the file list is exactly what the key unlocks, so a depositor-supplied
 md5 is the *only* download-free checksum available on an unreleased submitted deposit.
 
-**Not a pull-through remote.** BIA-submitted declares no immutability basis, so it is
-not version-aware and DVC will not treat it as fallback storage: a reviewer cannot
-`dvc pull` your completed import from BIA. They run `dvc import-url` themselves with
-their key, or you share the bytes some other way. A `.chiro` sidecar is the route to
-changing that, since it supplies the checksums BIA does not.
+**Not a pull-through remote, and not a reproducible pin.** A bare `bia://` URL is a
+*concept reference* — it tracks the record as it is now, not a frozen snapshot — because
+the BIA accession is mutable and offers no versioned retrieval
+([`concepts-and-versions.md`](concepts-and-versions.md)). So it declares no immutability
+basis, DVC will not treat it as fallback storage, and a reviewer cannot `dvc pull` your
+completed import from BIA. They run `dvc import-url` themselves with their key, or you
+share the bytes some other way. And even where a pull *works* (the partial
+`--no-download` route), nothing verifies the fetched bytes against what you committed —
+DVC fetches with `verify=False` ([`decisions.md`](decisions.md) D34). A `.chiro` sidecar
+is the route to both: it supplies the checksums BIA does not, *and* it is the committed,
+content-addressed pin that turns a mutable record into a reproducible, drift-detecting
+dependency.
 
 **Derived view is release-only.** BIA's OME-Zarr conversions are built after
 publication, so `-o view=derived` has nothing to find on an unreleased study.

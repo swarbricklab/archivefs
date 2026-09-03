@@ -1,0 +1,101 @@
+# How the archives measure up
+
+What each archive can promise, along the axes that decide whether a `.dvc` is
+reproducible, pullable, and trustworthy. The model behind the columns is
+[`concepts-and-versions.md`](concepts-and-versions.md); this is the table.
+
+Two columns are declared once, in `registry.Backend`, and everything else is derived
+or observed ([`decisions.md`](decisions.md) D22): **published checksum**
+(`published_checksum`) and **immutable token** (`immutability_basis`, which gates DVC
+`version_aware`). The rest is measured behaviour of the live services.
+
+---
+
+## The matrix
+
+| capability | `zenodo` | `ega` | `bia` submitted | `bia` derived | `geo` |
+|---|---|---|---|---|---|
+| **Published per-file checksum** (download-free) | ✅ md5 | ✅ md5¹ | ⚠️ only a depositor md5 column | ✅ md5 (S3 ETag) | ❌ |
+| **Immutable version token** (`version_aware`) | ✅ | ✅ | ❌ | ❌² | ❌ |
+| **Source is immutable** (a name that can't serve other bytes) | ✅ version DOI | ✅ stable accession | ❌ record mutates in place | ❌ regenerated | ❌ record mutates in place |
+| **Version-addressable retrieval** (fetch a *past* snapshot) | ✅ | ⚠️ latest only³ | ❌ | ❌ | ❌ |
+| **Native concept reference** (track-latest) | ✅ concept DOI | ✅ accession | ✅ accession | ✅ | ✅ accession |
+| **Native version reference** (a frozen pin) | ✅ version DOI | ⚠️ via md5³ | ❌ | ❌ | ❌ |
+| **Safe DVC pull-through** (fallback from the archive) | ✅ | ✅ | ❌⁴ | ❌ | ❌⁴ |
+| **Verify-on-read possible** (a checksum to enforce) | ✅ | ✅ | ⚠️ if column present | ✅ | ❌ |
+| **Needs Chirograph for a reproducible pin** | no | no | **yes** | **yes** | **yes** |
+
+¹ md5 of the **decrypted** bytes — the ones that land on disk (D1).
+² the derived view *has* md5s, but the profile declares `immutability_basis=None`
+   conservatively because the *submitted* view has none and a profile cannot say
+   "sometimes" (D-in-registry comment).
+³ EGA identifies bytes by a stable accession + md5, not by a versioned URL; the md5 is
+   the token, so it behaves as a version reference in practice, but you cannot ask for
+   "the previous bytes" — there is only one.
+⁴ the partial-import route (`--no-download`, don't `dvc update`) *works* mechanically,
+   but with no integrity gate on the fetch (D34); it is not *safe* against a revised
+   record without a Chirograph pin.
+
+---
+
+## The one line that explains the table
+
+**Version-awareness is safe exactly when the source is immutable.** Zenodo (a version
+DOI) and EGA (a stable, controlled-access accession) name bytes that *cannot* change
+under the reference, so DVC's trust-the-source fetch (`verify=False`, D34) is sound and
+pull-through is safe. BIA-submitted and GEO name records that **mutate in place** — the
+same accession can serve different bytes next month — so treating them as version
+references would let a `dvc pull` silently return the wrong data. That is why their
+`immutability_basis` is `None`, and why the only way to pin them is to introduce an
+external immutable object: a Chirograph manifest.
+
+Everything else in the table is a consequence of that row.
+
+---
+
+## Per-archive notes
+
+**`zenodo`** — the reference case. Publishes an md5 per file, and distinguishes a
+concept DOI (latest) from a version DOI (frozen), so it supplies *both* halves of the
+model natively. `dvc update` on a concept DOI tracks latest; on a version DOI it is a
+no-op. Expands ZIP members as directories (`extract_zips`). Nothing here needs
+Chirograph.
+
+**`ega`** — controlled access (credentials + DAC authorisation). Publishes the md5 of
+the decrypted bytes and is version-aware, so completed imports are pullable and
+verifiable. Accessions are stable, so this is safe; but there is no "previous version"
+to retrieve — an EGA file is one byte-string, identified by its md5.
+
+**`bia` submitted** — the depositor's uploaded files. **No native checksum**, a
+**mutable** accession, **no versioned retrieval**. A depositor *can* publish an md5
+column (D33), which gives `archivefs get` something to verify against and makes
+`--no-download` honest — but it is not an archive capability (`published_checksum`
+stays `None`), it does not make the record immutable, and it does not give
+version-addressable retrieval. For a *reproducible, drift-detecting* pin, this view
+needs a Chirograph manifest. Unreleased studies are readable with a sharing key
+([`reviewer-access.md`](reviewer-access.md)); a released study is **not** frozen — it
+can still be revised.
+
+**`bia` derived** — BIA's own OME-Zarr pyramids and thumbnails, in an anonymous S3
+bucket, with real single-part md5 ETags. Verifiable and download-free, but these are
+**not the submitted bytes** (a conversion), and they are not version-addressable. Good
+for streaming/visualisation; not a substitute for the deposit.
+
+**`geo`** — supplementary/processed files over public HTTPS. The archetype of the
+problem: no checksums, and records that mutate under a stable accession. Chirograph is
+not optional here if you want either verification or reproducibility.
+
+**`dbgap`** — deferred; the backend refuses with an explanation rather than pretending.
+
+---
+
+## Reading a column back to a decision
+
+- **"Needs Chirograph for a reproducible pin: yes"** ⇒ the archive is concept-only, so
+  a `.dvc` that points straight at it is track-latest, not a pin. See
+  [`concepts-and-versions.md`](concepts-and-versions.md) §5 and
+  [`importing-from-bia.md`](importing-from-bia.md).
+- **"Safe DVC pull-through: ✅"** ⇒ a completed `dvc import-url` is pullable from the
+  archive by a fresh clone, because the source is immutable (D23 for the mechanism).
+- **"Verify-on-read possible: ⚠️/❌"** ⇒ the fetch cannot be checked against a
+  published digest, so integrity has to come from a Chirograph manifest instead (D34).
