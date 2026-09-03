@@ -2541,20 +2541,22 @@ for BIA/GEO. Hence: **concept-only archives stay `immutability_basis=None`**, a
 completed import of them is *not* a reproducible pin, and a reviewer's `dvc pull` gets
 *current* bytes — verified only if the consumer verifies.
 
-### Verification is the consumer's job — and the one place the implementation still trails
+### Verification is the consumer's job, because DVC will not do it
 
-The archive's published checksum is worth only what archivefs enforces, because DVC
-will not:
+The archive's published checksum is worth only what archivefs enforces:
 
-* **`archivefs get` already verifies** — it streams, hashes, and refuses on a mismatch
-  against `info()`'s md5 (`cli.py::cmd_get`). ✅
-* **The fsspec / DVC read path does not.** `_fetch_checked` verifies *length*, not
-  content, and `dvc pull` goes through `fs.open()`, not the CLI. So a DVC pull of a
-  concept reference has **no integrity gate**. Closing this — verify-on-read against
-  `info()`'s md5 in the filesystem, covering the buffered `open()`/`get_file` path DVC
-  uses, not only the CLI — is the identified gap. It is deferred here rather than rushed
-  because the seam (a seekable buffered file vs. a full sequential download) needs its
-  own careful implementation and tests, like the block cache did.
+* **`archivefs get`** streams, hashes, and refuses on a mismatch against `info()`'s md5
+  (`cli.py::cmd_get`). ✅
+* **`get_file`** — the seam DVC's transfer takes (measured: `dvc import-url` calls
+  `get_file` → `_open`) — now does the same: it downloads via fsspec, re-hashes the
+  result against `info()`'s md5, and **refuses and deletes** the file on mismatch, so
+  nothing unverified is left for DVC to pick up. Verified live against `S-BIAD3080`: a
+  `dvc import-url` with one byte corrupted at the source, silently accepted before, now
+  fails with a checksum mismatch and writes no output. ✅
+* **`cat_file` does not yet.** The DVC seam is `get_file`; adding a whole-read check to
+  `cat_file` first requires making every backend's test fake self-consistent (several
+  declare an md5 that does not match their served bytes), so it is a follow-up, not
+  this change.
 
 Even closed, verify-on-read checks the fetched bytes against the archive's **current**
 md5 — it catches **corruption**, not **drift from your commit**, because the filesystem

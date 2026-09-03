@@ -113,13 +113,13 @@ revised).
 So the checksum an archive publishes is only worth what the *consumer* enforces:
 
 - **`archivefs get`** streams, hashes, and **refuses on mismatch** against the
-  published md5 — verified today. ([`cli-get.md`](cli-get.md).)
-- **The fsspec / DVC read path does *not* yet** — so `dvc pull` of a concept reference
-  gets current bytes with no integrity gate. Closing this (verify-on-read in the
-  filesystem, not just the CLI) is the one place the implementation still trails this
-  model; tracked in D34.
+  published md5. ([`cli-get.md`](cli-get.md).)
+- **`get_file`** — the seam DVC's download takes — does the same: it re-hashes the
+  downloaded file against the published md5 and refuses (and deletes) on mismatch, so a
+  `dvc import-url`/`dvc pull` that would have silently materialised corrupted bytes now
+  fails loudly. (D34; a `cat_file` whole-read check is the remaining follow-up.)
 
-Even fully closed, verify-on-read against the archive's *current* md5 catches
+Even so, verify-on-read against the archive's *current* md5 catches
 **corruption**, not **drift from your commit** — because the filesystem only ever knows
 current state, not your `.dvc`'s recorded value. Detecting drift needs a pin that
 *travels with the `.dvc` and is enforced on the fetch* — which is a committed
