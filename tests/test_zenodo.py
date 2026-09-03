@@ -212,6 +212,26 @@ def test_ranged_reads(fs):
         assert fh.read(100) == CSV_BYTES[1234:1334]
 
 
+def test_cat_file_verifies_a_whole_read_but_leaves_a_range_alone(fs, monkeypatch):
+    """A whole `cat_file` is checked against the published md5; a range cannot be.
+
+    A whole read has a whole-file md5 to check against and is refused on mismatch; a
+    ranged read has no such anchor, so it is served rather than falsely rejected.
+    """
+    real = fs._fetch_range
+    monkeypatch.setattr(
+        fs,
+        "_fetch_range",
+        lambda info, s, e: (lambda b: b[:-1] + bytes([b[-1] ^ 0x01]) if b else b)(
+            real(info, s, e)
+        ),
+    )
+    with pytest.raises(VerificationError):
+        fs.cat_file(f"{RECID}/samples.csv")
+    # a range cannot be verified against a whole-file md5 — served, not refused
+    assert len(fs.cat_file(f"{RECID}/samples.csv", start=0, end=5)) == 5
+
+
 def test_get_file_verifies_the_download_against_the_published_md5(fs, tmp_path):
     """The DVC download seam (measured: `dvc import-url` calls `get_file`) verifies.
 
