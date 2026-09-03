@@ -36,7 +36,9 @@ Designed with GEO and dbGaP in view, per the plan:
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import os
 import re
 import threading
 import time
@@ -52,6 +54,7 @@ from archivefs.errors import (
     ManifestError,
     MissingExtraError,
     NotSupportedError,
+    VerificationError,
 )
 
 logger = logging.getLogger(__name__)
@@ -1222,6 +1225,42 @@ class ArchiveFileSystem(AbstractFileSystem):
             cache_options=options,
             **kwargs,
         )
+
+    def get_file(self, rpath: str, lpath: str, **kwargs: Any) -> Any:
+        """Download one file, then verify it against the archive's published md5.
+
+        This is the path DVC's transfer takes — measured, ``dvc import-url`` calls
+        ``get_file`` → ``_open`` — and the one place DVC's ``verify=False`` (D34) would
+        otherwise let wrong bytes through. fsspec does the copy (so callbacks, temp
+        files and directories keep working); the verification is added on top and
+        refuses rather than leaving unverified bytes in place.
+
+        The re-read is deliberate over an in-flight hash: reusing fsspec's own copy is
+        worth one extra local pass, which on any object is fast against the network
+        fetch that produced it.
+        """
+        info = self.info(rpath)
+        super().get_file(rpath, lpath, **kwargs)
+        expected = info.get("md5") if info.get("type") != "directory" else None
+        # Only a real local file we can read back — not a caller-supplied file object,
+        # and not a range (DVC always asks for the whole file here).
+        if not expected or kwargs.get("outfile") is not None:
+            return
+        if kwargs.get("start") is not None or kwargs.get("end") is not None:
+            return
+        digest = hashlib.md5()  # noqa: S324 - md5 is what these archives publish
+        with open(lpath, "rb") as handle:
+            for chunk in iter(lambda: handle.read(4 * 1024 * 1024), b""):
+                digest.update(chunk)
+        actual = digest.hexdigest()
+        if actual != expected:
+            # Do not leave bytes that failed their own checksum where a caller (DVC)
+            # would pick them up as if they were good.
+            try:
+                os.remove(lpath)
+            except OSError:  # pragma: no cover - best-effort
+                logger.debug("could not remove unverified %s", lpath)
+            raise VerificationError(info.get("name", rpath), "md5", expected, actual)
 
     # -------------------------------------------------------------- read-only
 

@@ -27,6 +27,7 @@ from archivefs.errors import (
     AuthenticationError,
     NotSupportedError,
     UnsafeArchiveMemberError,
+    VerificationError,
 )
 from archivefs.zipsafe import ZipBombError, ZipLimits
 
@@ -209,6 +210,38 @@ def test_ranged_reads(fs):
     with fs.open(f"{RECID}/samples.csv", "rb", block_size=512) as fh:
         fh.seek(1234)
         assert fh.read(100) == CSV_BYTES[1234:1334]
+
+
+def test_get_file_verifies_the_download_against_the_published_md5(fs, tmp_path):
+    """The DVC download seam (measured: `dvc import-url` calls `get_file`) verifies.
+
+    A correct download materialises and passes.
+    """
+    dest = tmp_path / "samples.csv"
+    fs.get_file(f"{RECID}/samples.csv", str(dest))
+    assert dest.read_bytes() == CSV_BYTES
+
+
+def test_get_file_refuses_and_deletes_bytes_that_fail_their_checksum(
+    fs, tmp_path, monkeypatch
+):
+    """DVC fetches with verify=False (D34); the filesystem is what refuses wrong bytes.
+
+    A source that serves different bytes than its own md5 — corruption, or a mutable
+    record that drifted — must fail loudly and leave nothing behind for DVC to pick up.
+    """
+    real = fs._fetch_range
+    monkeypatch.setattr(
+        fs,
+        "_fetch_range",
+        lambda info, s, e: (lambda b: b[:-1] + bytes([b[-1] ^ 0x01]) if b else b)(
+            real(info, s, e)
+        ),
+    )
+    dest = tmp_path / "samples.csv"
+    with pytest.raises(VerificationError):
+        fs.get_file(f"{RECID}/samples.csv", str(dest))
+    assert not dest.exists(), "unverified bytes were left on disk"
 
 
 def test_glob(fs):
