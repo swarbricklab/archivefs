@@ -1176,7 +1176,28 @@ class ArchiveFileSystem(AbstractFileSystem):
         # Split, and windowed: this asks for the *whole* range, so before #14 a
         # `cat_file` of a 2.5 GB object was one HTTP request — at the 0.36 MB/s a
         # single connection gets out of an object Zenodo has not served recently.
-        return self.fetch_span(info, begin, finish)
+        data = self.fetch_span(info, begin, finish)
+        if begin == 0 and finish == size:
+            # A whole-object read can be checked against the published md5; a ranged
+            # read cannot, and is not.
+            self._verify_checksum(info, hashlib.md5(data).hexdigest())  # noqa: S324
+        return data
+
+    def _verify_checksum(self, info: dict, actual: str) -> None:
+        """Refuse a whole read whose md5 does not match the one the archive published.
+
+        DVC fetches an import with ``verify=False`` (`docs/decisions.md` D34), so a
+        filesystem that does not check its own whole reads lets a source serve the
+        wrong bytes silently — a corrupted transfer, or a mutable record that has
+        drifted from its own checksum. Only when ``info`` carries an md5 (Zenodo, EGA,
+        a BIA md5 column). It catches **corruption**, not **drift from a committed
+        pin**: the comparison is against the archive's *current* md5, which is all a
+        filesystem knows — detecting drift from a `.dvc`'s recorded value needs the
+        committed pin a ``.chiro`` manifest carries.
+        """
+        expected = info.get("md5")
+        if expected and actual != expected:
+            raise VerificationError(info.get("name", "?"), "md5", expected, actual)
 
     def _open(
         self,
@@ -1241,10 +1262,11 @@ class ArchiveFileSystem(AbstractFileSystem):
         """
         info = self.info(rpath)
         super().get_file(rpath, lpath, **kwargs)
-        expected = info.get("md5") if info.get("type") != "directory" else None
-        # Only a real local file we can read back — not a caller-supplied file object,
-        # and not a range (DVC always asks for the whole file here).
-        if not expected or kwargs.get("outfile") is not None:
+        # Only a real local file we can read back — not a directory, not a
+        # caller-supplied file object, and not a range (DVC asks for the whole file).
+        if info.get("type") == "directory" or not info.get("md5"):
+            return
+        if kwargs.get("outfile") is not None:
             return
         if kwargs.get("start") is not None or kwargs.get("end") is not None:
             return
@@ -1252,15 +1274,16 @@ class ArchiveFileSystem(AbstractFileSystem):
         with open(lpath, "rb") as handle:
             for chunk in iter(lambda: handle.read(4 * 1024 * 1024), b""):
                 digest.update(chunk)
-        actual = digest.hexdigest()
-        if actual != expected:
+        try:
+            self._verify_checksum(info, digest.hexdigest())
+        except VerificationError:
             # Do not leave bytes that failed their own checksum where a caller (DVC)
             # would pick them up as if they were good.
             try:
                 os.remove(lpath)
             except OSError:  # pragma: no cover - best-effort
                 logger.debug("could not remove unverified %s", lpath)
-            raise VerificationError(info.get("name", rpath), "md5", expected, actual)
+            raise
 
     # -------------------------------------------------------------- read-only
 

@@ -41,6 +41,17 @@ def payload_for(file_id: str) -> bytes:
     return blob
 
 
+# Make the fake self-consistent: the captured JSON carries real EGA checksums, but this
+# fake serves synthetic `payload_for` bytes — so a whole-file read verified against the
+# advertised md5 (base.cat_file) would fail on the fixture, not the code. Advertise the
+# md5 of what we actually serve.
+for _meta in FILES:
+    _meta["plainChecksum"] = hashlib.md5(  # noqa: S324 - md5 is what EGA publishes
+        payload_for(_meta["fileId"])
+    ).hexdigest()
+    _meta["plainChecksumType"] = "MD5"
+
+
 class FakeEGA:
     """The three endpoints the backend uses, plus the failure modes we care about."""
 

@@ -117,14 +117,17 @@ S3_OBJECTS: dict[str, int] = {
 S3_FAKE_PAGE = 12
 
 
-def s3_etag(key: str) -> str:
-    return hashlib.md5(key.encode()).hexdigest()  # noqa: S324
-
-
 def s3_body(key: str) -> bytes:
     """A body whose length matches the Size the fake's listing advertises."""
     size = S3_OBJECTS.get(key, 19)
     return (key.encode() * (size // max(len(key), 1) + 1))[:size]
+
+
+def s3_etag(key: str) -> str:
+    # The md5 of what we actually serve, not of the key: the derived view's md5 is a
+    # single-part S3 ETag, and a whole-file read verified against it (base.cat_file)
+    # must match the bytes. Self-consistent fake, not a fixture that lies.
+    return hashlib.md5(s3_body(key)).hexdigest()  # noqa: S324
 
 
 def s3_list(prefix: str, token: str) -> bytes:
