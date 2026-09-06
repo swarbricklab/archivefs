@@ -2693,3 +2693,31 @@ before going public: a whole class of bug lives only where the fake's world is t
 
 **Cost to change my mind:** none foreseen — this is the model the docs already described; the
 code had merely conflated the two references on the fetch path.
+
+## D39 — a pin can be a **subtree** of a record, not just a whole record — found on a real repo
+
+The first attempt to pin a real dataset (`bia://S-BIAD3080/images/ihc`, its own `.dvc`
+alongside `he` and `cytassist`) manifested the *entire study* — 153 files, 858 GB — because
+`archivefs manifest` split the URL to its container and threw the subpath away. Real imports
+are subdirectories; whole-record was an untested assumption.
+
+The fix is that the *addressed path* is the unit, at every layer:
+
+* **Writer** lists `fs.find(<full path>)`, so relpaths are subtree-relative; `concept` and
+  `record_accession` scope to the subtree (`biostudies:S-BIAD3080/images/ihc`). A CURIE with
+  a slashed identifier routes fine — `protocol_for_concept` splits on the *first* colon.
+* **`chiro://`** stopped overlaying the manifest on the delegate (which listed the whole
+  record, in the wrong frame) and instead lists `delegate.find(accession)` — which scopes to
+  the subtree — and applies the manifest itself, in that frame. A record pin is just the
+  degenerate case where the accession is the whole record.
+* Dropping the delegate overlay meant reads no longer carried the manifest md5, so
+  verify-on-read moved *here*: `chiro://` verifies a whole `cat_file`/`get_file` against the
+  manifest's own md5 (the delegate reads natively and a checksum-less archive has none).
+
+Validated against the live study: the download-free subtree manifest's `dvc_dir_hash` is
+**byte-identical** to the existing `dvc import-url`'s `.dir` — so a chirograph pin can replace
+a completed import with no re-download. That equality is the whole reason to trust the swap.
+
+**Cost to change my mind:** a subtree `concept` puts a path in the CURIE identifier, which is
+an archivefs addressing convention, not an archive-native accession. If a future archive uses
+colons or slashes in accessions ambiguously, the CURIE grammar would need revisiting.

@@ -287,10 +287,13 @@ def cmd_manifest(args: argparse.Namespace) -> int:
 
     chirograph = _chirograph()  # MissingExtraError names the install, not a traceback
     fs, path = _filesystem(args.url, args.option)
-    container, _ = fs._split(fs._strip_protocol(path))
+    # The whole addressed path, not just its container: `bia://S-BIAD3080/images/ihc`
+    # pins that subtree, not the entire study. build_manifest lists the subtree and
+    # scopes the concept to it.
+    target = fs._strip_protocol(path)
     manifest = build_manifest(
         fs,
-        container,
+        target,
         self_deposited=args.self_deposited,
         download=args.download,
     )
