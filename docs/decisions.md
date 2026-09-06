@@ -2571,3 +2571,38 @@ route to a reproducible, drift-detecting dependency.
 **Cost to change my mind:** if DVC ever exposes `verify=True` on an import's fallback
 storage, the "consumer must verify" burden shifts back to DVC for the corruption case —
 but the drift case still needs the committed pin, so Chirograph's role is unchanged.
+
+## D35 — archivefs *writes* manifests too, download-free where the archive lets it
+
+`chiro.py` reads a manifest and lets it become the listing; that only helps a deposit
+that already *has* one. The complement — `archivefs.writer` / `archivefs manifest` —
+generates one from the archive's own listing, and the whole design turns on **who pays
+for the checksum**:
+
+* Where the archive publishes a per-file digest (Zenodo, EGA, the derived BIA view), the
+  listing already carries `md5` and `size`. The writer hands those straight to
+  chirograph as `FileEntry` tuples — **not one content byte is fetched** (asserted:
+  `bytes_served == 0` in `test_download_free_manifest_over_zenodo`). This is the point
+  of the design: a full, verifiable pin of a deposit for the cost of one metadata call.
+* Where the archive publishes *no* digest (GEO, a column-less BIA study), there is no
+  shortcut. `--download` reads and hashes the bytes — the same md5 verify-on-read (D34)
+  later enforces. Without it, a missing checksum is a **hard error naming the files**,
+  never an etag quietly promoted to a digest (which `immutability_basis` already refuses,
+  D34).
+
+Building goes through chirograph, not a second canonicaliser (D5): a body_hash that
+agrees *almost* exactly is a silent mismatch. Provenance defaults to `observed-download`
+(we read the archive; we did not deposit it); `--self-deposited` is for data you vouch
+for.
+
+One sharp edge, load-bearing for D-next (`archivefs update`): a `FileEntry`'s `etag`,
+`file_version` **and** `version_id` all enter `body_hash`. So a manifest's content
+identity is not md5-of-bytes alone — it includes whatever per-file tokens it carries. The
+writer therefore fills in only `version_id` (a backend that sets it has declared it the
+entry's immutability token) and leaves the mtime-shaped `file_version`/`etag` empty, so a
+re-generated GEO manifest is stable run-to-run rather than churning its body_hash on a
+metadata-only mtime bump.
+
+**Cost to change my mind:** if we later want `file_version` in the pin (for a truly
+version-aware fetch), we accept that the body_hash then tracks those tokens too, and the
+"equal body_hash ⇒ no content change" shortcut in `archivefs update` narrows accordingly.

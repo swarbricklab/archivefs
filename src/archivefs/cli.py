@@ -9,6 +9,8 @@ and none of them should require writing Python:
   → ``archivefs ls`` / ``archivefs stat``
 * "does what I downloaded match what the deposit says it should be?"
   → ``archivefs check`` / ``archivefs verify``
+* "give me a portable, content-addressed pin of this deposit"
+  → ``archivefs manifest``
 
 Deliberately stdlib-only: a diagnostic tool that needs its own dependency tree is
 a diagnostic tool that cannot run when you need it.
@@ -270,6 +272,44 @@ def cmd_verify(args: argparse.Namespace) -> int:
     for failure in report.failures:
         print(f"  {failure.status:16} {failure.relpath}")
     return 0 if (report.body_hash_ok and not report.failures) else 1
+
+
+def cmd_manifest(args: argparse.Namespace) -> int:
+    """Generate a .chiro manifest from a deposit, download-free where it can be."""
+    from archivefs.chiro import _chirograph
+    from archivefs.writer import build_manifest
+
+    chirograph = _chirograph()  # MissingExtraError names the install, not a traceback
+    fs, path = _filesystem(args.url, args.option)
+    container, _ = fs._split(fs._strip_protocol(path))
+    manifest = build_manifest(
+        fs,
+        container,
+        self_deposited=args.self_deposited,
+        download=args.download,
+    )
+
+    text = chirograph.dumps(manifest)
+    if args.out == "-":
+        # The document goes to stdout clean (for a pipe); the summary to stderr.
+        print(text)
+        sink = "stdout"
+    else:
+        out = (
+            Path(args.out).expanduser()
+            if args.out
+            else Path(manifest.default_filename())
+        )
+        out.write_text(text)
+        sink = str(out)
+
+    ref = chirograph.canonical_ref(manifest)
+    print(
+        f"{sink}: {manifest.nfiles} file(s), {_human(manifest.size)}, "
+        f"{ref} ({manifest.provenance_type})",
+        file=sys.stderr,
+    )
+    return 0
 
 
 def cmd_dvc(args: argparse.Namespace) -> int:
@@ -713,6 +753,35 @@ def build_parser() -> argparse.ArgumentParser:
     add_common(verify)
     verify.set_defaults(func=cmd_verify)
 
+    manifest = sub.add_parser(
+        "manifest",
+        help="write a .chiro manifest for a deposit (download-free where possible)",
+        description=(
+            "Build a Chirograph manifest over every file in a deposit. Where the "
+            "archive publishes per-file checksums (Zenodo, EGA, derived BIA) this "
+            "downloads nothing; for an archive that publishes none (GEO), pass "
+            "--download to read and hash the bytes."
+        ),
+    )
+    manifest.add_argument("url")
+    manifest.add_argument(
+        "--out",
+        metavar="PATH",
+        help="where to write (default: <accession>.chiro.json; - for stdout)",
+    )
+    manifest.add_argument(
+        "--download",
+        action="store_true",
+        help="read and hash the bytes for files the archive publishes no checksum for",
+    )
+    manifest.add_argument(
+        "--self-deposited",
+        action="store_true",
+        help="mark provenance as self-deposited (default: observed-download)",
+    )
+    add_common(manifest)
+    manifest.set_defaults(func=cmd_manifest)
+
     cfg = sub.add_parser(
         "config", help="the configuration layers, and what they resolve to"
     )
@@ -788,9 +857,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="list",
         choices=["list", "path", "size", "clear"],
     )
-    cache.add_argument(
-        "--dir", metavar="DIR", help=f"override ${blockcache_env()}"
-    )
+    cache.add_argument("--dir", metavar="DIR", help=f"override ${blockcache_env()}")
     cache.add_argument("--json", action="store_true")
     cache.set_defaults(func=cmd_cache)
 

@@ -150,7 +150,9 @@ Chirograph manifest, and nothing a bare concept URL can provide.
 - **A `chiro://` manifest** is how you get a pin for an archive that offers none —
   reproducibility *and* drift-detection for BIA, GEO, or any mutable, checksum-less
   source. This is why "all roads lead to Chirograph": for a concept-only archive it is
-  the *only* thing that can supply the version half.
+  the *only* thing that can supply the version half. Make one with
+  [`archivefs manifest`](cli-manifest.md): download-free where the archive publishes
+  checksums, `--download` where it does not.
 
 See [`archive-capabilities.md`](archive-capabilities.md) for exactly what each archive
 can and cannot promise.
