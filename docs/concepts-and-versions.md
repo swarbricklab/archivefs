@@ -95,9 +95,20 @@ Two archives, two opposite-but-correct behaviours — this is the crux:
 `dvc update` is not "broken" on either. On a concept reference it correctly follows
 latest; on a version reference it correctly does nothing. The trap is only in
 expecting one from the other. For a Chirograph version reference, the *supersede*
-operation lives in a separate verb (`chiro update`), because moving a content-addressed
-pin means making a new manifest and repointing — which DVC's in-place model cannot
-express.
+operation lives in a separate verb — **`archivefs update`** — because moving a
+content-addressed pin means making a new manifest and repointing, which DVC's in-place
+model cannot express. It is archivefs's verb, not Chirograph's, because it reads the
+live archive twice (the current record version, then the new checksums) and that I/O is
+archive-specific — Chirograph stays network-free and supplies only local manifest
+primitives. Its read-only companion is **`archivefs check`** (which today already
+reports a manifest's drift from the current record). See Chirograph's
+`updatability-and-dvc-update.md`.
+
+Two fields carry the tracking, and they are *not* the same thing: **`concept`** is the
+mutable tracker (a CURIE like `doi:10.5281/zenodo.7654320` that re-resolves to latest),
+while **`source_url`** is the version-specific fetch base (the exact bytes can be
+re-fetched from it). For BIA and GEO they coincide — the accession is both — but for
+Zenodo they must not: the concept DOI tracks, the version DOI fetches.
 
 ---
 
