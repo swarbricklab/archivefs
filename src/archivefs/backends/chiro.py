@@ -24,6 +24,7 @@ translates ``chiro://<manifest>/<relpath>`` into a delegate read and forwards it
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 from archivefs.base import ArchiveFileSystem
@@ -99,8 +100,17 @@ class ChiroFileSystem(ArchiveFileSystem):
 
     # --------------------------------------------------------- listing surface
 
-    def _resolve_delegate(self, container: str) -> tuple[ArchiveFileSystem, str]:
-        """Load the manifest, and instantiate the backend its ``concept`` names."""
+    def _resolve_delegate(
+        self, container: str
+    ) -> tuple[ArchiveFileSystem, str, Any]:
+        """Load the manifest and instantiate the backend its ``concept`` names.
+
+        Returns ``(delegate, accession, manifest)``. ``accession`` is the manifest's
+        version-pinned ``record_accession`` — which may name a *subtree*
+        (``S-BIAD3080/images/ihc``), not just a record; the delegate's own listing
+        splits and scopes it, so a pin over part of a study routes and fetches exactly
+        that part.
+        """
         import fsspec
 
         _chirograph()  # raises MissingExtraError naming the install if absent
@@ -126,28 +136,32 @@ class ChiroFileSystem(ArchiveFileSystem):
         # `archivefs update` (track-latest); a pin must be reproducible. Falls back to
         # the concept's own identifier for a manifest that predates this field.
         accession = getattr(manifest, "record_accession", None) or concept_accession
-        # `chiro=<manifest>` makes the manifest the delegate's overlay, so its listing
-        # is the manifest's view and each read is verified against the manifest md5.
+        # A plain delegate, no `chiro=` overlay: this layer applies the manifest
+        # itself, in the accession's frame, so a subtree pin matches a subtree listing.
         delegate = fsspec.filesystem(
             protocol,
-            chiro=container,
             skip_instance_cache=True,
             **self._delegate_options,
         )
-        return delegate, accession
+        return delegate, accession, manifest
 
     def _load_members(self, container: str) -> dict[str, dict]:
-        delegate, accession = self._resolve_delegate(container)
+        from archivefs.chiro import apply_manifest
+
+        delegate, accession, manifest = self._resolve_delegate(container)
         self._delegates[container] = (delegate, accession)
-        native = delegate._members(accession)
+        # List in the accession's frame (records OR subtrees), then let the manifest
+        # be the listing. `find` scopes to the subtree; `apply_manifest` matches each
+        # entry's source against it and carries the delegate's fetch metadata across.
+        native = delegate.find(accession, detail=True)
+        resolved, _drift = apply_manifest(
+            delegate, accession, native, container, manifest
+        )
         members: dict[str, dict] = {}
-        for path, info in native.items():
-            relpath = delegate.relpath(accession, path)
+        for dpath, info in resolved.items():
+            relpath = delegate.relpath(accession, dpath)
             name = f"{container}/{relpath}" if relpath else container
-            # The delegate's info already carries md5/size and its own fetch metadata;
-            # only the *name* changes into this layer's address space. The original
-            # delegate path is stashed so a read can be forwarded without re-splitting.
-            members[name] = {**info, "name": name, "_chiro_source": path}
+            members[name] = {**info, "name": name}
         return members
 
     def _container_info(self, container: str) -> dict:
@@ -163,9 +177,13 @@ class ChiroFileSystem(ArchiveFileSystem):
 
     # ------------------------------------------------------------------- reads
     #
-    # Every byte operation is forwarded to the delegate, which does the real fetch
-    # (auth, verify-on-read, block cache) under its own protocol. This layer never
-    # touches the network itself, so `_data_url`/`_fetch_range` are never reached.
+    # Bytes are fetched by the delegate (auth, block cache under its own protocol),
+    # but **verified here**, against the *manifest's* md5 — because the delegate lists
+    # natively and a checksum-less archive (GEO, BIA-submitted) has no md5 of its own
+    # to check against. The manifest is the only thing that can, which is the point of
+    # a pin. So `_open`/`get_file` route through this layer's own verifying read path
+    # (base `_open`/`get_file` off `self.info`), and only the raw byte fetch is
+    # delegated, via `_data_url`/`_fetch_range` below.
 
     def _delegate_read(self, path: str) -> tuple[ArchiveFileSystem, str]:
         path = self._strip_protocol(path)
@@ -178,12 +196,18 @@ class ChiroFileSystem(ArchiveFileSystem):
         self, path: str, start: int | None = None, end: int | None = None, **kwargs: Any
     ) -> bytes:
         delegate, dpath = self._delegate_read(path)
-        return delegate.cat_file(dpath, start=start, end=end, **kwargs)
+        data = delegate.cat_file(dpath, start=start, end=end, **kwargs)
+        # A whole read is checkable against the manifest's md5 (a range is not); the
+        # delegate could not check it because it read natively, without the manifest.
+        if start is None and end is None:
+            self._verify_checksum(self.info(path), hashlib.md5(data).hexdigest())  # noqa: S324
+        return data
 
     def _open(self, path: str, mode: str = "rb", **kwargs: Any) -> Any:
         delegate, dpath = self._delegate_read(path)
         return delegate._open(dpath, mode=mode, **kwargs)
 
-    def get_file(self, rpath: str, lpath: str, **kwargs: Any) -> Any:
-        delegate, dpath = self._delegate_read(rpath)
-        return delegate.get_file(dpath, lpath, **kwargs)
+    # `get_file` is intentionally *not* overridden: the base copies via `self._open`
+    # (→ delegate) and then re-hashes the result against `self.info(rpath)` — the
+    # manifest md5 — refusing and deleting on mismatch. Forwarding to the delegate's
+    # own `get_file` would instead verify against a checksum it does not have.
