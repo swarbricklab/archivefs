@@ -63,6 +63,20 @@ def test_self_deposited_flag_sets_provenance(zenodo):
     assert manifest.provenance_type == chirograph.PROVENANCE_SELF
 
 
+def test_manifest_records_the_concept_doi_not_the_version(zenodo):
+    # A Zenodo pin must track the *concept* DOI — the mutable "latest" — so that
+    # `archivefs update` knows what to re-resolve; the version stays per entry.
+    fs = ZenodoFileSystem(skip_instance_cache=True)
+    manifest = build_manifest(fs, RECID)
+    assert manifest.concept == "doi:10.5281/zenodo.1486183"
+
+
+def test_explicit_concept_overrides_the_backend(zenodo):
+    fs = ZenodoFileSystem(skip_instance_cache=True)
+    manifest = build_manifest(fs, RECID, concept="doi:override")
+    assert manifest.concept == "doi:override"
+
+
 # ------------------------------------------------------------- the capture path
 
 
@@ -86,10 +100,18 @@ def test_manifest_refuses_when_no_checksum_is_published(geo):
     assert "--download" in message
 
 
+def test_geo_concept_is_the_bare_accession(geo):
+    geo()
+    fs = GEOFileSystem(skip_instance_cache=True)
+    # Concept and version coincide for GEO, so the accession *is* the concept.
+    assert fs.concept(GSE) == f"geo:{GSE}"
+
+
 def test_download_captures_checksums_for_a_checksumless_archive(geo):
     server = geo()
     fs = GEOFileSystem(skip_instance_cache=True)
     manifest = build_manifest(fs, GSE, download=True)
+    assert manifest.concept == f"geo:{GSE}"
 
     # Reading the bytes is the unavoidable cost, so bytes were served this time...
     assert server.bytes_served > 0

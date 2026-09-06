@@ -386,6 +386,21 @@ class ZenodoFileSystem(ArchiveFileSystem):
             "zenodo": self._record_provenance(record, requested=container),
         }
 
+    def concept(self, container: str) -> str | None:
+        """The concept DOI — the mutable "latest" tracker, not the version DOI.
+
+        This is the one archive where concept and version genuinely differ
+        (``concepts-and-versions.md``): a Zenodo record has a *version* DOI for the
+        exact bytes and a *concept* DOI that always resolves to the latest version. A
+        ``.chiro`` pin records the concept so ``archivefs update`` knows what to
+        re-resolve, while the version stays in each entry's ``archive_version``. Falls
+        back to the version DOI, then the accession, for the rare record with no
+        concept DOI.
+        """
+        provenance = self._container_info(container).get("zenodo") or {}
+        doi = provenance.get("concept_doi") or provenance.get("doi")
+        return f"doi:{doi}" if doi else super().concept(container)
+
     def _member(self, container: str, member: str) -> dict:
         """The member as a plain file, ignoring any ZIP presentation."""
         members = self._members(container)

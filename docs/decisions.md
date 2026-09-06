@@ -2606,3 +2606,35 @@ metadata-only mtime bump.
 **Cost to change my mind:** if we later want `file_version` in the pin (for a truly
 version-aware fetch), we accept that the body_hash then tracks those tokens too, and the
 "equal body_hash ⇒ no content change" shortcut in `archivefs update` narrows accordingly.
+
+## D36 — a manifest carries a **concept CURIE**, and a `chiro://` pin fetches *through* the backend
+
+Two decisions that only make sense together, both prerequisites for `archivefs update`
+and the `chiro://` protocol.
+
+### The concept, as a routable CURIE
+
+Every manifest the writer emits records a **concept** — the mutable tracker
+(`concepts-and-versions.md`): `geo:GSE176078`, `biostudies:S-BIAD3080`,
+`ega:EGAD…`, and for Zenodo the *concept* DOI (`doi:10.5281/zenodo.1486183`), which is a
+genuinely different identifier from the per-entry version DOI. The scheme lives in one
+place — `Backend.concept_scheme` — so it reads both directions: `ArchiveFileSystem.concept`
+*emits* it, and `registry.protocol_for_concept` *routes* it back to a `(protocol,
+accession)` pair. Uniqueness is enforced by a test; dbGaP (deferred) has none. A bare
+accession *is* the concept for BIA/GEO/EGA, so only Zenodo overrides.
+
+### `chiro://` routes through the real backend, not raw HTTP
+
+The pin-in-URL model has a fork: given a manifest, do you fetch each entry's `source_url`
+directly over HTTP, or re-enter the archivefs backend that owns it? **Through the
+backend.** A raw-HTTP fetch would bypass every guarantee the rest of the codebase is built
+to keep — EGA/BIA auth, verify-on-read (D34), the resumable block cache (D29), ZIP-safety,
+URL redaction — and so would silently fail for exactly the controlled-access archives that
+make a manifest worth having. So `chiro://<manifest>` reads the manifest's `concept`,
+resolves it to `protocol://accession`, and overlays the manifest there: the fetch is a
+normal backend read, verified against the manifest's md5, with auth and cache intact. This
+is the overlay form (`-o chiro=…`) made a first-class URL, not a new fetch path.
+
+**Cost to change my mind:** a manifest whose backend is uninstalled, or whose concept
+scheme is unknown, cannot resolve — `chiro://` then fails naming the missing extra, rather
+than falling back to a raw fetch that would skip verification.

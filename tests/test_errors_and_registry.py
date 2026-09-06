@@ -163,6 +163,34 @@ def test_no_archive_claims_an_immutability_basis_it_cannot_back():
             )
 
 
+def test_concept_schemes_are_unique_so_the_reverse_map_is_unambiguous():
+    """`protocol_for_concept` relies on each scheme belonging to exactly one backend.
+
+    A `chiro://` pin reads a manifest's concept CURIE to learn which backend
+    re-fetches its bytes; if two archives shared a scheme, that routing would be a
+    coin toss. The deferred dbGaP backend has no scheme, which is correct.
+    """
+    schemes = [b.concept_scheme for b in PROTOCOLS.values() if b.concept_scheme]
+    assert len(schemes) == len(set(schemes)), schemes
+    assert PROTOCOLS["dbgap"].concept_scheme is None
+
+
+def test_protocol_for_concept_round_trips_each_scheme():
+    from archivefs.registry import protocol_for_concept
+
+    # A DOI keeps its own colons — the split is on the *first* colon only.
+    assert protocol_for_concept("doi:10.5281/zenodo.123") == (
+        "zenodo",
+        "10.5281/zenodo.123",
+    )
+    assert protocol_for_concept("geo:GSE176078") == ("geo", "GSE176078")
+    assert protocol_for_concept("biostudies:S-BIAD3080") == ("bia", "S-BIAD3080")
+    assert protocol_for_concept("EGA:EGAD00001006673") == ("ega", "EGAD00001006673")
+    # An unknown scheme, or a bare word with no identifier, does not route.
+    assert protocol_for_concept("nonsense:x") is None
+    assert protocol_for_concept("geo") is None
+
+
 def test_a_deferred_backend_advertises_nothing():
     """dbGaP is not implemented; every profile field must say so, not just `status`."""
     dbgap = PROTOCOLS["dbgap"]
