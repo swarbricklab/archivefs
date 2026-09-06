@@ -597,6 +597,19 @@ class ArchiveFileSystem(AbstractFileSystem):
             return None
         return f"{scheme}:{self._strip_protocol(container)}"
 
+    def version_accession(self, container: str) -> str:
+        """The **version-pinned** accession a `chiro://` pin fetches through.
+
+        `concept` tracks *latest* (for `archivefs update`); this is the immutable
+        thing a pin must fetch to be reproducible. For every archive whose accession
+        and version coincide (BIA, GEO, EGA) they are the same string. Zenodo is the
+        exception — a concept DOI resolves to whatever version is latest, so a pin
+        built from it must record the *version* recid it actually resolved to, or a
+        later version would silently replace the pinned bytes. Zenodo overrides this;
+        the default is the accession as addressed.
+        """
+        return self._strip_protocol(container)
+
     def _resolve(self, path: str) -> dict:
         path = self._strip_protocol(path)
         if not path:

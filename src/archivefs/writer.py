@@ -144,7 +144,10 @@ def build_manifest(
             else chirograph.PROVENANCE_OBSERVED
         ),
         files=entries,
-        record_accession=container,
+        # The version-pinned accession, not the address the user typed: a Zenodo
+        # concept DOI resolves to the *version* recid here, so `chiro://` fetches the
+        # exact pinned version rather than following the concept to latest.
+        record_accession=fs.version_accession(container),
         retrieved=retrieved,
         source_url=source_url,
         concept=concept,

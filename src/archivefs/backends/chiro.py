@@ -119,7 +119,13 @@ class ChiroFileSystem(ArchiveFileSystem):
                 f"{container} names concept {concept!r}, whose scheme belongs to no "
                 f"archivefs backend. Known schemes: doi, geo, biostudies, ega."
             )
-        protocol, accession = routed
+        protocol, concept_accession = routed
+        # Fetch through the **version-pinned** accession (`record_accession`), not the
+        # concept: for Zenodo the concept DOI resolves to *latest*, so routing on it
+        # would let a newer version replace the pinned bytes. `concept` is only for
+        # `archivefs update` (track-latest); a pin must be reproducible. Falls back to
+        # the concept's own identifier for a manifest that predates this field.
+        accession = getattr(manifest, "record_accession", None) or concept_accession
         # `chiro=<manifest>` makes the manifest the delegate's overlay, so its listing
         # is the manifest's view and each read is verified against the manifest md5.
         delegate = fsspec.filesystem(

@@ -13,10 +13,12 @@ from __future__ import annotations
 import pytest
 from tests.fake_http import FakeRequestsModule
 from tests.test_chiro import BODIES, GSE, FakeGEO, md5
+from tests.test_zenodo import CONCEPT_RECID, CSV_BYTES, RECID, FakeZenodo
 
 from archivefs import base as base_mod
 from archivefs.backends.chiro import ChiroFileSystem
 from archivefs.backends.geo import GEOFileSystem
+from archivefs.backends.zenodo import ZenodoFileSystem
 from archivefs.errors import ManifestError, VerificationError
 from archivefs.writer import build_manifest
 
@@ -106,6 +108,33 @@ def test_a_manifest_without_a_concept_cannot_route(tmp_path, geo):
     fs = ChiroFileSystem(skip_instance_cache=True)
     with pytest.raises(ManifestError, match="concept"):
         fs.ls(f"{path}")
+
+
+@pytest.fixture
+def zenodo(monkeypatch):
+    server = FakeZenodo()
+    monkeypatch.setattr(base_mod, "requests", FakeRequestsModule(server))
+    monkeypatch.delenv("ZENODO_TOKEN", raising=False)
+    return server
+
+
+def test_zenodo_pin_routes_to_the_version_not_the_concept(zenodo, tmp_path):
+    # A manifest addressed by the concept DOI: concept tracks latest, but the pin
+    # must fetch the resolved *version* — otherwise a newer version silently
+    # replaces the pinned bytes. Regression for the reproducibility bug live
+    # testing caught.
+    src = ZenodoFileSystem(skip_instance_cache=True)
+    manifest = build_manifest(src, CONCEPT_RECID)
+    path = tmp_path / "rec.chiro.json"
+    path.write_text(chirograph.dumps(manifest))
+
+    fs = ChiroFileSystem(skip_instance_cache=True)
+    fs._members(str(path))  # resolve the delegate
+    _delegate, accession = fs._delegates[str(path)]
+    assert accession == RECID  # the version recid, not the concept DOI
+
+    # And the read still works, verified through Zenodo.
+    assert fs.cat_file(f"{path}/samples.csv") == CSV_BYTES
 
 
 def test_an_unknown_concept_scheme_is_refused(tmp_path, geo):

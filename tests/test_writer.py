@@ -77,6 +77,18 @@ def test_explicit_concept_overrides_the_backend(zenodo):
     assert manifest.concept == "doi:override"
 
 
+def test_a_concept_addressed_manifest_pins_the_resolved_version(zenodo):
+    from tests.test_zenodo import CONCEPT_RECID
+
+    # Address the *concept* DOI, which resolves to latest...
+    fs = ZenodoFileSystem(skip_instance_cache=True)
+    manifest = build_manifest(fs, CONCEPT_RECID)
+    # ...but the pin records the *version* recid it resolved to, so it stays
+    # reproducible if a newer version is later published; concept still tracks latest.
+    assert manifest.concept == "doi:10.5281/zenodo.1486183"
+    assert manifest.record_accession == RECID
+
+
 # ------------------------------------------------------------- the capture path
 
 
