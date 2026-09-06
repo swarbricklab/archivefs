@@ -81,14 +81,18 @@ def build_manifest(
     the capture path (read-and-hash) even where the archive publishes checksums, and
     is the *only* way to build a manifest for an archive that publishes none.
 
-    ``source_url`` / ``concept`` / ``record_version`` are the schema-1.1 staleness
-    fields; the writer only carries whatever the caller supplies (populating them
-    per-backend is ``archivefs update``'s job, ``archivefs-update-design.md``). The
-    per-file ``version_id`` *is* filled in from the listing, because a backend that
+    ``concept`` defaults to the backend's own concept CURIE (``fs.concept``), so a
+    manifest is self-identifying: a ``chiro://`` pin reads it to learn which backend
+    re-fetches the bytes, and ``archivefs update`` reads it to know what to re-resolve.
+    Pass ``concept`` explicitly to override. ``source_url`` / ``record_version`` are the
+    other schema-1.1 staleness fields; the writer carries whatever the caller supplies.
+    The per-file ``version_id`` *is* filled in from the listing, because a backend that
     sets it has declared it the entry's immutability token.
     """
     chirograph = _chirograph()
     container = fs._strip_protocol(container)
+    if concept is None:
+        concept = fs.concept(container)
 
     listing = fs.find(container, detail=True)
     entries: list[Any] = []

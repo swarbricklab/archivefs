@@ -578,6 +578,25 @@ class ArchiveFileSystem(AbstractFileSystem):
         self._members(container)
         return self._drift.get(container)
 
+    def concept(self, container: str) -> str | None:
+        """The mutable *concept* CURIE for a container, or ``None``.
+
+        The concept is the tracker a `.chiro` pin records so it knows which backend
+        re-fetches its bytes, and what `archivefs update`/`check` re-resolve to ask
+        "is there anything newer" (`concepts-and-versions.md`). A bare accession *is*
+        the concept for every archive whose accession and version coincide (BIA, GEO,
+        EGA), so the default is `<scheme>:<accession>`, read from the archive's
+        capability profile. Zenodo, whose concept and version are *different* DOIs,
+        overrides this to resolve its concept DOI.
+        """
+        from archivefs.registry import PROTOCOLS
+
+        backend = PROTOCOLS.get(type(self).protocol)
+        scheme = backend.concept_scheme if backend else None
+        if scheme is None:
+            return None
+        return f"{scheme}:{self._strip_protocol(container)}"
+
     def _resolve(self, path: str) -> dict:
         path = self._strip_protocol(path)
         if not path:

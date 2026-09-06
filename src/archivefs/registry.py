@@ -41,6 +41,7 @@ __all__ = [
     "PROTOCOLS",
     "Backend",
     "installed_backends",
+    "protocol_for_concept",
     "register_implementations",
 ]
 
@@ -114,6 +115,17 @@ class Backend:
     #: Does this archive present containers (a ZIP) as directories?
     expands_containers: bool = False
 
+    #: The CURIE scheme for this archive's **concept** reference — the mutable
+    #: tracker that ``archivefs update``/``check`` re-resolve, and that a ``chiro://``
+    #: pin reads to know which backend re-fetches its bytes
+    #: (``concepts-and-versions.md``). A bare accession *is* the concept for BIA, GEO
+    #: and EGA, so the default form is ``<scheme>:<accession>``; Zenodo, whose concept
+    #: and version are different DOIs, resolves its own (``doi:<concept DOI>``).
+    #: ``None`` for an archive with no concept scheme (dbGaP, deferred). The single
+    #: source both directions read: the filesystem to *emit* a concept, ``chiro://`` to
+    #: *route* one back to a protocol.
+    concept_scheme: str | None = None
+
     @property
     def error_text(self) -> str:
         if self.extra:
@@ -155,6 +167,7 @@ PROTOCOLS: dict[str, Backend] = {
             "scratch_dir": str,
         },
         dvc_wrapper="EGADVCFileSystem",
+        concept_scheme="ega",
         # `plainChecksum` is the md5 of the *decrypted* bytes, which is what lands
         # on disk — established against the live API in D1, including the
         # interrupted-and-resumed case.
@@ -177,6 +190,7 @@ PROTOCOLS: dict[str, Backend] = {
             "scratch_dir": str,
         },
         dvc_wrapper="ZenodoDVCFileSystem",
+        concept_scheme="doi",
         published_checksum="md5",
         # A published record is immutable, so the file md5 identifies the entry.
         # A ZIP member has no md5 (D9) but the central directory gives a CRC32 for
@@ -200,6 +214,7 @@ PROTOCOLS: dict[str, Backend] = {
             "scratch_dir": str,
         },
         dvc_wrapper="GEODVCFileSystem",
+        concept_scheme="geo",
         # GEO publishes no per-file digest at all (D8), so `info()["md5"]` is None
         # with a `checksum_source` saying why rather than an ETag standing in.
         published_checksum=None,
@@ -224,6 +239,7 @@ PROTOCOLS: dict[str, Backend] = {
             "scratch_dir": str,
         },
         dvc_wrapper="BIADVCFileSystem",
+        concept_scheme="biostudies",
         # Mixed, and recorded conservatively: the derived (OME-Zarr) view carries
         # md5s, submitted files carry none. A profile cannot say "sometimes", and
         # the failure mode of guessing generously is silent data loss, so both
@@ -254,6 +270,26 @@ PROTOCOLS: dict[str, Backend] = {
 PASSTHROUGH_INFO_KEYS: frozenset[str] = frozenset(
     {"url", "archive_version", *PROTOCOLS}
 )
+
+
+def protocol_for_concept(curie: str) -> tuple[str, str] | None:
+    """Map a concept CURIE back to ``(protocol, identifier)``, or ``None``.
+
+    The inverse of :meth:`ArchiveFileSystem.concept`: it is how a ``chiro://`` pin
+    learns which backend re-fetches its bytes from the manifest alone. The scheme is
+    matched case-insensitively against :attr:`Backend.concept_scheme`; the identifier
+    is whatever followed the first colon, so a DOI (``doi:10.5281/zenodo.123``) keeps
+    its own colons. Ambiguity is impossible here because each scheme is unique to one
+    backend — asserted by ``test_concept_schemes_are_unique``.
+    """
+    scheme, sep, identifier = curie.partition(":")
+    if not sep or not identifier:
+        return None
+    scheme = scheme.lower()
+    for backend in PROTOCOLS.values():
+        if backend.concept_scheme and backend.concept_scheme.lower() == scheme:
+            return backend.protocol, identifier
+    return None
 
 
 def register_implementations(clobber: bool = True) -> None:
@@ -297,6 +333,7 @@ def installed_backends() -> dict[str, dict]:
                 "published_checksum": backend.published_checksum,
                 "immutability_basis": backend.immutability_basis,
                 "expands_containers": backend.expands_containers,
+                "concept_scheme": backend.concept_scheme,
                 "options": sorted(backend.config),
             },
         }
