@@ -11,6 +11,8 @@ and none of them should require writing Python:
   → ``archivefs check`` / ``archivefs verify``
 * "give me a portable, content-addressed pin of this deposit"
   → ``archivefs manifest``
+* "has the upstream moved since I pinned it, and re-pin if so"
+  → ``archivefs update``
 
 Deliberately stdlib-only: a diagnostic tool that needs its own dependency tree is
 a diagnostic tool that cannot run when you need it.
@@ -56,6 +58,11 @@ def _filesystem(url: str, options: list[str] | None = None) -> tuple[Any, str]:
             f"unknown protocol {protocol!r}. archivefs speaks: "
             f"{', '.join(sorted(PROTOCOLS))}"
         )
+    fs = fsspec.filesystem(protocol, **_parse_options(options))
+    return fs, rest
+
+
+def _parse_options(options: list[str] | None) -> dict[str, Any]:
     storage_options: dict[str, Any] = {}
     for item in options or []:
         key, _, value = item.partition("=")
@@ -65,8 +72,7 @@ def _filesystem(url: str, options: list[str] | None = None) -> tuple[Any, str]:
             storage_options[key] = value == "true"
         else:
             storage_options[key] = value
-    fs = fsspec.filesystem(protocol, **storage_options)
-    return fs, rest
+    return storage_options
 
 
 def blockcache_env() -> str:
@@ -308,6 +314,47 @@ def cmd_manifest(args: argparse.Namespace) -> int:
         f"{sink}: {manifest.nfiles} file(s), {_human(manifest.size)}, "
         f"{ref} ({manifest.provenance_type})",
         file=sys.stderr,
+    )
+    return 0
+
+
+def cmd_update(args: argparse.Namespace) -> int:
+    """Regenerate a .chiro pin from the live archive and, with --write, re-pin it."""
+    from archivefs.chiro import _chirograph
+    from archivefs.update import plan_update
+
+    chirograph = _chirograph()
+    plan = plan_update(
+        args.target, _parse_options(args.option), download=args.download
+    )
+    if not plan.moved:
+        print(
+            f"up to date: {plan.old.concept} — "
+            f"body_hash {plan.old.body_hash} unchanged"
+        )
+        return 0
+
+    print(f"upstream moved: {plan.diff.summary()}")
+    for entry in plan.diff.added:
+        print(f"  + {entry.relpath}")
+    for entry in plan.diff.removed:
+        print(f"  - {entry.relpath}")
+    for change in plan.diff.changed:
+        print(f"  ~ {change.relpath} ({change.kind})")
+
+    if not args.write:
+        print("\nre-run with --write to re-pin to the current upstream.")
+        return 1
+    if plan.manifest_path is None:
+        raise SystemExit(
+            "this pin is a URL, so there is no local manifest to rewrite. Fetch a "
+            "local copy of the .chiro.json and update that."
+        )
+    plan.manifest_path.write_text(chirograph.dumps(plan.new))
+    print(
+        f"\nre-pinned {plan.manifest_path}: "
+        f"{plan.old.body_hash} → {plan.new.body_hash}\n"
+        "Commit the rewritten manifest (and re-run `dvc update` if it is a DVC import)."
     )
     return 0
 
@@ -781,6 +828,32 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_common(manifest)
     manifest.set_defaults(func=cmd_manifest)
+
+    update = sub.add_parser(
+        "update",
+        help="has a .chiro pin's upstream moved? regenerate and, with --write, re-pin",
+        description=(
+            "Regenerate a committed .chiro manifest from the live archive (download-"
+            "free where it publishes checksums) and compare it to the pin. Reports "
+            "what changed; --write supersedes the pin by rewriting the manifest. This "
+            "is the supersede `dvc update` cannot do on a content-addressed pin."
+        ),
+    )
+    update.add_argument(
+        "target", help="a chiro:// URL or a path to the committed .chiro.json"
+    )
+    update.add_argument(
+        "--write",
+        action="store_true",
+        help="rewrite the manifest to the current upstream (default: report only)",
+    )
+    update.add_argument(
+        "--download",
+        action="store_true",
+        help="read and hash the bytes for files the archive publishes no checksum for",
+    )
+    add_common(update)
+    update.set_defaults(func=cmd_update)
 
     cfg = sub.add_parser(
         "config", help="the configuration layers, and what they resolve to"

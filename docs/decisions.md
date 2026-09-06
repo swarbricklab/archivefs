@@ -2638,3 +2638,31 @@ is the overlay form (`-o chiro=…`) made a first-class URL, not a new fetch pat
 **Cost to change my mind:** a manifest whose backend is uninstalled, or whose concept
 scheme is unknown, cannot resolve — `chiro://` then fails naming the missing extra, rather
 than falling back to a raw fetch that would skip verification.
+
+## D37 — `archivefs update` supersedes a pin by **regeneration**, never by trusting a token
+
+`dvc update` on a `.chiro` pin is correctly a no-op — a content-addressed reference cannot
+move. But the dataset does, so `archivefs update` is the supersede: it regenerates the
+manifest from the live archive (routed through the concept's backend, D36; download-free
+where the archive publishes checksums, `--download` where it does not), compares the new
+`body_hash` to the pinned one, and — with `--write` — rewrites the manifest to the current
+upstream.
+
+The load-bearing choice is that the authority is **regeneration and body_hash comparison**,
+not a cheap version token. The design (`archivefs-update-design.md` §3) allows a
+`record_version` pre-check as an optimisation, but for GEO and BIA-submitted a
+`record_version` is only an mtime — a *trigger*, never *proof* — and the same discipline as
+verify-on-read (D34) applies: an unchanged mtime means nothing, so the answer is always the
+full regenerate. The pre-check is therefore deferred, not merely unimplemented: wiring it in
+must not let an unchanged token *skip* the regenerate, only *prompt* it.
+
+Rewriting the manifest in place (the committed sidecar) is the supersede's MVP; the fuller
+form repoints a `.dvc`'s `chiro://` dep, and is left for when the `.dvc`-rewriting is worth
+the YAML surgery. One known limitation: regeneration lists the archive's current native
+layout, so a *relocating* manifest (relpath ≠ source path) would diff as wholesale
+added/removed. Manifests written by `archivefs manifest` do not relocate, so the common case
+is exact.
+
+**Cost to change my mind:** if we later relocate in the writer, `update` needs to carry the
+relocation rules (or diff on `source_path`, not `relpath`) so a re-pin does not read as a
+total change.
