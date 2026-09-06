@@ -342,17 +342,19 @@ Note the two want *different* things in `version_id`, and issue #1 picks one: a
 per-entry content token, not the record's DOI. A concept-DOI resolution therefore has
 to be recorded somewhere else — `archive_version` already exists for it.
 
-### 5. A `chirograph`-writing path for our own deposits, driven from archivefs
+### 5. ~~A `chirograph`-writing path for our own deposits, driven from archivefs~~ — **built**
 **Effort: small (chirograph does the work). Value: closes the GEO checksum gap for
 our own data.**
 
-`archivefs.chiro` currently only *reads* manifests. The complement is: after
-downloading a record that has no manifest, emit an `observed-download` manifest
-recording what we got — the design doc calls this out ("capture an
-`observed-download` `.chiro` on first fetch"). chirograph already has the writer;
-this is one CLI command (`archivefs observe geo://GSE… -o GSE….chiro.json`) plus
-plumbing. It makes any third-party record reproducible-by-reference even when the
-archive publishes no digest, which is precisely GEO's weakness.
+`archivefs.chiro` read manifests; `archivefs.writer` now writes them, exposed as
+`archivefs manifest <url> [--out X.chiro.json]`. Where the archive publishes a
+per-file digest (Zenodo, EGA, derived BIA) the manifest is built **download-free**
+from the listing's own md5s; `--download` reads and hashes the bytes for an archive
+that publishes none (GEO), which is the only way to a real checksum there. The
+result is an `observed-download` manifest (or `--self-deposited` for data you
+vouch for) that makes any third-party record reproducible-by-reference. This is the
+writer half of "all roads lead to Chirograph": the reader (`chiro.py`) turns a
+manifest into a listing; the writer turns a listing into a manifest.
 
 ---
 

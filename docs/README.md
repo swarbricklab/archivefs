@@ -23,6 +23,7 @@ One page per subcommand: syntax, every option, worked scenarios, exit codes.
 | [`archivefs ls`](cli-ls.md) | what is in this record, before downloading it |
 | [`archivefs stat`](cli-stat.md) | everything known about one path, as JSON |
 | [`archivefs get`](cli-get.md) | download, verifying against published checksums |
+| [`archivefs manifest`](cli-manifest.md) | write a `.chiro` pin for a deposit, download-free where it can |
 | [`archivefs check`](cli-check.md) | has the *deposit* drifted from its manifest? |
 | [`archivefs verify`](cli-verify.md) | do the files on *my disk* match the manifest? |
 | [`archivefs dvc`](cli-dvc.md) | register the protocols with DVC — required once per environment |
