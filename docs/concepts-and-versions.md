@@ -152,7 +152,9 @@ Chirograph manifest, and nothing a bare concept URL can provide.
   source. This is why "all roads lead to Chirograph": for a concept-only archive it is
   the *only* thing that can supply the version half. Make one with
   [`archivefs manifest`](cli-manifest.md): download-free where the archive publishes
-  checksums, `--download` where it does not.
+  checksums, `--download` where it does not. Then address it directly as a
+  [`chiro://`](chiro-protocol.md) URL — the manifest carries its own concept, so the pin
+  re-fetches (and verifies) through the archive it names, no overlay option required.
 
 See [`archive-capabilities.md`](archive-capabilities.md) for exactly what each archive
 can and cannot promise.

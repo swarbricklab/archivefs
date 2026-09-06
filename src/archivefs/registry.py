@@ -247,6 +247,43 @@ PROTOCOLS: dict[str, Backend] = {
         published_checksum=None,
         immutability_basis=None,
     ),
+    "chiro": Backend(
+        protocol="chiro",
+        class_path="archivefs.backends.chiro.ChiroFileSystem",
+        extra="chiro",
+        summary=(
+            "a committed .chiro manifest as a portable, self-verifying pin "
+            "(routes to the archive its concept names)"
+        ),
+        requires=("chirograph",),
+        # Every option here is forwarded, unchanged, to whichever backend the
+        # manifest's concept routes to — chiro:// is an addressing layer, so its
+        # config is the union of what its delegates accept.
+        config={
+            "layout": str,
+            "view": str,
+            "extract_zips": bool,
+            "strip_components": int,
+            "api_url": str,
+            "s3_url": str,
+            "base_url": str,
+            "credentials_file": str,
+            "max_concurrent_reads": int,
+            "cache_dir": str,
+            "scratch_dir": str,
+        },
+        dvc_wrapper="ChiroDVCFileSystem",
+        # A manifest always carries md5s — that is the point of one.
+        published_checksum="md5",
+        # But *not* version-aware: the pin is a committed, immutable manifest, so a
+        # completed import records `outs.md5` like any normal import; there is no
+        # mutable source to re-resolve, and no per-entry ``version_id`` to promise DVC
+        # (which it would silently drop entries for lacking). See dvcfs `version_aware`.
+        immutability_basis=None,
+        # chiro:// is not itself a concept scheme — it *carries* another archive's
+        # concept in the manifest, and routes on that.
+        concept_scheme=None,
+    ),
     "dbgap": Backend(
         protocol="dbgap",
         class_path="archivefs.backends.dbgap.DbGaPFileSystem",
