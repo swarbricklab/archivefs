@@ -2666,3 +2666,30 @@ is exact.
 **Cost to change my mind:** if we later relocate in the writer, `update` needs to carry the
 relocation rules (or diff on `source_path`, not `relpath`) so a re-pin does not read as a
 total change.
+
+## D38 — a `chiro://` pin fetches the **version**, not the concept — found by live testing
+
+The first live run of the full chain (`manifest` → `chiro://` → `update`, against real
+Zenodo) surfaced a reproducibility bug the fakes could not: `chiro://` routed its fetch via
+the manifest's `concept`, and for Zenodo the concept is the **concept DOI**, which resolves
+to *latest*. So a `chiro://` pin to Zenodo was not a pin at all — once a newer version was
+published, it would follow the concept to that version (and then verify-on-read would refuse
+the mismatched bytes, i.e. fail rather than reproduce). Only visible against a real archive
+with the concept/version split; GEO/BIA/EGA have none, so their fakes showed nothing wrong.
+
+The fix separates the two references the model always distinguished
+(`concepts-and-versions.md`), now enforced in code:
+
+* **`concept`** (a CURIE) is the mutable tracker — what `archivefs update` re-resolves to ask
+  "is there anything newer". Unchanged.
+* **`record_accession`** is now the **version-pinned** accession — `ArchiveFileSystem.
+  version_accession`, which Zenodo overrides to the resolved version recid (a concept DOI
+  addressed at capture time is pinned to the version it *then* resolved to). `chiro://`
+  routes its fetch through this, so a pin fetches the exact bytes it recorded, forever.
+
+For GEO/BIA/EGA the two coincide, so nothing changes; only Zenodo's split is now honoured on
+the read path as well as the write path. This is why the live smoke test was worth running
+before going public: a whole class of bug lives only where the fake's world is too simple.
+
+**Cost to change my mind:** none foreseen — this is the model the docs already described; the
+code had merely conflated the two references on the fetch path.

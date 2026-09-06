@@ -31,6 +31,13 @@ bypass every one of those — and so would silently fail for exactly the control
 archives (EGA, unreleased BIA) that make a manifest worth having. `chiro://` is a pure
 *addressing* layer; the owning backend does the work. This is D36.
 
+The fetch routes to the **version**, not the concept ([`decisions.md`](decisions.md) D38).
+The scheme (`doi:`, `geo:`, …) picks the backend, but the *accession* is the manifest's
+`record_accession` — the version-pinned identity. This only matters for Zenodo, where the
+concept DOI resolves to *latest*: a pin built from it records the version recid it resolved
+to, so `chiro://` fetches those exact bytes forever, while `archivefs update` uses the
+concept to check for a newer one. For GEO/BIA/EGA the two coincide.
+
 ## Making one
 
 ```console

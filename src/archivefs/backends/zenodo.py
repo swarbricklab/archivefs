@@ -401,6 +401,18 @@ class ZenodoFileSystem(ArchiveFileSystem):
         doi = provenance.get("concept_doi") or provenance.get("doi")
         return f"doi:{doi}" if doi else super().concept(container)
 
+    def version_accession(self, container: str) -> str:
+        """The resolved *version* recid — what a pin fetches, immutably.
+
+        A concept DOI resolves to latest, so recording the address the user typed
+        would let a later version replace the pinned bytes. Recording the version
+        recid the concept resolved to (``record_id``) makes the pin reproducible:
+        ``concept`` still tracks latest for ``archivefs update``, but ``chiro://``
+        fetches exactly this version.
+        """
+        provenance = self._container_info(container).get("zenodo") or {}
+        return provenance.get("record_id") or super().version_accession(container)
+
     def _member(self, container: str, member: str) -> dict:
         """The member as a plain file, ignoring any ZIP presentation."""
         members = self._members(container)
