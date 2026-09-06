@@ -87,6 +87,12 @@ not optional here if you want either verification or reproducibility.
 
 **`dbgap`** — deferred; the backend refuses with an explanation rather than pretending.
 
+**`chiro`** — not a source archive but the *pin* over one: a committed `.chiro` manifest
+addressed directly ([`chiro-protocol.md`](chiro-protocol.md)). It has no row of its own
+because it inherits its delegate's — a `chiro://` URL whose concept is `geo:…` reads the
+GEO row, but now *with* a checksum and a reproducible pin, which is the whole point. It is
+the "yes, needs Chirograph" cell made concrete.
+
 ---
 
 ## Reading a column back to a decision

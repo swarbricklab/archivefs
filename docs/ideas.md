@@ -551,28 +551,25 @@ The concurrency is worth having — an import always reads cold — but the less
 one D27 already flagged and this went on to demonstrate: **absolute MB/s against
 Zenodo means nothing outside a within-run comparison at one temperature.**
 
-## Make a plain file's *download* resumable, not just a ZIP's blocks
+## ~~Make a plain file's *download* resumable, not just a ZIP's blocks~~ — done, via the block cache (#24)
 
-D29 gave ZIP containers a block cache that survives the process, so an interrupted
-20 GB import resumes. **A plain file gets nothing.** `_open` uses a read-ahead cache
-and DVC streams straight to a temporary file, so an `archivefs get` or `dvc
-import-url` of a 2.5 GB `.ome.tif` that dies at 90% starts again from zero — and at
-the 2.32 MB/s a cold Zenodo object gives (D28), that is 18 minutes thrown away for
-that file, more for the imaging objects this project exists to move.
+D29 gave ZIP containers a block cache that survives the process. This idea proposed a
+*separate* mechanism for plain files — a partial output file plus an `HTTP Range` resume
+offset, written next to the destination. That is **not the route taken**: the D29
+follow-up (#24) instead routes a plain file's `_open` read through the *same* resumable
+block cache (`ResumableBlockCache`/`MMapCache`), on by default under DVC when a cache
+directory is set and the object publishes a checksum. So an `archivefs get` or `dvc
+import-url` of a 2.5 GB `.ome.tif` that dies at 90% now resumes from the cached blocks
+rather than from zero — the problem this idea named, solved by extending the existing
+mechanism rather than adding a second one.
 
-It is not the same mechanism. A block cache is the right shape when the reader jumps
-around inside a container; a sequential download wants a partial output file plus a
-resume offset, which is `HTTP Range` against something already on disk. The
-correctness hazard is the mirror image of D29's and just as sharp: resuming into a
-partial file whose *tail* is a half-written buffer appends good bytes to bad ones and
-produces a file that is the right length and wrong. So the offset has to come from a
-sidecar written after an `fsync`, not from `os.path.getsize`.
-
-The identity check D29 already has — protocol, path, size, published md5 — carries
-over unchanged, and so does the argument for keying on the checksum. What does not
-carry over is where the file lives: a resumable download's partial output belongs
-next to its destination, not in a shared cache directory, because that is where the
-finished file is going anyway.
+The correctness hazard this entry worried about (appending good bytes onto a half-written
+tail) does not arise for the block-cache route: block identity is keyed on protocol, path,
+size and published md5, and a partially-written trailing block is simply re-fetched, not
+trusted. The one thing the block cache does *not* give that a next-to-destination partial
+would is resume for an object with **no published checksum** (bare GEO/BIA-submitted),
+where there is no identity to key on — that residual case, if it ever matters, is the only
+part of this idea still live.
 
 ## Seed the ZIP reading cache from the listing view
 
