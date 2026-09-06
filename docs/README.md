@@ -83,6 +83,7 @@ private file, and every other route is refused. See
 | `bia://` derived | ✅ MD5 from S3 ETag | OME-Zarr pyramids and thumbnails |
 | `bia://` submitted | ❌ | a `.chiro` sidecar fixes it |
 | `geo://` | ❌ | a `.chiro` sidecar fixes it |
+| `chiro://` | ✅ MD5 from the manifest | a committed `.chiro` pin; routes to the archive its concept names ([`chiro-protocol.md`](chiro-protocol.md)) |
 | `dbgap://` | — | deferred; refuses with an explanation |
 
 Where a checksum is missing, `dvc import-url --no-download` still records a correct
