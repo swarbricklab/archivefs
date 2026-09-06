@@ -298,21 +298,30 @@ def cmd_manifest(args: argparse.Namespace) -> int:
         download=args.download,
     )
 
-    text = chirograph.dumps(manifest)
     if args.out == "-":
         # The document goes to stdout clean (for a pipe); the summary to stderr.
+        text = chirograph.dumps(manifest)
         print(text)
         sink = "stdout"
-    else:
-        out = (
-            Path(args.out).expanduser()
-            if args.out
-            else Path(manifest.default_filename())
-        )
+        ref = chirograph.ChiroRef.for_bytes(text.encode())
+    elif args.out:
+        # An explicit path: write there verbatim. The addressable digest ref still
+        # comes from the file's own bytes, but it only resolves if the file is in a
+        # store — so report the path form the caller chose.
+        out = Path(args.out).expanduser()
+        text = chirograph.dumps(manifest)
         out.write_text(text)
         sink = str(out)
+        ref = f"chiro://{out}"
+    else:
+        # Default: into the repo-local store, named by the whole-file digest, so the
+        # `chiro://md5:…` reference resolves without anyone recording where it lives.
+        from archivefs import store
 
-    ref = chirograph.canonical_ref(manifest)
+        dest, chiro_ref = store.write_to_store(manifest)
+        sink = str(dest)
+        ref = chiro_ref
+
     print(
         f"{sink}: {manifest.nfiles} file(s), {_human(manifest.size)}, "
         f"{ref} ({manifest.provenance_type})",
@@ -323,18 +332,17 @@ def cmd_manifest(args: argparse.Namespace) -> int:
 
 def cmd_update(args: argparse.Namespace) -> int:
     """Regenerate a .chiro pin from the live archive and, with --write, re-pin it."""
+    from archivefs import store
     from archivefs.chiro import _chirograph
     from archivefs.update import plan_update
 
-    chirograph = _chirograph()
+    _chirograph()
     plan = plan_update(
         args.target, _parse_options(args.option), download=args.download
     )
+    old_ref = chiroref_for(plan.old)
     if not plan.moved:
-        print(
-            f"up to date: {plan.old.concept} — "
-            f"body_hash {plan.old.body_hash} unchanged"
-        )
+        print(f"up to date: {plan.old.concept} — {old_ref} unchanged")
         return 0
 
     print(f"upstream moved: {plan.diff.summary()}")
@@ -348,18 +356,28 @@ def cmd_update(args: argparse.Namespace) -> int:
     if not args.write:
         print("\nre-run with --write to re-pin to the current upstream.")
         return 1
-    if plan.manifest_path is None:
-        raise SystemExit(
-            "this pin is a URL, so there is no local manifest to rewrite. Fetch a "
-            "local copy of the .chiro.json and update that."
-        )
-    plan.manifest_path.write_text(chirograph.dumps(plan.new))
+
+    # Supersede, do not overwrite: the new manifest is a *new* digest-named file, so
+    # the old observation coexists — that pair is the drift record (spec §13). Repoint
+    # your .dvc dep to the new reference and commit both. The new file goes in the same
+    # store the old pin resolved from (anchored on its path), not wherever the cwd is.
+    dest, new_ref = store.write_to_store(plan.new, start=plan.manifest_path)
     print(
-        f"\nre-pinned {plan.manifest_path}: "
-        f"{plan.old.body_hash} → {plan.new.body_hash}\n"
-        "Commit the rewritten manifest (and re-run `dvc update` if it is a DVC import)."
+        f"\nre-pinned: {old_ref}\n"
+        f"       ->  {new_ref}\n"
+        f"wrote {dest}\n"
+        f"Repoint the dependency to {new_ref} and commit (then `dvc update` if it is a "
+        f"DVC import)."
     )
     return 0
+
+
+def chiroref_for(manifest: Any) -> Any:
+    """The whole-file `chiro://md5:…` reference for a manifest as re-serialised."""
+    from archivefs.chiro import _chirograph
+
+    chirograph = _chirograph()
+    return chirograph.ChiroRef.for_bytes(chirograph.dumps(manifest).encode())
 
 
 def cmd_dvc(args: argparse.Namespace) -> int:

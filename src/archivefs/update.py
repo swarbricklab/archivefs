@@ -49,34 +49,44 @@ class UpdatePlan:
         return not self.diff.identical
 
 
-def _load_manifest(ref: str) -> tuple[Any, Path | None]:
-    """Load a manifest from a local path or a URL, returning ``(manifest, path)``.
+def _load_manifest(target: str) -> tuple[Any, Path | None]:
+    """Load the manifest ``target`` names, returning ``(manifest, path)``.
 
-    ``path`` is ``None`` for a URL — there is nothing on local disk to rewrite.
+    ``target`` is a ``chiro://md5:<digest>`` reference (resolved via the store), a
+    ``chiro://…`` / bare path to a committed ``.chiro.json``, or a URL. ``path`` is
+    ``None`` for a URL — there is nothing on local disk.
     """
+    from archivefs import store
     from archivefs.chiro import MANIFEST_SUFFIX
 
     chirograph = _chirograph()
-    if not ref.endswith(MANIFEST_SUFFIX):
+
+    # A digest reference resolves through the store to a concrete file.
+    ref = store.as_ref(target)
+    if ref is not None:
+        path = store.resolve_ref(ref)
+        return chirograph.load(path), path
+
+    plain = target[len("chiro://") :] if target.startswith("chiro://") else target
+    # Must name a manifest file, not an archive record: the suffix check comes before
+    # any fetch so `geo://GSE…` is refused rather than opened as a directory.
+    if not plain.endswith(MANIFEST_SUFFIX):
         raise ManifestError(
-            f"{ref} is not an archive URL's manifest — `archivefs update` takes the "
-            f"committed {MANIFEST_SUFFIX} (or a chiro:// URL naming it). To pin an "
-            f"archive record for the first time, use `archivefs manifest`."
+            f"{target} is not a manifest — `archivefs update` takes a "
+            f"chiro://md5:<digest> reference or a committed {MANIFEST_SUFFIX} (not an "
+            f"archive URL). To pin an archive record, use `archivefs manifest`."
         )
     # A Windows drive letter ("C:\\") is not a URL scheme; a real scheme has more
     # than one leading character before the colon.
-    scheme, sep, _ = ref.partition("://")
+    scheme, sep, _ = plain.partition("://")
     if sep and len(scheme) > 1:
         import fsspec
 
-        with fsspec.open(ref, "rb") as handle:
+        with fsspec.open(plain, "rb") as handle:
             return chirograph.loads(handle.read()), None
-    path = Path(ref).expanduser()
+    path = Path(plain).expanduser()
     if not path.is_file():
-        raise ManifestError(
-            f"no manifest at {path} — `archivefs update` takes the committed "
-            f".chiro.json (or a chiro:// URL naming it), not an archive URL."
-        )
+        raise ManifestError(f"no manifest at {path}.")
     return chirograph.load(path), path
 
 
@@ -91,12 +101,7 @@ def plan_update(
     chirograph = _chirograph()
     options = options or {}
 
-    # A chiro:// URL is just sugar for the manifest path it carries.
-    ref = target
-    if ref.startswith("chiro://"):
-        ref = ref[len("chiro://") :]
-
-    old, manifest_path = _load_manifest(ref)
+    old, manifest_path = _load_manifest(target)
 
     concept = getattr(old, "concept", None)
     if not concept:

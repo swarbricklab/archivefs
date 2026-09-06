@@ -3,13 +3,16 @@
 Everywhere else in archivefs a ``.chiro`` manifest is an *overlay* on a live archive
 URL (``bia://S-BIAD3080 -o chiro=sidecar.json``): the accession says which archive,
 the manifest re-keys and checksums it. ``chiro://`` inverts that — the manifest *is*
-the URL::
+the URL, addressed by the digest of the whole manifest file (the spec's naming, §13)::
 
-    chiro://S-BIAD3080.chiro.json                 # the whole pinned deposit
-    chiro://S-BIAD3080.chiro.json/images/a.tif    # one file in it
+    chiro://md5:15576e…                 # the whole pinned deposit
+    chiro://md5:15576e…/images/a.tif    # one file in it
 
-which is what a ``.dvc`` wants to record: a single, portable, content-addressed pin
-that carries its own checksums and needs no second artefact.
+The digest is resolved to a manifest by :mod:`archivefs.store` — searching an ordered
+list of stores, first hit wins (today just the repo-local ``.chirograph/``). A path
+reference (``chiro://…/x.chiro.json``) still works, for an ad-hoc manifest outside a
+store. Either way it is what a ``.dvc`` wants: a single, portable, content-addressed
+pin that carries its own checksums and needs no second artefact.
 
 The resolution (``docs/decisions.md`` D36) is deliberately *not* a raw fetch of each
 file's URL. It reads the manifest's ``concept`` CURIE, maps it back to the backend
@@ -83,12 +86,21 @@ class ChiroFileSystem(ArchiveFileSystem):
         return path.rstrip("/")
 
     def _split(self, path: str) -> tuple[str, str]:
-        """Split into ``(manifest reference, relpath)`` on the ``.chiro.json`` suffix.
+        """Split into ``(manifest reference, relpath)``.
 
-        The manifest reference itself contains slashes (and, for a URL, a ``://``), so
-        the ordinary "first segment is the container" rule cannot apply. The format's
-        compound suffix is the only unambiguous boundary.
+        Two reference forms: a **digest** (``md5:<hex>[/member]``, the spec's
+        addressable name) and a **path** (``…/x.chiro.json[/member]``, resolved
+        directly). A digest is unambiguous — its own segment parses as a chiro ref — so
+        it is tried first; otherwise the format's compound ``.chiro.json`` suffix is the
+        only reliable boundary, because a path reference itself contains slashes.
         """
+        from archivefs import store
+
+        head = path.split("/", 1)[0]
+        if store.as_ref(head) is not None:
+            _, _, member = path.partition("/")
+            return head, member
+
         marker = MANIFEST_SUFFIX
         cut = path.find(marker)
         if cut == -1:
@@ -97,6 +109,17 @@ class ChiroFileSystem(ArchiveFileSystem):
             return path, ""
         end = cut + len(marker)
         return path[:end], path[end:].lstrip("/")
+
+    def _manifest_source(self, container: str) -> str:
+        """The local file to load for ``container`` — resolving a digest via the store.
+
+        A ``md5:<digest>`` reference is looked up across the ordered store list
+        (:mod:`archivefs.store`); a path reference is returned as-is for the loader.
+        """
+        from archivefs import store
+
+        ref = store.as_ref(container)
+        return str(store.resolve_ref(ref)) if ref is not None else container
 
     # --------------------------------------------------------- listing surface
 
@@ -114,7 +137,7 @@ class ChiroFileSystem(ArchiveFileSystem):
         import fsspec
 
         _chirograph()  # raises MissingExtraError naming the install if absent
-        manifest = load_manifest(self, container)
+        manifest = load_manifest(self, self._manifest_source(container))
         concept = getattr(manifest, "concept", None)
         if not concept:
             raise ManifestError(

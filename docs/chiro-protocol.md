@@ -1,28 +1,39 @@
 # The `chiro://` protocol — a manifest *is* the address
 
-**A committed `.chiro` manifest, used directly as a URL.** Where every other archivefs
+**A committed `.chiro` manifest, addressed by its digest.** Where every other archivefs
 protocol addresses a *live record* (`bia://S-BIAD3080`) and can take a manifest as an
 *overlay* (`-o chiro=sidecar.json`), `chiro://` turns that inside out: the manifest is
-the URL.
+the URL, named by the digest of its own bytes (chirograph's spec §13).
 
 ```
-chiro://S-BIAD3080.chiro.json                  # the whole pinned deposit
-chiro://S-BIAD3080.chiro.json/images/a.tif     # one file in it
-chiro:///abs/path/GSE176078.chiro.json         # an absolute manifest path
+chiro://md5:15576e…                    # the whole pinned deposit
+chiro://md5:15576e…/images/a.tif       # one file in it
+chiro://./some/loose.chiro.json        # a path, for an ad-hoc manifest outside a store
 ```
 
 This is the form a `.dvc` wants: a single, portable, content-addressed pin that carries
 its own checksums and needs no second artefact alongside the URL.
 
+## Where the digest resolves
+
+`chiro://md5:<digest>` says *what*, never *where*. Resolution
+([`archivefs.store`](../src/archivefs/store.py)) searches an **ordered list of stores**,
+first hit wins — today one entry, the repo-local `.chirograph/` (found by walking up for
+`.chirograph`/`.git`/`.dvc`, so it resolves the same from any subdirectory). The list is
+the seam a future DNS-style lookup (a user-global store, a shared registry, a hosted URL)
+grows into, with no committed `.dvc` changing. The found file's bytes are checked against
+the digest — a corrupted or mis-named manifest is refused, the guarantee a digest name
+promises.
+
 ## What it resolves to
 
 A `chiro://` URL is **not** a raw fetch of each file's `source_url`. It:
 
-1. loads the manifest (the part of the URL up to `.chiro.json`);
+1. resolves the digest to a manifest (above), and verifies its bytes;
 2. reads its **`concept`** CURIE — `geo:GSE176078`, `biostudies:S-BIAD3080`,
    `doi:10.5281/zenodo.…`, `ega:EGAD…` — and maps the scheme back to the backend that
    owns those bytes;
-3. **overlays the manifest on that backend** and reads through it.
+3. lists that backend in the manifest's frame and reads through it.
 
 So the actual byte fetch is a normal `geo`/`bia`/`ega`/`zenodo` read, with that
 backend's authentication, verify-on-read ([`decisions.md`](decisions.md) D34), resumable
@@ -41,17 +52,18 @@ concept to check for a newer one. For GEO/BIA/EGA the two coincide.
 ## Making one
 
 ```console
-$ archivefs manifest bia://S-BIAD3080 --out S-BIAD3080.chiro.json
-S-BIAD3080.chiro.json: 412 file(s), 88.1 GiB, chiro://md5:… (observed-download)
+$ archivefs manifest bia://S-BIAD3080/images/ihc
+.chirograph/manifests/ac/3a5a….chiro.json: 18 file(s), 397.1 GiB, chiro://md5:ac3a5a… (observed-download)
 ```
 
-`archivefs manifest` records the `concept` for you ([`cli-manifest.md`](cli-manifest.md)),
-which is what makes the resulting manifest routable. Commit it, then address it:
+`archivefs manifest` writes into the store and records the `concept` for you
+([`cli-manifest.md`](cli-manifest.md)), which is what makes the manifest routable. Commit
+the `.chirograph/` store, then address it:
 
 ```console
-$ archivefs ls chiro://S-BIAD3080.chiro.json
-$ archivefs get chiro://S-BIAD3080.chiro.json/images/a.tif ./a.tif   # verified via BIA
-$ dvc import-url chiro://S-BIAD3080.chiro.json data/study            # a self-verifying pin
+$ archivefs ls chiro://md5:ac3a5a…
+$ archivefs get chiro://md5:ac3a5a…/P01_ihc.tif ./a.tif        # verified via BIA
+$ dvc import-url chiro://md5:ac3a5a… data/images/ihc           # a self-verifying pin
 ```
 
 ## Requirements and limits
