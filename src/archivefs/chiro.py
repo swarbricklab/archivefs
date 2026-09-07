@@ -305,9 +305,24 @@ def apply_manifest(
                 )
         members[path] = info
 
-    drift.unrecorded = sorted(
-        source for source in by_source if source not in accounted
-    )
+    containers = getattr(manifest, "containers", None)
+    if containers:
+        # A container manifest may pin *one* ZIP of a multi-ZIP record, listed at the
+        # record (so the delegate's `source_path`s resolve). The record's *other* ZIPs
+        # are then in the native listing but were never claimed by this pin — they are
+        # not drift. Scope "unrecorded" to files under a container this manifest
+        # actually declares; a member missing from a claimed container still shows.
+        roots = tuple(c.source_root for c in containers)
+        drift.unrecorded = sorted(
+            source
+            for source in by_source
+            if source not in accounted
+            and any(source == r or source.startswith(f"{r}/") for r in roots)
+        )
+    else:
+        drift.unrecorded = sorted(
+            source for source in by_source if source not in accounted
+        )
     if not drift.clean:
         logger.warning("chiro drift in %s: %s", container, drift.summary())
     return members, drift

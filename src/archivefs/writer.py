@@ -128,7 +128,14 @@ def build_manifest(
         source_path = None
         if member is not None:
             crc32 = member.get("crc32")
-            source_path = relpath
+            # `source_path` is the archive-side layout — `<source_root>/<in-zip path>`
+            # — which is what the linkage rule matches on and what the delegate lists
+            # when a `chiro://` pin re-reads at the record. When the manifest is built
+            # addressing the ZIP directly, `relpath` is the bare interior (the clean
+            # workspace path), so `source_path` differs from it (a *relocated* entry);
+            # addressing the whole record, they coincide.
+            in_zip = member.get("in_zip_path") or relpath
+            source_path = f"{member['source_root']}/{in_zip}"
             _record_container(chirograph, containers, member, relpath)
 
         entries.append(

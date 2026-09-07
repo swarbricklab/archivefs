@@ -230,5 +230,62 @@ def test_chiro_url_reads_a_container_manifest(container_manifest, zenodo):
     # Read one member back through the delegate; the bytes match the ZIP interior.
     with zipfile.ZipFile(io.BytesIO(ZIP_BYTES)) as zf:
         interior = next(iter(ZIP_CRCS))
+        want = zf.read(interior)
+    assert fs.cat_file(f"{path}/archive.zip/{interior}") == want
+
+
+# ----------------------------------------- addressing the ZIP directly (relocated)
+
+
+@pytest.fixture
+def zip_subtree_manifest(zenodo, tmp_path):
+    """A manifest built addressing the **ZIP itself**, not the whole record.
+
+    This is how a real multi-ZIP Zenodo record is pinned one ZIP at a time (the P08
+    case): the workspace `relpath` is the bare in-zip path (`counts/matrix.mtx`), so it
+    matches an existing `dvc import-url zenodo://…/archive.zip` layout, while
+    `source_path` keeps the `archive.zip/…` prefix for container linkage — a *relocated*
+    entry. `record_accession` is still the whole record, because that is the frame the
+    delegate must list in for the `source_path`s to resolve.
+    """
+    fs = ZenodoFileSystem(extract_zips=True, skip_instance_cache=True)
+    manifest = build_manifest(fs, f"{RECID}/archive.zip", download=True)
+    path = tmp_path / "archive.chiro.json"
+    path.write_text(chirograph.dumps(manifest))
+    return manifest, path
+
+
+def test_zip_addressed_manifest_relocates_to_the_interior(zip_subtree_manifest):
+    manifest, _ = zip_subtree_manifest
+
+    assert manifest.record_accession == RECID
+    assert {c.source_root for c in manifest.containers} == {"archive.zip"}
+    # Every entry is a relocated ZIP member: relpath is the interior, source_path
+    # carries the container prefix, and the two differ.
+    for interior in ZIP_CRCS:
+        entry = {e.relpath: e for e in manifest.files}[interior]
+        assert entry.relpath == interior  # no `archive.zip/` prefix
+        assert entry.source_path == f"archive.zip/{interior}"
+        assert entry.relocated
+        assert entry.crc32 == ZIP_CRCS[interior]
+
+
+def test_chiro_url_reads_a_relocated_manifest(zip_subtree_manifest, zenodo):
+    """The read path must fetch a relocated member from its archive-side path.
+
+    Listing re-keys to the interior `relpath`; the read then has to translate that back
+    to the delegate's `archive.zip/…` path (via `source_native_path`), or it asks the
+    record for a file that only exists inside the ZIP.
+    """
+    from archivefs.backends.chiro import ChiroFileSystem
+
+    _, path = zip_subtree_manifest
+    fs = ChiroFileSystem(skip_instance_cache=True)
+
+    listed = sorted(fs.find(str(path)))
+    assert listed == sorted(f"{path}/{i}" for i in ZIP_CRCS)  # interior relpaths
+
+    with zipfile.ZipFile(io.BytesIO(ZIP_BYTES)) as zf:
+        interior = next(iter(ZIP_CRCS))
         expected = zf.read(interior)
-    assert fs.cat_file(f"{path}/archive.zip/{interior}") == expected
+    assert fs.cat_file(f"{path}/{interior}") == expected
