@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from typing import Any, ClassVar
 from urllib.parse import quote
 
@@ -66,6 +67,56 @@ ZIP_CRUFT = frozenset({"__MACOSX"})
 
 def _is_cruft(interior: str) -> bool:
     return any(part in ZIP_CRUFT for part in interior.split("/"))
+
+
+class _LockedZipMember:
+    """A ZIP member file that holds its ZIP's read lock until it is closed.
+
+    The Zenodo member view hands out ``zipfile.ZipExtFile``s over one shared file
+    pointer, which ``zipfile`` reads sequentially and is not thread-safe. A streaming
+    read touches that pointer for as long as the file is open, so the lock must live
+    for the file's whole lifetime, not just the ``open`` call — this wrapper releases
+    it exactly once, on ``close`` (or, as a leak-safety net, on GC). Everything else
+    is forwarded to the underlying file, so it reads, seeks and iterates unchanged.
+    """
+
+    __slots__ = ("_file", "_lock", "_released")
+
+    def __init__(self, file: Any, lock: threading.Lock) -> None:
+        self._file = file
+        self._lock = lock
+        self._released = False
+
+    def _release(self) -> None:
+        if not self._released:
+            self._released = True
+            self._lock.release()
+
+    def close(self) -> None:
+        try:
+            self._file.close()
+        finally:
+            self._release()
+
+    def __enter__(self) -> _LockedZipMember:
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.close()
+
+    def __iter__(self) -> Any:
+        return iter(self._file)
+
+    def __del__(self) -> None:
+        # Only a safety net for a leaked handle; correct callers close explicitly.
+        self._release()
+
+    def __getattr__(self, name: str) -> Any:
+        # read / readinto / seek / tell / seekable / readable / … all forward here.
+        # Guard private names so a not-yet-set slot cannot recurse into itself.
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(self._file, name)
 
 
 class ZenodoFileSystem(ArchiveFileSystem):
@@ -147,6 +198,17 @@ class ZenodoFileSystem(ArchiveFileSystem):
         self._zip_views: dict[str, Any] = {}
         #: zip member path -> ZipFileSystem for *reading bytes*; see `_member_view`
         self._member_views: dict[str, Any] = {}
+        #: zip path -> a lock serialising *reads* of that ZIP's members. The member
+        #: view hands out `zipfile.ZipExtFile`s that share one file pointer, and
+        #: `zipfile` is not thread-safe — so a consumer that reads members
+        #: concurrently (DVC's default `--jobs`, via a `chiro://` pin) would corrupt
+        #: the shared pointer ("I/O operation on closed file"). One lock per ZIP
+        #: serialises those reads; the shared view's warm block cache means this
+        #: costs no re-fetch, and different ZIPs still read in parallel. See #40.
+        #: (Distinct from the base's `_member_lock`, which guards *listing*.)
+        self._zip_read_locks: dict[str, Any] = {}
+        #: guards creation of entries in `_zip_read_locks` itself
+        self._zip_read_locks_guard = threading.Lock()
         #: zip member path -> the interior prefix `strip_components` removed
         self._zip_prefixes: dict[str, str] = {}
 
@@ -888,6 +950,16 @@ class ZenodoFileSystem(ArchiveFileSystem):
             return self._zip_info(zip_path, self._to_interior(zip_path, member))
         return super().info(path, **kwargs)
 
+    def _zip_read_lock(self, zip_path: str) -> threading.Lock:
+        """The lock serialising reads of ``zip_path``'s members (created lazily)."""
+        zip_path = self._strip_protocol(zip_path)
+        with self._zip_read_locks_guard:
+            lock = self._zip_read_locks.get(zip_path)
+            if lock is None:
+                lock = threading.Lock()
+                self._zip_read_locks[zip_path] = lock
+            return lock
+
     def cat_file(
         self, path: str, start: int | None = None, end: int | None = None, **kwargs: Any
     ) -> bytes:
@@ -896,7 +968,9 @@ class ZenodoFileSystem(ArchiveFileSystem):
         if inside and inside[1]:
             zip_path, member = inside
             interior = self._to_interior(zip_path, member)
-            return self._member_view(zip_path).cat_file(interior)[start:end]
+            # Held across the whole read: the shared member view is not thread-safe.
+            with self._zip_read_lock(zip_path):
+                return self._member_view(zip_path).cat_file(interior)[start:end]
         return super().cat_file(path, start=start, end=end, **kwargs)
 
     def _open(self, path: str, mode: str = "rb", **kwargs: Any):
@@ -905,7 +979,17 @@ class ZenodoFileSystem(ArchiveFileSystem):
         if inside and inside[1]:
             zip_path, member = inside
             interior = self._to_interior(zip_path, member)
-            return self._member_view(zip_path)._open(interior, mode=mode)
+            # A streaming read touches the shared file pointer for as long as the
+            # file is open, so the lock is held until the returned file is closed —
+            # concurrent readers of the same ZIP serialise instead of corrupting it.
+            lock = self._zip_read_lock(zip_path)
+            lock.acquire()
+            try:
+                handle = self._member_view(zip_path)._open(interior, mode=mode)
+            except BaseException:
+                lock.release()
+                raise
+            return _LockedZipMember(handle, lock)
         return super()._open(path, mode=mode, **kwargs)
 
     # --------------------------------------------------------------- transfer
