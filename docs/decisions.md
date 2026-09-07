@@ -2825,3 +2825,34 @@ one-ZIP pin does not flag the record's *other* ZIPs as missing. Proven on P08's
 would need the same value to confirm. And the container md5 is only as strong as the archive's
 version immutability — which for Zenodo is the point of a version DOI, but for a mutable ZIP
 elsewhere would weaken the anchor the `crc32` leans on.
+
+## D42 — a ZIP's members are read under a per-ZIP lock, because the member view is not thread-safe
+
+Testing a `chiro://` ZIP pin under a real `dvc import-url` (default `--jobs` = `4 × cpu`) failed
+with *"I/O operation on closed file"* / *"File is not a zip file"* (issue #40). Root cause: the
+Zenodo backend serves a member's bytes through a single **shared** `ZipFileSystem` per fs
+instance (`_member_view`), which hands out `zipfile.ZipExtFile`s over **one file pointer** —
+and `zipfile` reads that pointer sequentially, so it is *not* thread-safe. A `chiro://` pin makes
+this bite reliably: `ChiroFileSystem` funnels all of DVC's parallel member reads through one
+cached delegate, so they all share that one pointer. (A direct `dvc import-url zenodo://…/x.zip`
+happened to survive multi-threaded; the `chiro://` indirection is what exposed it.)
+
+The fix is a **per-ZIP read lock**, held for a member read's whole lifetime — across the
+streaming `_open` (via a small file wrapper that releases on close), not just the `open` call,
+because the pointer is touched for as long as the file is open. Chosen over the alternative
+(a fresh independent view per read) deliberately: the shared view carries the warm,
+un-amplified block cache that the ranged-read fix depends on, so serialising reads of *one* ZIP
+keeps that cache and costs no re-fetch, while different ZIPs still read in parallel (distinct
+locks). For a single Zenodo ZIP this is no real loss — a single connection to Zenodo is
+bandwidth-bound and the block cache's `multi_fetcher` already parallelises *within* a read, so
+parallel *member* reads of one ZIP would not have gone faster anyway.
+
+Guarded by two tests: a deterministic one (a second open of the same ZIP blocks until the first
+closes) and a stress one (concurrent chunked reads stay byte-exact). Verified end-to-end: the
+same `dvc import-url` at default `--jobs` now completes and produces the byte-identical `.dir`.
+
+**Cost to change my mind:** the lock serialises reads *per ZIP instance*, so a caller that opens
+two members of the same ZIP in one thread and reads them interleaved would deadlock on the plain
+`Lock`. Nothing in archivefs does this (every reader opens, reads and closes one member before
+the next), and the leak-safety `__del__` release bounds the blast radius, but a future concurrent
+*intra-thread* reader would need an `RLock` and per-thread accounting instead.

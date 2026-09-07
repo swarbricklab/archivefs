@@ -315,6 +315,64 @@ def test_zip_member_becomes_a_directory(zfs):
     assert entries[f"{RECID}/samples.csv"]["type"] == "file"
 
 
+def test_concurrent_reads_of_one_zip_serialise(zfs):
+    """Reads of one ZIP's members take a per-ZIP lock held for the file's lifetime.
+
+    The member view hands out ``zipfile.ZipExtFile``s over one shared file pointer,
+    and ``zipfile`` is not thread-safe — so concurrent streaming reads would corrupt
+    it. Regression for #40: opening a member takes the lock; a second open of the
+    same ZIP blocks until the first is closed.
+    """
+    zip_path = f"{RECID}/archive.zip"
+    lock = zfs._zip_read_lock(zip_path)
+
+    handle = zfs._open(f"{zip_path}/counts/matrix.mtx")
+    second_opened = threading.Event()
+
+    def open_other() -> None:
+        with zfs._open(f"{zip_path}/README.md"):
+            second_opened.set()
+
+    thread = threading.Thread(target=open_other)
+    try:
+        assert lock.locked()  # held while a member file is open
+        thread.start()
+        # Blocked: the lock is ours until we close the first handle.
+        assert not second_opened.wait(0.3)
+    finally:
+        handle.close()
+
+    # Released on close, so the waiting open now proceeds.
+    assert second_opened.wait(2)
+    thread.join()
+
+
+def test_concurrent_zip_member_reads_return_correct_bytes(zfs):
+    """A stress check that the per-ZIP lock keeps concurrent reads correct (#40).
+
+    Reading in small chunks widens the interleaving window, so an unsynchronised
+    shared view would corrupt bytes or raise; the lock keeps every read exact.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    members = [
+        p for p in zfs.find(f"{RECID}/archive.zip") if zfs.info(p)["type"] == "file"
+    ]
+    expected = {p: zfs.cat_file(p) for p in members}  # sequential ground truth
+
+    def read_in_chunks(path: str) -> tuple[str, bytes]:
+        out = []
+        with zfs.open(path, "rb") as handle:
+            while chunk := handle.read(64):
+                out.append(chunk)
+        return path, b"".join(out)
+
+    work = members * 12  # contend hard on the three members
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        for path, data in pool.map(read_in_chunks, work):
+            assert data == expected[path]
+
+
 def test_an_inner_zip_stays_a_file(fake_zenodo):
     """Expansion is one level deep: outer ZIPs open, ZIPs *inside* them do not.
 
