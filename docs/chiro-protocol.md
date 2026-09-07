@@ -42,6 +42,13 @@ bypass every one of those — and so would silently fail for exactly the control
 archives (EGA, unreleased BIA) that make a manifest worth having. `chiro://` is a pure
 *addressing* layer; the owning backend does the work. This is D36.
 
+If the manifest is a **container** manifest (schema 2.0 — a ZIP deposit, with a
+`containers` block; [`decisions.md`](decisions.md) D41), the delegate is told to **expand**
+the container (`extract_zips` on Zenodo), so its native listing produces the same
+per-member paths the manifest's `source_path`s reference. Without that the ZIP lists as one
+opaque file and no member matches. A member read is then verified against the manifest's
+own `md5` — the archive publishes none for a ZIP member.
+
 The fetch routes to the **version**, not the concept ([`decisions.md`](decisions.md) D38).
 The scheme (`doi:`, `geo:`, …) picks the backend, but the *accession* is the manifest's
 `record_accession` — the version-pinned identity. This only matters for Zenodo, where the

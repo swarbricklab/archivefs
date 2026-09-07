@@ -190,7 +190,10 @@ Decisions:
   upstream verification = container-level Zenodo MD5 (strong, on download) +
   member-level CRC32 (from central directory); workspace `outs.md5` computed
   full-strength from extracted bytes at pull time. Soundness rests on Zenodo
-  version **immutability**. Document the asymmetry rather than hiding it.
+  version **immutability**. Document the asymmetry rather than hiding it. In a
+  `.chiro` manifest this same `(container md5, member CRC32)` pair is recorded as a
+  schema-2.0 **containers** block — see [`decisions.md`](decisions.md) D41 — which is
+  what `archivefs confirm` cross-checks download-free.
 - `.dvc` artifact: `deps` = the ZIP (Zenodo MD5 + version-specific DOI as
   immutable provenance token); `outs` = extracted tree with per-member
   post-extraction md5s. `dvc update` against a concept DOI re-resolves and

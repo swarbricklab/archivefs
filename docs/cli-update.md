@@ -73,5 +73,6 @@ a reviewable diff, exactly like advancing a branch to a new commit.
 ## See also
 
 [`cli-manifest.md`](cli-manifest.md) (make a pin) ·
+[`cli-confirm.md`](cli-confirm.md) (does the *pinned version* still match, cheaply) ·
 [`chiro-protocol.md`](chiro-protocol.md) ·
 [`cli-check.md`](cli-check.md) (a deposit vs its manifest, read-only)

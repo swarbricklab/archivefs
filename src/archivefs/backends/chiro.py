@@ -161,10 +161,23 @@ class ChiroFileSystem(ArchiveFileSystem):
         accession = getattr(manifest, "record_accession", None) or concept_accession
         # A plain delegate, no `chiro=` overlay: this layer applies the manifest
         # itself, in the accession's frame, so a subtree pin matches a subtree listing.
+        delegate_options = dict(self._delegate_options)
+        if getattr(manifest, "containers", None):
+            # A schema-2.0 manifest whose members live *inside* archive containers
+            # (a ZIP). The delegate must expand them, or its native listing carries
+            # the container as one opaque file and none of the manifest's per-member
+            # `source_path`s match. The expansion knob is backend-specific
+            # (`extract_zips` on Zenodo); set it only where the backend accepts it,
+            # and never override a value the caller passed.
+            import inspect
+
+            init = fsspec.get_filesystem_class(protocol).__init__
+            if "extract_zips" in inspect.signature(init).parameters:
+                delegate_options.setdefault("extract_zips", True)
         delegate = fsspec.filesystem(
             protocol,
             skip_instance_cache=True,
-            **self._delegate_options,
+            **delegate_options,
         )
         return delegate, accession, manifest
 
