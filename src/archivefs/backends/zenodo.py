@@ -378,12 +378,17 @@ class ZenodoFileSystem(ArchiveFileSystem):
         return members
 
     def _container_info(self, container: str) -> dict:
-        record = self._resolve_record(container)
+        # A container may name a *subtree* — a ZIP inside the record
+        # (`10.5281/zenodo.…/archive.zip`) — which is what pins one ZIP of a
+        # multi-ZIP record. Resolve the record from the leading spec, not the whole
+        # path, so `concept`/`version_accession` work for a ZIP-addressed manifest.
+        record_spec, _ = self.split_path(container)
+        record = self._resolve_record(record_spec)
         return {
             "name": container,
             "type": "directory",
             "size": 0,
-            "zenodo": self._record_provenance(record, requested=container),
+            "zenodo": self._record_provenance(record, requested=record_spec),
         }
 
     def concept(self, container: str) -> str | None:
@@ -434,8 +439,16 @@ class ZenodoFileSystem(ArchiveFileSystem):
         if not zip_path or crc is None:
             return None
         raw = self._member(*self.split_path(zip_path))
+        # `source_root` and `in_zip_path` are always expressed from the **record**,
+        # never from the addressed container: a manifest can be built addressing the
+        # whole record (relpath already `archive.zip/…`) or the ZIP directly (relpath
+        # the bare interior), and either way the linkage must read the same —
+        # `source_path` = `source_root/in_zip_path` = `archive.zip/…`. Computing the
+        # root off `container` would collapse to `""` when the ZIP *is* the container.
+        record_spec, _ = self.split_path(zip_path)
         return {
-            "source_root": self.relpath(container, zip_path),
+            "source_root": self.relpath(record_spec, zip_path),
+            "in_zip_path": self.relpath(zip_path, info["name"]),
             "format": "zip",
             "md5": raw.get("md5") or block.get("container_md5"),
             "size": raw.get("size"),
