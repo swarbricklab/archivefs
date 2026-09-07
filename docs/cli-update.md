@@ -6,11 +6,11 @@
 archivefs update [-o KEY=VALUE]… [--write] [--download] TARGET
 ```
 
-`TARGET` is a committed `.chiro.json` or a [`chiro://`](chiro-protocol.md) URL naming
-one. A pin is content-addressed and immutable, so `dvc update` on it is correctly a
-no-op — but the *dataset* it points at moves. This is the verb that notices, and that
-supersedes the pin, because moving a content-addressed reference means making a **new**
-manifest and repointing, not editing one in place
+`TARGET` is a [`chiro://md5:<digest>`](chiro-protocol.md) reference (or a path to a
+committed `.chiro.json`). A pin is content-addressed and immutable, so `dvc update` on it
+is correctly a no-op — but the *dataset* it points at moves. This is the verb that
+notices, and that supersedes the pin, because moving a content-addressed reference means
+making a **new** manifest and repointing, not editing one in place
 ([`concepts-and-versions.md`](concepts-and-versions.md)).
 
 ## What it does
@@ -28,26 +28,29 @@ date".
 ## What it prints
 
 ```console
-$ archivefs update GSE176078.chiro.json --download
-up to date: geo:GSE176078 — body_hash 6f174b… unchanged
+$ archivefs update chiro://md5:6f174b… --download
+up to date: geo:GSE176078 — chiro://md5:6f174b… unchanged
 
-$ archivefs update GSE176078.chiro.json --download        # after the depositor adds a file
+$ archivefs update chiro://md5:6f174b… --download        # after the depositor adds a file
 upstream moved: 1 added
   + GSE176078_sampleC_new.tsv.gz
 
 re-run with --write to re-pin to the current upstream.
 
-$ archivefs update GSE176078.chiro.json --download --write
+$ archivefs update chiro://md5:6f174b… --download --write
 upstream moved: 1 added
   + GSE176078_sampleC_new.tsv.gz
 
-re-pinned GSE176078.chiro.json: 6f174b… → 91ac02…
-Commit the rewritten manifest (and re-run `dvc update` if it is a DVC import).
+re-pinned: chiro://md5:6f174b…
+       ->  chiro://md5:91ac02…
+wrote .chirograph/manifests/91/ac02….chiro.json
+Repoint the dependency to chiro://md5:91ac02… and commit (then `dvc update` if it is a DVC import).
 ```
 
-`+` added, `-` removed, `~` changed. `--write` rewrites the local manifest; commit that
-change (it is a reviewable diff, exactly like advancing a branch to a new commit). A pin
-that is a URL has no local file to rewrite — fetch a local copy first.
+`+` added, `-` removed, `~` changed. `--write` **supersedes**: it writes a *new*
+digest-named manifest into the store (the old one stays — that pair is the drift record)
+and prints the new reference. Repoint your `.dvc` dep to it and commit the store change —
+a reviewable diff, exactly like advancing a branch to a new commit.
 
 ## Exit status
 

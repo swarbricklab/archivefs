@@ -2721,3 +2721,37 @@ a completed import with no re-download. That equality is the whole reason to tru
 **Cost to change my mind:** a subtree `concept` puts a path in the CURIE identifier, which is
 an archivefs addressing convention, not an archive-native accession. If a future archive uses
 colons or slashes in accessions ambiguously, the CURIE grammar would need revisiting.
+
+## D40 — `chiro://` addresses a manifest by its **whole-file digest**, resolved through a store
+
+The first cut named manifests `<accession>.chiro.json` and put the *path* in the `chiro://`
+URL. Both are wrong per chirograph's format spec (§13), and re-reading it settled the design:
+
+- **Filename = whole-file digest.** A manifest is stored as `<digest>.chiro.json`, sharded the
+  way chirograph prescribes (`ChiroRef.shard_path` → `manifests/15/576e….chiro.json`). Digest
+  naming is load-bearing, not cosmetic: two dated observations of one record must coexist (the
+  pair *is* the drift record — accession names would overwrite the first); `md5sum
+  .chirograph/manifests/**` self-verifies with no tooling; concurrent writes are collision-free;
+  and a hash-named file is self-evidently immutable.
+- **URL = the digest, not the path.** `chiro://md5:<digest>` says *what*, never *where*.
+  Resolution (`archivefs.store`) searches an ordered list of stores, first hit wins — today one
+  entry, the repo-local `.chirograph/` (found by walking up for `.chirograph`/`.git`/`.dvc`, which
+  also fixes run-from-a-subdirectory resolution). The list is the seam the future DNS-style
+  lookup (user-global store, registry, hosted URL) grows into without any committed `.dvc`
+  changing. A path reference still resolves, for an ad-hoc manifest outside a store.
+- **`archivefs update` supersedes into the store.** A re-pin writes a *new* digest-named file
+  (the old coexists) and reports the new `chiro://md5:` for the user to repoint their `.dvc` —
+  a true supersede, never an in-place edit of a content-addressed object.
+
+Note three distinct hashes this introduces, easily conflated (and once were, in this repo's
+own history): `body_hash` (the `files` array only — the manifest's internal integrity);
+the **whole-file digest** (`chiro ref` / `ChiroRef.for_path` — the filename and `chiro://`
+address); and the DVC `.dir` hash (`dvc_dir_hash` — what the `.dvc` records for cache reuse).
+`archivefs manifest` prints the whole-file digest; it previously printed `canonical_ref` (the
+canonical-*document* digest), which is chirograph's reformatting-robust alternative and *not*
+the default `chiro://` scheme.
+
+**Cost to change my mind:** the digest is over the file bytes including the header's `created`
+timestamp, so re-running `archivefs manifest` on an unchanged record yields a new digest/file.
+That is the spec's intent (dated observations), and `update`'s change detection compares the
+`files` diff (via `diff_manifests`), not the whole-file digest, so it does not misfire.

@@ -103,30 +103,34 @@ def test_an_archive_url_is_not_a_manifest(geo, tmp_path):
 # --------------------------------------------------------------------- the CLI
 
 
-def test_cli_update_reports_and_rewrites(geo, tmp_path, capsys):
+def test_cli_update_supersedes_into_the_store(geo, tmp_path, capsys):
     from archivefs.cli import main
 
+    # A store next to the manifest, so --write has somewhere to put the new observation.
+    (tmp_path / ".chirograph").mkdir()
     server = geo()
     path = _capture(tmp_path)
     old_text = path.read_text()
 
-    # Clean: exit 0, nothing rewritten.
+    # Clean: exit 0, nothing written.
     assert main(["update", str(path), "--download"]) == 0
     assert "up to date" in capsys.readouterr().out
-    assert path.read_text() == old_text
 
     # Now the upstream moves.
     server.bodies[f"{GSE}_extra.tsv.gz"] = b"x" * 100
 
-    # Report-only default: exit 1, still not rewritten.
+    # Report-only default: exit 1, nothing written.
     assert main(["update", str(path), "--download"]) == 1
     out = capsys.readouterr().out
     assert "upstream moved" in out and "+ " in out
-    assert path.read_text() == old_text
+    assert list((tmp_path / ".chirograph").rglob("*.chiro.json")) == []
 
-    # --write: exit 0, manifest rewritten to the new body_hash.
+    # --write: exit 0. The old manifest is untouched (supersede, not overwrite); the
+    # new observation is a fresh digest-named file in the store.
     assert main(["update", str(path), "--download", "--write"]) == 0
     assert "re-pinned" in capsys.readouterr().out
-    assert path.read_text() != old_text
-    reloaded = chirograph.load(path)
+    assert path.read_text() == old_text  # the old observation is preserved
+    written = list((tmp_path / ".chirograph" / "manifests").rglob("*.chiro.json"))
+    assert len(written) == 1
+    reloaded = chirograph.load(written[0])
     assert reloaded.entry(f"{GSE}_extra.tsv.gz") is not None

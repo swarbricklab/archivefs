@@ -68,6 +68,30 @@ def test_reads_through_the_delegate_backend(manifest_file):
         assert handle.read() == BODIES[name]
 
 
+def test_digest_reference_resolves_through_the_store(geo, tmp_path):
+    """The spec's addressing: chiro://md5:<digest> resolved via the store, then read."""
+    from archivefs import store
+
+    (tmp_path / ".chirograph").mkdir()
+    geo()
+    src = GEOFileSystem(skip_instance_cache=True)
+    _dest, ref = store.write_to_store(build_manifest(src, GSE, download=True), start=tmp_path)
+
+    fs = ChiroFileSystem(skip_instance_cache=True)
+    name = next(iter(BODIES))
+    # Address by digest, not path — resolution finds it in the store (anchored via cwd).
+    import os
+
+    cwd = os.getcwd()
+    try:
+        os.chdir(tmp_path)
+        listed = fs.find(str(ref))
+        assert {p.rsplit("/", 1)[-1] for p in listed} == set(BODIES)
+        assert fs.cat_file(f"{ref}/{name}") == BODIES[name]
+    finally:
+        os.chdir(cwd)
+
+
 def test_get_file_verifies_via_the_delegate(manifest_file, tmp_path):
     fs = ChiroFileSystem(skip_instance_cache=True)
     name = next(iter(BODIES))

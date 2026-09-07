@@ -17,12 +17,19 @@ one from an archive you can list.
 The reader half (`-o chiro=…` on any command) turns a manifest into a listing; this is
 the writer half — it turns a listing into a manifest.
 
+By default the manifest is written into the repo-local **store**,
+`.chirograph/manifests/`, named by the digest of its own bytes and sharded the way
+chirograph prescribes (`.chirograph/manifests/15/576e….chiro.json`). The command prints
+the resolvable reference — `chiro://md5:<digest>` — which is what you record in a `.dvc`
+([`chiro-protocol.md`](chiro-protocol.md)). Pass `--out PATH` to write a loose file
+instead (for an ad-hoc manifest outside a store), or `--out -` for stdout.
+
 ## Arguments and options
 
 | | meaning |
 |---|---|
-| `URL` | a record, e.g. `zenodo://1486184`, `bia://S-BIAD3080`, `geo://GSE176078` |
-| `--out` | where to write; default `<accession>.chiro.json` in the cwd, `-` for stdout |
+| `URL` | a record or subtree, e.g. `zenodo://1486184`, `bia://S-BIAD3080/images/ihc`, `geo://GSE176078` |
+| `--out` | write to an explicit path instead of the store (`-` for stdout) |
 | `--download` | read and hash the bytes for files the archive publishes no checksum for |
 | `--self-deposited` | mark provenance `self-deposited` (default `observed-download`) |
 | `-o`, `--option` | storage option, repeatable |
@@ -44,30 +51,31 @@ real digest or refuses to record the file.
 
 ## What it prints
 
-The document is written to the file (or stdout); a one-line summary goes to **stderr**,
-so a piped document stays clean:
+The manifest is written into the store; a one-line summary goes to **stderr**, ending
+in the reference you record in a `.dvc`:
 
 ```console
-$ archivefs manifest zenodo://1486184 --out record.chiro.json
-record.chiro.json: 2 file(s), 12.4 KiB, chiro://md5:6f174b… (observed-download)
-
-$ archivefs manifest zenodo://1486184 --out - | jq .body_hash
-"6f174b…"
+$ archivefs manifest zenodo://1486184
+.chirograph/manifests/15/576e….chiro.json: 2 file(s), 12.4 KiB, chiro://md5:15576e… (observed-download)
 ```
 
-## Scenario: pin a GEO record that publishes nothing
+## Scenario: pin a GEO subtree that publishes nothing
 
 ```console
 $ archivefs manifest geo://GSE176078
 ManifestError: 3 file(s) in GSE176078 publish no checksum (…), so a
 download-free manifest cannot be built for them. Re-run with --download …
 
-$ archivefs manifest geo://GSE176078 --download --out GSE176078.chiro.json
-GSE176078.chiro.json: 3 file(s), 4.2 MiB, chiro://md5:… (observed-download)
+$ archivefs manifest geo://GSE176078 --download
+.chirograph/manifests/ac/3a5a….chiro.json: 3 file(s), 4.2 MiB, chiro://md5:ac3a5a… (observed-download)
+
+$ dvc import-url --no-download chiro://md5:ac3a5a… data/geo
 ```
 
-Commit `GSE176078.chiro.json` next to the `.dvc` and every later fetch verifies against
-it — reproducibility for an archive that offers none of its own.
+Commit the `.chirograph/` store alongside the `.dvc`, and every later fetch resolves the
+digest to the manifest and verifies against it — reproducibility for an archive that
+offers none of its own. `md5sum .chirograph/manifests/**` re-checks the whole store with
+no tooling.
 
 ## Exit status
 
