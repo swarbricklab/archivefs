@@ -224,9 +224,17 @@ class ChiroFileSystem(ArchiveFileSystem):
     def _delegate_read(self, path: str) -> tuple[ArchiveFileSystem, str]:
         path = self._strip_protocol(path)
         container, member = self._split(path)
-        self._members(container)  # ensures the delegate is resolved and cached
+        members = self._members(container)  # resolves and caches the delegate
         delegate, accession = self._delegates[container]
-        return delegate, f"{accession}/{member}" if member else accession
+        if not member:
+            return delegate, accession
+        # Fetch from the member's *archive-side* path, which `apply_manifest` recorded
+        # as `source_native_path`. For a **relocated** container member the workspace
+        # relpath (`visium/x.csv`) is not the delegate's path (`archive.zip/visium/x`);
+        # the naive `accession/member` join only holds when the two coincide.
+        info = members.get(f"{container}/{member}")
+        native = info.get("source_native_path") if info else None
+        return delegate, native or f"{accession}/{member}"
 
     def cat_file(
         self, path: str, start: int | None = None, end: int | None = None, **kwargs: Any

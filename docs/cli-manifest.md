@@ -64,9 +64,20 @@ A ZIP member has no published md5, though, so a container manifest is **not** do
 `--download` is required to read and hash each member. What the download buys you, that a
 plain (opaque-ZIP) pin does not, is member-granular provenance and a later
 **download-free** [`archivefs confirm`](cli-confirm.md): the `crc32` + container md5 let you
-cross-check the deposit without fetching a byte. Pin the whole record (the ZIP is a child of
-it); without `-o extract_zips=true` you get a plain, download-free pin of the ZIP as one
-opaque file instead.
+cross-check the deposit without fetching a byte. Without `-o extract_zips=true` you get a
+plain, download-free pin of the ZIP as one opaque file instead.
+
+**Address the whole record or one ZIP.** Two framings, and the choice sets the workspace
+layout:
+
+* `zenodo://<record>` — every member's `relpath` keeps its `archive.zip/…` prefix (the ZIP
+  is a child of the record). Pins the whole record in one manifest.
+* `zenodo://<record>/archive.zip` — the target is one ZIP, so each `relpath` is the bare
+  in-zip path (`visium/x.csv`), while `source_path` still carries the `archive.zip/…` prefix
+  for container linkage (a *relocated* entry). This is how a **multi-ZIP record** is pinned
+  one ZIP at a time, and it matches the layout an existing
+  `dvc import-url zenodo://…/archive.zip` already produced — so re-pinning to `chiro://`
+  leaves the DVC `.dir` hash unchanged and needs no re-fetch.
 
 ```console
 $ archivefs manifest zenodo://1486184 --download -o extract_zips=true

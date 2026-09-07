@@ -2802,6 +2802,22 @@ manifest (chirograph's own `2.0` read-validation is the check), `confirm` matche
 download-free and localises a tampered `crc32`/size/missing member to the exact file, and the
 `chiro://` round-trip expands, fetches and verifies a member against the manifest md5.
 
+**Addressing one ZIP of a multi-ZIP record — relocation.** A real record (the P08 dataset)
+holds several ZIPs, and each is imported as its own `.dvc` with in-zip relpaths
+(`visium/x.h5ad`, not `archive.zip/visium/x.h5ad`). So `archivefs manifest` must accept a ZIP
+*subtree* (`zenodo://<record>/archive.zip`) and emit a **relocated** manifest: `relpath` the
+bare interior (the clean workspace path, matching the existing import), `source_path` the
+`archive.zip/…` form the container linkage needs. `record_accession` stays the whole *record*,
+because that is the frame whose native listing carries the `archive.zip/…` prefix the
+`source_path`s resolve against — so `container_of` computes `source_root`/`in_zip_path` from
+the record, never from the addressed target (which would collapse `source_root` to `""` when
+the ZIP *is* the target). Two consequences fall out: the `chiro://` read must fetch a relocated
+member from its `source_native_path` (the delegate's `archive.zip/…` path), not the workspace
+relpath; and drift's "unrecorded" is scoped to the manifest's declared containers, so a
+one-ZIP pin does not flag the record's *other* ZIPs as missing. Proven on P08's
+`pathology_annotations.zip`: `archivefs manifest --download` reproduces the existing `.dvc`'s
+58 member md5s, crc32s and `.dir` hash **exactly**, and `chiro://` lists/confirms/fetches it.
+
 **Cost to change my mind:** confirm re-lists the live archive through the *same* backend
 (`extract_zips` on), so it compares the archive's presentation of the ZIP — including any
 `strip_components` prefix — against the manifest's `source_path`. Build-time and read-time
