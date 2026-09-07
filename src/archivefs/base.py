@@ -610,6 +610,25 @@ class ArchiveFileSystem(AbstractFileSystem):
         """
         return self._strip_protocol(container)
 
+    def container_of(self, container: str, info: dict) -> dict | None:
+        """Describe the archive container delivering ``info``, or ``None`` if loose.
+
+        A backend that expands containers (a ZIP presented as a directory, a
+        member-granular tar) overrides this to return the chirograph schema-2.0
+        facts a manifest records for one member: the enclosing container's own
+        identity — ``source_root`` (its path relative to ``container``),
+        ``format`` (the blessed enum token: ``zip``, ``tar``, ``tar.gz`` …),
+        ``md5`` and ``size`` — plus the member's cheap download-free cross-check,
+        ``crc32``. The writer folds the container identity into the manifest's
+        ``containers`` block (deduped by ``source_root``) and puts ``crc32`` on the
+        member entry (`container-model.md`).
+
+        A loose file — one the archive serves directly, not out of a container —
+        returns ``None`` and stays a plain 1.x entry. The default is ``None``: only
+        a backend that actually opens containers has anything to declare.
+        """
+        return None
+
     def _resolve(self, path: str) -> dict:
         path = self._strip_protocol(path)
         if not path:

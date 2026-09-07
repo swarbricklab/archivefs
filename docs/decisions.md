@@ -2755,3 +2755,57 @@ the default `chiro://` scheme.
 timestamp, so re-running `archivefs manifest` on an unchanged record yields a new digest/file.
 That is the spec's intent (dated observations), and `update`'s change detection compares the
 `files` diff (via `diff_manifests`), not the whole-file digest, so it does not misfire.
+
+## D41 — a ZIP deposit is pinned as a **container** (member `crc32` + the container's md5), and confirmed download-free
+
+Zenodo (and EGA) commonly deposit a **ZIP**, and a ZIP *member* has no published checksum
+anywhere: the archive publishes an md5 for the whole `.zip`, not for `sampleA/matrix.mtx`
+inside it. Before this, archivefs smuggled the two facts a member *does* have — the whole
+ZIP's md5 and the member's CRC-32 (from the central directory) — into the `version_id`
+field as `"<container_md5>:<crc>"`. That worked for DVC pull but was an overload: it put
+two coordinates in a field meant for one opaque token, and nothing downstream could read
+it as structure.
+
+chirograph **schema 2.0** (`container-model.md`, chirograph#8/#10) gives it a real shape,
+and archivefs now emits it (issue #37):
+
+- **A top-level `containers` block** — one entry per ZIP, carrying its `source_root` (the
+  ZIP's path relative to the record), `format` (`zip`), the whole-file `md5` Zenodo
+  publishes, and `size`. Built by the writer from a new backend hook,
+  `ArchiveFileSystem.container_of(container, info)`, which the Zenodo backend overrides to
+  read its own `zenodo` info block. A backend that expands no containers returns `None` and
+  its manifests stay `1.x` byte-for-byte.
+- **A per-member `crc32`** on each ZIP member's `FileEntry`, plus a `source_path` that sits
+  under the container's `source_root` (the linkage the format matches on). The member still
+  carries its **own authoritative `md5`** — `crc32` and the container md5 are *additive*
+  cross-checks, never substitutes: the `.dir` hash, `dvc list --show-hash` and verify-on-read
+  all still use `md5`. Proven: adding the container fields leaves `dvc_dir_hash`
+  **byte-identical**, so an existing `extract_zips` import re-pins to `chiro://` with no
+  cache miss.
+- **`archivefs confirm`** — the download-free verb the whole model exists for. It asks "does
+  the live deposit still match this manifest?", keyed on `chirograph.Container.confirm_class`
+  (chirograph owns the format→class map): `zip` → `indexed`, so it tail-reads the central
+  directory and checks each member's `crc32` + size and the container's md5 **without
+  fetching a member byte**; `tar` → `sequential` and `tar.gz`/… → `stream` have no cheap
+  per-member check, so confirm reports size-only unless `--download` is given. It is the
+  counterpart to `update`: `update` *regenerates* (which for a ZIP needs member md5s, i.e. a
+  download) to find a newer version; `confirm` *cross-checks* the pinned version cheaply.
+
+The reader half needed one change: a `chiro://` pin over a container manifest must make its
+delegate **expand** the ZIP (the native listing has to produce the same per-member paths the
+manifest's `source_path` references), so the chiro backend sets `extract_zips=True` on the
+delegate when the manifest declares containers — but only where the backend's `__init__`
+actually accepts it, so a future non-ZIP backend is untouched.
+
+Validated live against a real Zenodo ZIP (`zenodo://1486184`): the writer emits a legal `2.0`
+manifest (chirograph's own `2.0` read-validation is the check), `confirm` matches it
+download-free and localises a tampered `crc32`/size/missing member to the exact file, and the
+`chiro://` round-trip expands, fetches and verifies a member against the manifest md5.
+
+**Cost to change my mind:** confirm re-lists the live archive through the *same* backend
+(`extract_zips` on), so it compares the archive's presentation of the ZIP — including any
+`strip_components` prefix — against the manifest's `source_path`. Build-time and read-time
+`strip_components` must agree (both default `1`); a manifest built with a non-default value
+would need the same value to confirm. And the container md5 is only as strong as the archive's
+version immutability — which for Zenodo is the point of a version DOI, but for a mutable ZIP
+elsewhere would weaken the anchor the `crc32` leans on.

@@ -413,6 +413,35 @@ class ZenodoFileSystem(ArchiveFileSystem):
         provenance = self._container_info(container).get("zenodo") or {}
         return provenance.get("record_id") or super().version_accession(container)
 
+    def container_of(self, container: str, info: dict) -> dict | None:
+        """The ZIP that delivers a member, as chirograph schema-2.0 facts.
+
+        A member expanded from a transparent ZIP carries, in its ``zenodo`` block,
+        the enclosing archive's path and md5, and a top-level ``crc32`` read from
+        the central directory. That is exactly what a `2.0` ``containers`` entry
+        records (`container-model.md`): the container's own identity once, and the
+        member's download-free cross-check. A loose file (a bare deposit file, not
+        a ZIP member) has no ``container`` in its block, so it stays a `1.x` entry.
+
+        The container's own md5 and size come from its *raw* record entry — Zenodo
+        publishes the whole-file md5, and the size is what lets ``confirm`` compute
+        the central-directory tail-read offset. ``crc32`` is rendered as the
+        canonical lowercase 8-hex the format expects.
+        """
+        block = info.get("zenodo") or {}
+        zip_path = block.get("container")
+        crc = info.get("crc32")
+        if not zip_path or crc is None:
+            return None
+        raw = self._member(*self.split_path(zip_path))
+        return {
+            "source_root": self.relpath(container, zip_path),
+            "format": "zip",
+            "md5": raw.get("md5") or block.get("container_md5"),
+            "size": raw.get("size"),
+            "crc32": f"{crc:08x}" if isinstance(crc, int) else str(crc),
+        }
+
     def _member(self, container: str, member: str) -> dict:
         """The member as a plain file, ignoring any ZIP presentation."""
         members = self._members(container)

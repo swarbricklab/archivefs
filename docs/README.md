@@ -26,6 +26,7 @@ One page per subcommand: syntax, every option, worked scenarios, exit codes.
 | [`archivefs manifest`](cli-manifest.md) | write a `.chiro` pin for a deposit, download-free where it can |
 | [`archivefs check`](cli-check.md) | has the *deposit* drifted from its manifest? |
 | [`archivefs update`](cli-update.md) | has the *upstream* moved? regenerate and re-pin |
+| [`archivefs confirm`](cli-confirm.md) | does the *live deposit* match the manifest? download-free for a ZIP |
 | [`archivefs verify`](cli-verify.md) | do the files on *my disk* match the manifest? |
 | [`archivefs dvc`](cli-dvc.md) | register the protocols with DVC — required once per environment |
 | [`archivefs config`](configuration.md) | the configuration layers, and what they resolve to |

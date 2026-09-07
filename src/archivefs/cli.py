@@ -372,6 +372,36 @@ def cmd_update(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_confirm(args: argparse.Namespace) -> int:
+    """Cross-check a manifest against the live deposit, download-free where it can."""
+    from archivefs.chiro import _chirograph
+    from archivefs.confirm import confirm
+
+    _chirograph()  # MissingExtraError names the install, not a traceback
+    report = confirm(
+        args.target, _parse_options(args.option), download=args.download
+    )
+    print(report.summary())
+    for container in report.containers:
+        mark = "ok" if container.ok else "DIFFERS"
+        print(
+            f"  container {container.source_root} [{container.confirm_class}]: "
+            f"md5 {mark} ({container.actual_md5})"
+        )
+    for member in report.members:
+        if member.ok and member.status == "matched":
+            continue  # keep the report to what needs attention
+        label = {
+            "matched": "ok",
+            "size-only": "size-only",
+        }.get(member.status, member.status)
+        detail = f" — {member.detail}" if member.detail else ""
+        print(f"  {label:10} {member.relpath} [{member.via}]{detail}")
+    for name in report.unrecorded:
+        print(f"  unrecorded {name} (in the deposit, not the manifest)")
+    return 0 if report.ok else 1
+
+
 def chiroref_for(manifest: Any) -> Any:
     """The whole-file `chiro://md5:…` reference for a manifest as re-serialised."""
     from archivefs.chiro import _chirograph
@@ -875,6 +905,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_common(update)
     update.set_defaults(func=cmd_update)
+
+    confirm = sub.add_parser(
+        "confirm",
+        help="does the live deposit still match this .chiro manifest? (download-free)",
+        description=(
+            "Cross-check a manifest against the live deposit it pins. For a ZIP "
+            "deposit this reads only the central directory — checking each member's "
+            "crc32 and size, and the container's published md5, without downloading "
+            "member bytes. For loose files it compares the archive's published md5. "
+            "Where a container format offers no cheap check (tar.gz and friends), pass "
+            "--download to read and hash the bytes."
+        ),
+    )
+    confirm.add_argument(
+        "target", help="a chiro:// URL or a path to the committed .chiro.json"
+    )
+    confirm.add_argument(
+        "--download",
+        action="store_true",
+        help="read and hash bytes where no cheap check exists (tar.gz, unchecksummed)",
+    )
+    add_common(confirm)
+    confirm.set_defaults(func=cmd_confirm)
 
     cfg = sub.add_parser(
         "config", help="the configuration layers, and what they resolve to"

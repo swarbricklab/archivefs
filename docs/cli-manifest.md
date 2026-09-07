@@ -49,6 +49,30 @@ That is the whole design, and it splits by archive:
 An etag or mtime is never quietly promoted to a checksum — a manifest either records a
 real digest or refuses to record the file.
 
+## ZIP deposits — a container manifest (schema 2.0)
+
+When a deposit is a **ZIP** and it is read transparently (`-o extract_zips=true` — for
+Zenodo this is opt-in, not the default), the manifest becomes a chirograph **schema-2.0**
+container manifest ([`decisions.md`](decisions.md) D41, `container-model.md`): a top-level
+`containers` entry records the ZIP's own identity — its path, `format: zip`, the whole-file
+md5 the archive publishes, and its size — and each member gains a `crc32` (from the ZIP's
+central directory) and a `source_path` that links it to the container. A member still
+carries its own authoritative `md5`, so the DVC `.dir` hash is byte-identical to a plain
+import — the container fields are additive.
+
+A ZIP member has no published md5, though, so a container manifest is **not** download-free:
+`--download` is required to read and hash each member. What the download buys you, that a
+plain (opaque-ZIP) pin does not, is member-granular provenance and a later
+**download-free** [`archivefs confirm`](cli-confirm.md): the `crc32` + container md5 let you
+cross-check the deposit without fetching a byte. Pin the whole record (the ZIP is a child of
+it); without `-o extract_zips=true` you get a plain, download-free pin of the ZIP as one
+opaque file instead.
+
+```console
+$ archivefs manifest zenodo://1486184 --download -o extract_zips=true
+.chirograph/manifests/b3/150a….chiro.json: 2 file(s), 1019 B, chiro://md5:b3150a… (observed-download)
+```
+
 ## What it prints
 
 The manifest is written into the store; a one-line summary goes to **stderr**, ending
@@ -86,6 +110,7 @@ no tooling.
 
 ## See also
 
+[`cli-confirm.md`](cli-confirm.md) (cross-check a ZIP deposit, download-free) ·
 [`cli-check.md`](cli-check.md) (compare a deposit to its manifest) ·
 [`cli-verify.md`](cli-verify.md) (verify a downloaded tree) ·
 [`concepts-and-versions.md`](concepts-and-versions.md) (why a manifest is a *version*)

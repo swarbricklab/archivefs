@@ -97,6 +97,9 @@ def build_manifest(
     listing = fs.find(container, detail=True)
     entries: list[Any] = []
     missing: list[str] = []
+    # Container identity is recorded once, keyed by source_root; the first member
+    # under a ZIP contributes it, the rest just link to it (`container-model.md` §2).
+    containers: dict[str, Any] = {}
     for path in sorted(listing):
         info = listing[path]
         if info.get("type") != "file":
@@ -116,13 +119,31 @@ def build_manifest(
                 missing.append(relpath)
                 continue
 
+        # Is this file delivered by an archive container (a ZIP member)? If so it
+        # carries a download-free `crc32`, and its enclosing container's identity
+        # goes in the `containers` block. `source_path` is the archive-side layout
+        # (here == relpath), the anchor the linkage rule matches against.
+        member = fs.container_of(container, info)
+        crc32 = None
+        source_path = None
+        if member is not None:
+            crc32 = member.get("crc32")
+            source_path = relpath
+            _record_container(chirograph, containers, member, relpath)
+
         entries.append(
             chirograph.FileEntry(
                 relpath=relpath,
                 md5=md5,
                 size=size,
+                source_path=source_path,
+                crc32=crc32,
                 # None where the backend published no immutability token; harmless.
                 version_id=info.get("version_id"),
+                # The archive's own per-file version tag, where it publishes one
+                # (schema 1.1). Distinct from `version_id`, which is the deposit's
+                # object version; `file_version` is the file's revision within it.
+                file_version=info.get("file_version"),
             )
         )
 
@@ -144,6 +165,10 @@ def build_manifest(
             else chirograph.PROVENANCE_OBSERVED
         ),
         files=entries,
+        # A `containers` block is what tips a manifest to schema 2.0; absent (a
+        # loose deposit), the manifest stays 1.x byte-for-byte (`container-model.md`
+        # §4). Sorted by source_root so the manifest is deterministic.
+        containers=[containers[root] for root in sorted(containers)],
         # The version-pinned accession, not the address the user typed: a Zenodo
         # concept DOI resolves to the *version* recid here, so `chiro://` fetches the
         # exact pinned version rather than following the concept to latest.
@@ -153,4 +178,26 @@ def build_manifest(
         concept=concept,
         record_version=record_version,
         generator=chirograph.GENERATOR,
+    )
+
+
+def _record_container(
+    chirograph: Any, containers: dict[str, Any], member: dict, relpath: str
+) -> None:
+    """Fold one member's container into ``containers``, deduped by ``source_root``.
+
+    The container's identity is invariant across its members, so the first member
+    under a given ``source_root`` builds the :class:`chirograph.Container` and the
+    rest are a no-op. A member's ``source_path`` must sit under its container's
+    ``source_root`` or the manifest is rejected on read (`container-model.md` §5);
+    the writer keys the two off the same native layout so they always agree.
+    """
+    root = member["source_root"]
+    if root in containers:
+        return
+    containers[root] = chirograph.Container(
+        source_root=root,
+        format=member["format"],
+        md5=member["md5"],
+        size=member.get("size"),
     )
