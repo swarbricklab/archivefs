@@ -30,6 +30,7 @@ instead (for an ad-hoc manifest outside a store), or `--out -` for stdout.
 |---|---|
 | `URL` | a record or subtree, e.g. `zenodo://1486184`, `bia://S-BIAD3080/images/ihc`, `geo://GSE176078` (omit with `--from-dvc`) |
 | `--from-dvc FILE.dvc` | reuse the checksums DVC already computed for an import (see below) |
+| `--concept CURIE` | the concept CURIE to record, overriding the derived one (see `--from-dvc`) |
 | `--out` | write to an explicit path instead of the store (`-` for stdout) |
 | `--download` | read and hash the bytes for files the archive publishes no checksum for |
 | `--self-deposited` | mark provenance `self-deposited` (default `observed-download`) |
@@ -87,24 +88,35 @@ $ archivefs manifest zenodo://1486184 --download -o extract_zips=true
 
 ## `--from-dvc`: reuse the checksums DVC already computed
 
-If the deposit is **already a DVC import** (`dvc import-url zenodo://…/archive.zip`), DVC
-hashed every file when it pulled them. `--from-dvc` reuses those md5s instead of reading the
-archive again: it takes the source URL, the per-file md5s, and the import's `fs_config`
-straight from the `.dvc`, and lets the archive *listing* supply everything else (crc32,
-container md5, size, concept). The result is **byte-for-byte the manifest `--download` would
-have produced** — same `body_hash`, same `.dir` hash — for the cost of a metadata listing
-instead of the download.
+If the deposit is **already a DVC import** (`dvc import-url zenodo://…/archive.zip`), the
+`.dvc` already holds everything a manifest needs. `--from-dvc` rebuilds the pin from the
+`.dvc` **alone — no archive access at all**: per-file md5/size/relpath from its `files:`
+list, `crc32` + container md5 from the Zenodo `version_id` overload, and the source_root /
+record / concept from the dependency URL.
 
 ```console
 $ archivefs manifest --from-dvc data/anndata_objects.dvc
 .chirograph/manifests/…: 58 file(s), 19.4 GiB, chiro://md5:… (observed-download)
 ```
 
-That 19.4 GiB deposit is pinned without fetching a payload byte — the only cost is reading
-the ZIP's central directory. It is scoped to an **import**: a plain `dvc add` has no upstream
-URL for a `chiro://` pin to route to, and is refused with a message saying so. The checksums
-come from the `.dvc`'s inline `files:` list, or — for an import that records only a directory
-hash — from DVC's own view (`dvc.api.DVCFileSystem`), never from a re-hash.
+That 19.4 GiB deposit is pinned in about a second, offline — the reused md5s are DVC's, so
+the DVC `.dir` hash is unchanged (a clean re-pin). Because it needs no archive, it also works
+**before** the data is uploaded: prepare the manifest from what you are about to deposit, then
+[`archivefs confirm`](cli-confirm.md) it against the deposit afterwards. It is scoped to an
+**import**: a plain `dvc add` has no upstream URL for a `chiro://` pin to route to, and is
+refused with a message saying so.
+
+Offline, Zenodo's resolved *concept* DOI is unknowable, so the pin records the *version* DOI —
+it fetches correctly, but `archivefs update` then tracks that version rather than latest. If you
+know the concept DOI (from the record page, or a DOI you reserved before depositing), supply it
+with `--concept`:
+
+```console
+$ archivefs manifest --from-dvc data/anndata_objects.dvc --concept doi:10.5281/zenodo.18917099
+```
+
+The pin still fetches the pinned *version*; `--concept` only sets what `update` tracks as
+"latest".
 
 ## What it prints
 
