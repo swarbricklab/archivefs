@@ -28,7 +28,8 @@ instead (for an ad-hoc manifest outside a store), or `--out -` for stdout.
 
 | | meaning |
 |---|---|
-| `URL` | a record or subtree, e.g. `zenodo://1486184`, `bia://S-BIAD3080/images/ihc`, `geo://GSE176078` |
+| `URL` | a record or subtree, e.g. `zenodo://1486184`, `bia://S-BIAD3080/images/ihc`, `geo://GSE176078` (omit with `--from-dvc`) |
+| `--from-dvc FILE.dvc` | reuse the checksums DVC already computed for an import (see below) |
 | `--out` | write to an explicit path instead of the store (`-` for stdout) |
 | `--download` | read and hash the bytes for files the archive publishes no checksum for |
 | `--self-deposited` | mark provenance `self-deposited` (default `observed-download`) |
@@ -83,6 +84,27 @@ layout:
 $ archivefs manifest zenodo://1486184 --download -o extract_zips=true
 .chirograph/manifests/b3/150a….chiro.json: 2 file(s), 1019 B, chiro://md5:b3150a… (observed-download)
 ```
+
+## `--from-dvc`: reuse the checksums DVC already computed
+
+If the deposit is **already a DVC import** (`dvc import-url zenodo://…/archive.zip`), DVC
+hashed every file when it pulled them. `--from-dvc` reuses those md5s instead of reading the
+archive again: it takes the source URL, the per-file md5s, and the import's `fs_config`
+straight from the `.dvc`, and lets the archive *listing* supply everything else (crc32,
+container md5, size, concept). The result is **byte-for-byte the manifest `--download` would
+have produced** — same `body_hash`, same `.dir` hash — for the cost of a metadata listing
+instead of the download.
+
+```console
+$ archivefs manifest --from-dvc data/anndata_objects.dvc
+.chirograph/manifests/…: 58 file(s), 19.4 GiB, chiro://md5:… (observed-download)
+```
+
+That 19.4 GiB deposit is pinned without fetching a payload byte — the only cost is reading
+the ZIP's central directory. It is scoped to an **import**: a plain `dvc add` has no upstream
+URL for a `chiro://` pin to route to, and is refused with a message saying so. The checksums
+come from the `.dvc`'s inline `files:` list, or — for an import that records only a directory
+hash — from DVC's own view (`dvc.api.DVCFileSystem`), never from a re-hash.
 
 ## What it prints
 

@@ -2856,3 +2856,38 @@ two members of the same ZIP in one thread and reads them interleaved would deadl
 `Lock`. Nothing in archivefs does this (every reader opens, reads and closes one member before
 the next), and the leak-safety `__del__` release bounds the blast radius, but a future concurrent
 *intra-thread* reader would need an `RLock` and per-thread accounting instead.
+
+## D43 — pin a DVC import by *reusing* its checksums, not re-reading the archive (`--from-dvc`)
+
+A ZIP member has no published md5, so pinning a Zenodo ZIP means computing one — which
+`archivefs manifest --download` does by reading and hashing the whole archive. For P08's
+`anndata_objects.zip` (20 GB) and `spatialdata_objects.zip` (28 GB) that is hours of
+re-download for bytes DVC **already hashed** when it first imported them. So a manifest of
+dvc-tracked data should not re-hash anything.
+
+`archivefs manifest --from-dvc <file.dvc>` (`archivefs.from_dvc`) reads the source URL, the
+per-file md5s, and the `fs_config` out of the `.dvc`, and threads the md5s into the normal
+`build_manifest` as `known_checksums`. The key realisation is that the archive *listing*
+already carries everything else a container manifest needs — crc32, container md5, size,
+concept, `record_accession` — and the **only** thing `--download` adds is the member md5. Supply
+that from DVC and no payload byte is read. The manifest is therefore **byte-identical** to the
+downloaded one (same `body_hash`, same `.dir`), proven on `pathology_annotations.zip`; the 20 GB
+`anndata` pin builds in ~2 min (all central-directory metadata) with a matching `.dir`.
+
+Design points:
+- **Checksum source, in order:** the `.dvc`'s inline `files:` list (present for `dvc
+  import-url`), then DVC's own live view (`dvc.api.DVCFileSystem.find`, which surfaces md5 +
+  size *without materialising* the data). Both key by the archive-side relpath, which is the
+  interior path an `extract_zips` import records — so it lines up with what the listing produces.
+- **`fs_config` is carried through.** The import's options (notably `extract_zips: true`) are
+  read from the dep and applied to the re-listing, or the ZIP would list as one opaque file and
+  the relpaths would not match. `-o` on the command line overrides them.
+- **Scoped to a DVC *import*.** A `dvc add` has no upstream URL for a `chiro://` pin to route
+  to, so it is refused with a message pointing at that, rather than emitting an unroutable
+  manifest. (Capturing purely-local data is chirograph's self-deposited path, a separate flow.)
+
+**Cost to change my mind:** the reused md5 is trusted, not re-verified — if DVC's recorded hash
+were wrong (a corrupted import DVC never caught), `--from-dvc` would faithfully pin the wrong
+digest. That is acceptable because DVC computed it by reading the same immutable deposit this
+pin points at, and `archivefs confirm` / verify-on-read still check the bytes on any later fetch;
+`--download` remains the path for a from-scratch, self-verified capture.

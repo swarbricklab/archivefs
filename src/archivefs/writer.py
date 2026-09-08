@@ -72,6 +72,7 @@ def build_manifest(
     source_url: str | None = None,
     concept: str | None = None,
     record_version: str | None = None,
+    known_checksums: dict[str, str] | None = None,
 ) -> Any:
     """Build a chirograph :class:`Manifest` over every file in ``container``.
 
@@ -88,6 +89,14 @@ def build_manifest(
     other schema-1.1 staleness fields; the writer carries whatever the caller supplies.
     The per-file ``version_id`` *is* filled in from the listing, because a backend that
     sets it has declared it the entry's immutability token.
+
+    ``known_checksums`` maps an archive-side relpath to an md5 that was *already
+    computed* for those bytes — DVC's, when it imported the deposit
+    (:mod:`archivefs.from_dvc`). A member the archive publishes no md5 for takes its
+    md5 from here before falling back to ``download`` or failing, so a ZIP of
+    gigabytes is pinned from the metadata listing alone. Everything else (crc32,
+    container md5, size, concept) still comes from that listing, so the manifest is
+    byte-for-byte the one ``download=True`` would have built.
     """
     chirograph = _chirograph()
     container = fs._strip_protocol(container)
@@ -112,6 +121,13 @@ def build_manifest(
 
         md5 = info.get("md5")
         size = info.get("size")
+        if md5 is None and known_checksums is not None:
+            # A checksum the archive does not publish but *someone already computed* —
+            # e.g. DVC, which hashed this exact byte sequence when it first imported it.
+            # Reusing it is what makes a manifest of a multi-gigabyte ZIP free: the
+            # listing supplies everything else (crc32, container md5, size), so no byte
+            # is read. Keyed by the archive-side relpath, which is how DVC records it.
+            md5 = known_checksums.get(relpath)
         if md5 is None:
             if download:
                 md5, size = _hash_through_fs(fs, path)
@@ -160,7 +176,8 @@ def build_manifest(
             f"{len(missing)} file(s) in {container} publish no checksum "
             f"({shown}), so a download-free manifest cannot be built for them. "
             f"Re-run with download=True (CLI: --download) to read and hash the "
-            f"bytes, or exclude them."
+            f"bytes, reuse checksums something already computed (CLI: --from-dvc "
+            f"<file.dvc>), or exclude them."
         )
     if not entries:
         raise ManifestError(f"{container} lists no files to put in a manifest.")

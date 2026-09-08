@@ -31,7 +31,21 @@ from archivefs.errors import ArchiveFSError
 from archivefs.registry import PROTOCOLS, installed_backends
 
 
-def _filesystem(url: str, options: list[str] | None = None) -> tuple[Any, str]:
+def _coerce_option(value: Any) -> Any:
+    """``"true"``/``"false"`` strings become bools; everything else passes through.
+
+    Needed because ``bool("false")`` is ``True`` — a config value carried as a string
+    (from `-o`, or a `.dvc` ``fs_config``) has to be coerced or ``extract_zips=false``
+    silently turns the feature *on*.
+    """
+    if isinstance(value, str) and value in ("true", "false"):
+        return value == "true"
+    return value
+
+
+def _filesystem(
+    url: str, options: list[str] | None = None, extra: dict[str, Any] | None = None
+) -> tuple[Any, str]:
     import fsspec
 
     protocol, _, rest = url.partition("://")
@@ -58,7 +72,11 @@ def _filesystem(url: str, options: list[str] | None = None) -> tuple[Any, str]:
             f"unknown protocol {protocol!r}. archivefs speaks: "
             f"{', '.join(sorted(PROTOCOLS))}"
         )
-    fs = fsspec.filesystem(protocol, **_parse_options(options))
+    # `extra` (e.g. a .dvc's `fs_config`) is the base; explicit `-o` on the command
+    # line overrides it.
+    merged = {k: _coerce_option(v) for k, v in (extra or {}).items()}
+    merged.update(_parse_options(options))
+    fs = fsspec.filesystem(protocol, **merged)
     return fs, rest
 
 
@@ -68,10 +86,7 @@ def _parse_options(options: list[str] | None) -> dict[str, Any]:
         key, _, value = item.partition("=")
         if not value:
             raise SystemExit(f"--option expects key=value, got {item!r}")
-        if value in ("true", "false"):
-            storage_options[key] = value == "true"
-        else:
-            storage_options[key] = value
+        storage_options[key] = _coerce_option(value)
     return storage_options
 
 
@@ -286,7 +301,29 @@ def cmd_manifest(args: argparse.Namespace) -> int:
     from archivefs.writer import build_manifest
 
     chirograph = _chirograph()  # MissingExtraError names the install, not a traceback
-    fs, path = _filesystem(args.url, args.option)
+
+    # `--from-dvc` reuses the checksums DVC already computed for an import, so a
+    # multi-gigabyte deposit is pinned from a metadata listing, not a re-download.
+    known_checksums = None
+    fs_config: dict[str, Any] = {}
+    url = args.url
+    if args.from_dvc:
+        from archivefs.from_dvc import read_dvc_import
+
+        source = read_dvc_import(args.from_dvc)
+        url = source.url
+        known_checksums = source.checksums
+        # The import's own storage options — notably `extract_zips` — so the archive
+        # is re-listed in the same shape DVC saw it and the relpaths line up.
+        fs_config = source.fs_config
+    if not url:
+        print(
+            "manifest needs a URL, or --from-dvc <file.dvc> to derive one.",
+            file=sys.stderr,
+        )
+        return 2
+
+    fs, path = _filesystem(url, args.option, extra=fs_config)
     # The whole addressed path, not just its container: `bia://S-BIAD3080/images/ihc`
     # pins that subtree, not the entire study. build_manifest lists the subtree and
     # scopes the concept to it.
@@ -296,6 +333,7 @@ def cmd_manifest(args: argparse.Namespace) -> int:
         target,
         self_deposited=args.self_deposited,
         download=args.download,
+        known_checksums=known_checksums,
     )
 
     if args.out == "-":
@@ -861,7 +899,20 @@ def build_parser() -> argparse.ArgumentParser:
             "--download to read and hash the bytes."
         ),
     )
-    manifest.add_argument("url")
+    manifest.add_argument(
+        "url",
+        nargs="?",
+        help="a record or subtree URL, e.g. zenodo://1486184 (omit when --from-dvc)",
+    )
+    manifest.add_argument(
+        "--from-dvc",
+        metavar="FILE.dvc",
+        help=(
+            "reuse the checksums DVC already computed for an import: read the source "
+            "URL and per-file md5s from FILE.dvc, so a large deposit is pinned from a "
+            "metadata listing instead of a re-download"
+        ),
+    )
     manifest.add_argument(
         "--out",
         metavar="PATH",
