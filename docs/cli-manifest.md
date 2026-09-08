@@ -30,6 +30,7 @@ instead (for an ad-hoc manifest outside a store), or `--out -` for stdout.
 |---|---|
 | `URL` | a record or subtree, e.g. `zenodo://1486184`, `bia://S-BIAD3080/images/ihc`, `geo://GSE176078` (omit with `--from-dvc`) |
 | `--from-dvc FILE.dvc` | reuse the checksums DVC already computed for an import (see below) |
+| `--concept CURIE` | the concept CURIE to record, overriding the derived one (see `--from-dvc`) |
 | `--out` | write to an explicit path instead of the store (`-` for stdout) |
 | `--download` | read and hash the bytes for files the archive publishes no checksum for |
 | `--self-deposited` | mark provenance `self-deposited` (default `observed-download`) |
@@ -103,9 +104,19 @@ the DVC `.dir` hash is unchanged (a clean re-pin). Because it needs no archive, 
 **before** the data is uploaded: prepare the manifest from what you are about to deposit, then
 [`archivefs confirm`](cli-confirm.md) it against the deposit afterwards. It is scoped to an
 **import**: a plain `dvc add` has no upstream URL for a `chiro://` pin to route to, and is
-refused with a message saying so. (Offline, Zenodo's resolved *concept* DOI is unknowable, so
-the pin records the *version* DOI — it fetches correctly, but `archivefs update` tracks that
-version rather than latest.)
+refused with a message saying so.
+
+Offline, Zenodo's resolved *concept* DOI is unknowable, so the pin records the *version* DOI —
+it fetches correctly, but `archivefs update` then tracks that version rather than latest. If you
+know the concept DOI (from the record page, or a DOI you reserved before depositing), supply it
+with `--concept`:
+
+```console
+$ archivefs manifest --from-dvc data/anndata_objects.dvc --concept doi:10.5281/zenodo.18917099
+```
+
+The pin still fetches the pinned *version*; `--concept` only sets what `update` tracks as
+"latest".
 
 ## What it prints
 

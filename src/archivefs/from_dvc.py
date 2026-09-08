@@ -36,14 +36,24 @@ _ZIP_VERSION_ID = re.compile(r"^(?P<md5>[0-9a-f]{32}):(?P<crc>[0-9a-f]{1,8})$")
 _CONTAINER_EXTS = (".zip",)
 
 
-def manifest_from_dvc(dvc_file: str | Path, *, self_deposited: bool = False) -> Any:
+def manifest_from_dvc(
+    dvc_file: str | Path,
+    *,
+    self_deposited: bool = False,
+    concept: str | None = None,
+) -> Any:
     """Reconstruct a chirograph :class:`Manifest` from a DVC import's ``.dvc``, offline.
 
     Reads the source URL and the per-file records (``relpath``, ``md5``, ``size``,
     ``version_id``) from the ``.dvc``; parses the ZIP overload for each member's
     ``crc32`` and container md5; and derives ``source_root`` / ``record_accession`` /
-    ``concept`` from the URL. No archive request is made. Raises :class:`ManifestError`
+    ``concept`` from the URL. No archive request is made. Raises :class:`ManifestError``
     on a ``dvc add`` (no URL) or a ``.dvc`` with no reusable per-file checksums.
+
+    ``concept`` overrides the derived concept CURIE. Offline, only the *version* DOI is
+    knowable from a Zenodo URL, so a depositor who knows the true concept DOI (from the
+    record page, or a reserved DOI) passes it here to get concept-latest tracking for
+    ``archivefs update``, instead of the version-DOI approximation.
     """
     import yaml
 
@@ -69,7 +79,10 @@ def manifest_from_dvc(dvc_file: str | Path, *, self_deposited: bool = False) -> 
     files = _files_of(dep, path)
 
     scheme, _, rest = url.partition("://")
-    source_root, record_accession, concept = _route(scheme, rest)
+    source_root, record_accession, derived_concept = _route(scheme, rest)
+    # A caller-supplied concept (the true concept DOI a depositor knows) wins over the
+    # version-DOI approximation the URL can offer offline.
+    concept = concept or derived_concept
 
     entries: list[Any] = []
     container_md5: str | None = None

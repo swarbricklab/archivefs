@@ -305,7 +305,9 @@ def cmd_manifest(args: argparse.Namespace) -> int:
         from archivefs.from_dvc import manifest_from_dvc
 
         manifest = manifest_from_dvc(
-            args.from_dvc, self_deposited=args.self_deposited
+            args.from_dvc,
+            self_deposited=args.self_deposited,
+            concept=args.concept,
         )
     else:
         if not args.url:
@@ -323,6 +325,7 @@ def cmd_manifest(args: argparse.Namespace) -> int:
             target,
             self_deposited=args.self_deposited,
             download=args.download,
+            concept=args.concept,
         )
 
     if args.out == "-":
@@ -899,6 +902,15 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "build the manifest offline from a DVC import's FILE.dvc — reusing the "
             "md5s, sizes and crc32s it already holds, with no archive access at all"
+        ),
+    )
+    manifest.add_argument(
+        "--concept",
+        metavar="CURIE",
+        help=(
+            "the concept CURIE to record (e.g. doi:10.5281/zenodo.123 — Zenodo's "
+            "'all versions' DOI), overriding the derived one; for --from-dvc offline, "
+            "where only the version DOI is knowable, supply the true concept here"
         ),
     )
     manifest.add_argument(

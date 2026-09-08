@@ -77,6 +77,19 @@ def test_from_dvc_rebuilds_a_container_manifest_offline(tmp_path):
     assert manifest.concept == "doi:10.5281/zenodo.18917100"
 
 
+def test_from_dvc_concept_override(tmp_path):
+    """A depositor who knows the true concept DOI supplies it; the version stays pinned."""
+    dvc, *_ = _zip_import(
+        tmp_path,
+        [("a.h5ad", 1, "0be89e6a")],
+        url="zenodo://10.5281/zenodo.18917100/anndata_objects.zip",
+    )
+    manifest = manifest_from_dvc(dvc, concept="doi:10.5281/zenodo.18917099")
+    # The concept is the supplied 'all versions' DOI; the pin still fetches the version.
+    assert manifest.concept == "doi:10.5281/zenodo.18917099"
+    assert manifest.record_accession == "18917100"
+
+
 def test_from_dvc_dir_hash_matches_the_member_md5s(tmp_path):
     """The reused md5s give the same DVC .dir hash — that is what makes it a clean swap."""
     members = [("a.txt", 1, "00000001"), ("sub/b.txt", 2, "00000002")]
