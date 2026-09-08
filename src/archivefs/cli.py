@@ -34,18 +34,15 @@ from archivefs.registry import PROTOCOLS, installed_backends
 def _coerce_option(value: Any) -> Any:
     """``"true"``/``"false"`` strings become bools; everything else passes through.
 
-    Needed because ``bool("false")`` is ``True`` — a config value carried as a string
-    (from `-o`, or a `.dvc` ``fs_config``) has to be coerced or ``extract_zips=false``
-    silently turns the feature *on*.
+    Needed because ``bool("false")`` is ``True`` — an option carried as a string (from
+    `-o`) has to be coerced or ``extract_zips=false`` silently turns the feature *on*.
     """
     if isinstance(value, str) and value in ("true", "false"):
         return value == "true"
     return value
 
 
-def _filesystem(
-    url: str, options: list[str] | None = None, extra: dict[str, Any] | None = None
-) -> tuple[Any, str]:
+def _filesystem(url: str, options: list[str] | None = None) -> tuple[Any, str]:
     import fsspec
 
     protocol, _, rest = url.partition("://")
@@ -74,9 +71,7 @@ def _filesystem(
         )
     # `extra` (e.g. a .dvc's `fs_config`) is the base; explicit `-o` on the command
     # line overrides it.
-    merged = {k: _coerce_option(v) for k, v in (extra or {}).items()}
-    merged.update(_parse_options(options))
-    fs = fsspec.filesystem(protocol, **merged)
+    fs = fsspec.filesystem(protocol, **_parse_options(options))
     return fs, rest
 
 
@@ -302,39 +297,33 @@ def cmd_manifest(args: argparse.Namespace) -> int:
 
     chirograph = _chirograph()  # MissingExtraError names the install, not a traceback
 
-    # `--from-dvc` reuses the checksums DVC already computed for an import, so a
-    # multi-gigabyte deposit is pinned from a metadata listing, not a re-download.
-    known_checksums = None
-    fs_config: dict[str, Any] = {}
-    url = args.url
     if args.from_dvc:
-        from archivefs.from_dvc import read_dvc_import
+        # Offline: the .dvc already holds every md5/size/relpath and (for a ZIP) the
+        # crc32 + container md5, so the manifest is rebuilt without touching the archive
+        # — the whole point being to pin (or prepare) a deposit the archive need not be
+        # reachable, or even to exist, for.
+        from archivefs.from_dvc import manifest_from_dvc
 
-        source = read_dvc_import(args.from_dvc)
-        url = source.url
-        known_checksums = source.checksums
-        # The import's own storage options — notably `extract_zips` — so the archive
-        # is re-listed in the same shape DVC saw it and the relpaths line up.
-        fs_config = source.fs_config
-    if not url:
-        print(
-            "manifest needs a URL, or --from-dvc <file.dvc> to derive one.",
-            file=sys.stderr,
+        manifest = manifest_from_dvc(
+            args.from_dvc, self_deposited=args.self_deposited
         )
-        return 2
-
-    fs, path = _filesystem(url, args.option, extra=fs_config)
-    # The whole addressed path, not just its container: `bia://S-BIAD3080/images/ihc`
-    # pins that subtree, not the entire study. build_manifest lists the subtree and
-    # scopes the concept to it.
-    target = fs._strip_protocol(path)
-    manifest = build_manifest(
-        fs,
-        target,
-        self_deposited=args.self_deposited,
-        download=args.download,
-        known_checksums=known_checksums,
-    )
+    else:
+        if not args.url:
+            print(
+                "manifest needs a URL, or --from-dvc <file.dvc>.", file=sys.stderr
+            )
+            return 2
+        fs, path = _filesystem(args.url, args.option)
+        # The whole addressed path, not just its container: `bia://S-BIAD3080/images/ihc`
+        # pins that subtree, not the entire study. build_manifest lists the subtree and
+        # scopes the concept to it.
+        target = fs._strip_protocol(path)
+        manifest = build_manifest(
+            fs,
+            target,
+            self_deposited=args.self_deposited,
+            download=args.download,
+        )
 
     if args.out == "-":
         # The document goes to stdout clean (for a pipe); the summary to stderr.
@@ -908,9 +897,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--from-dvc",
         metavar="FILE.dvc",
         help=(
-            "reuse the checksums DVC already computed for an import: read the source "
-            "URL and per-file md5s from FILE.dvc, so a large deposit is pinned from a "
-            "metadata listing instead of a re-download"
+            "build the manifest offline from a DVC import's FILE.dvc — reusing the "
+            "md5s, sizes and crc32s it already holds, with no archive access at all"
         ),
     )
     manifest.add_argument(
