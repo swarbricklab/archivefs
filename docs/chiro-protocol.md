@@ -70,7 +70,8 @@ the `.chirograph/` store, then address it:
 ```console
 $ archivefs ls chiro://md5:ac3a5a…
 $ archivefs get chiro://md5:ac3a5a…/P01_ihc.tif ./a.tif        # verified via BIA
-$ dvc import-url chiro://md5:ac3a5a… data/images/ihc           # a self-verifying pin
+$ dvc import-url --no-download chiro://md5:ac3a5a… data/images/ihc  # a self-verifying pin
+$ dvc pull                                                    # you + any reviewer, later
 ```
 
 ## Requirements and limits
@@ -84,6 +85,14 @@ $ dvc import-url chiro://md5:ac3a5a… data/images/ihc           # a self-verify
   `dvc import-url` records `outs.md5` like any normal import — there is no mutable source
   to re-resolve. To *move* a pin as the upstream changes, that is `archivefs update`'s job
   (design in `archivefs-update-design.md`), not `dvc update`.
+* **Import with `--no-download` so a reviewer can `dvc pull`.** Because a `chiro://` import
+  is not version-aware, a *completed* one records an `outs.md5` and is **not** pullable on a
+  fresh clone — a reviewer without your cache gets `Checkout failed … Is your cache up to
+  date?`. `--no-download` makes it a *partial* import DVC re-fetches from the archive on
+  `dvc pull`, and — because the digest already *is* the version — this costs no
+  version-awareness (unlike bare `zenodo://`). It is the recommended way to commit a pin; see
+  [`using-with-dvc.md`](using-with-dvc.md). The tell of a pullable pin is an `outs:` block
+  with no `md5:` — just `hash: md5` and `path`.
 
 ## See also
 
