@@ -446,6 +446,22 @@ one. Verified end-to-end: a fresh clone with an empty cache and no DVC remote ru
 verified against the manifest. (The tell, as above, is an `outs:` block with **no**
 `md5:` — just `hash: md5` and `path`.)
 
+**Stamp readable provenance with `archivefs dvc-meta`.** A `chiro://md5:` dep says
+nothing about *where* the data is from — you'd have to resolve the manifest to find out.
+`archivefs dvc-meta data/*.dvc` writes a `meta.archivefs` block into each pin's `.dvc` —
+archive, record/DOI (or BIA study), concept, container, a clickable landing URL, and the
+`zenodo://`/`bia://` source — derived from the pin's own `.chirograph` manifest:
+
+```console
+$ archivefs dvc-meta data/pathology_annotations.dvc
+stamped …/pathology_annotations.dvc: zenodo · https://doi.org/10.5281/zenodo.18917100
+```
+
+DVC excludes `meta` from the stage md5 and preserves it across `dvc update`, so the pin
+is unchanged; the block is **advisory** — the pin and manifest stay authoritative — and,
+being derived from the manifest, it does not drift (re-run to refresh). It makes
+provenance legible on GitHub, `grep`-able, and a recovery hint if the store is ever lost.
+
 ## Troubleshooting
 
 | symptom | cause | fix |

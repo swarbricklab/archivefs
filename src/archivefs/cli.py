@@ -474,6 +474,31 @@ def cmd_dvc(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_dvc_meta(args: argparse.Namespace) -> int:
+    """Stamp provenance into a chiro:// pin's .dvc, derived from its manifest."""
+    from archivefs.chiro import _chirograph
+    from archivefs.dvc_meta import stamp
+
+    _chirograph()  # MissingExtraError names the install, not a traceback
+    rc = 0
+    for target in args.files:
+        try:
+            block = stamp(target, write=not args.dry_run)
+        except ArchiveFSError as exc:
+            print(f"{target}: {exc}", file=sys.stderr)
+            rc = 2
+            continue
+        info = block["archivefs"]
+        where = info.get("url") or info.get("source") or info.get("archive")
+        verb = "would stamp" if args.dry_run else "stamped"
+        print(f"{verb} {target}: {info['archive']} · {where}", file=sys.stderr)
+        if args.dry_run:
+            import yaml
+
+            print(yaml.safe_dump({"meta": block}, sort_keys=False))
+    return rc
+
+
 def cmd_config(args: argparse.Namespace) -> int:
     """Show the configuration layers and what they resolve to (issue: config model)."""
     from archivefs import config
@@ -1063,6 +1088,28 @@ def build_parser() -> argparse.ArgumentParser:
     dvc.add_argument("action", choices=["status", "enable", "disable"])
     dvc.add_argument("--json", action="store_true")
     dvc.set_defaults(func=cmd_dvc)
+
+    dvc_meta = sub.add_parser(
+        "dvc-meta",
+        help="stamp human-readable provenance into a chiro:// pin's .dvc",
+        description=(
+            "A chiro://md5 dependency is opaque about its source. This writes a "
+            "free-form meta.archivefs block into the .dvc — archive, record/DOI, "
+            "concept, container, landing URL and the archive source URL — derived from "
+            "the pin's own .chirograph manifest. DVC excludes meta from the stage md5 "
+            "and preserves it across `dvc update`, so the pin is unchanged; the block "
+            "is advisory (the pin + manifest stay authoritative). Idempotent — re-run "
+            "to refresh."
+        ),
+    )
+    dvc_meta.add_argument("files", nargs="+", metavar="FILE.dvc")
+    dvc_meta.add_argument(
+        "--dry-run",
+        "-n",
+        action="store_true",
+        help="print the block instead of writing it",
+    )
+    dvc_meta.set_defaults(func=cmd_dvc_meta)
 
     return parser
 
