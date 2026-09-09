@@ -425,6 +425,27 @@ Cloning your repo and running `dvc pull` requires, in their environment:
    pullable, and the tell is a `version_id` on the dep rather than an absent `outs.md5`.
    [`decisions.md`](decisions.md) D17 and D23.
 
+**`chiro://md5:` pins: import with `--no-download`.** A digest pin
+([`chiro-protocol.md`](chiro-protocol.md)) is content-addressed, so its *dependency* is
+fully version-pinned — but the DVC *out* it records is a plain directory hash, not the
+version-aware `version_id` form Zenodo/EGA use. So a **completed** `chiro://` import is
+**not** reviewer-pullable (a reviewer without your cache gets `Checkout failed … Is your
+cache up to date?`), exactly like a completed `geo`/`bia` import. Import it
+`--no-download`, which makes it a *partial* import DVC re-fetches from the archive on pull:
+
+```console
+$ dvc import-url --no-download chiro://md5:1766bd… data/pathology_annotations
+$ dvc pull            # you materialise now; a reviewer runs the same, months later
+```
+
+Here `--no-download` costs **no** version-awareness — the digest *is* the version, so the
+worry that made the flag pointless for `zenodo://` does not apply. It is simply how a
+`chiro://` pin stays pullable from the archive, and it is the recommended way to commit
+one. Verified end-to-end: a fresh clone with an empty cache and no DVC remote runs
+`dvc pull` and gets every file fetched from the archive through the pin and checksum-
+verified against the manifest. (The tell, as above, is an `outs:` block with **no**
+`md5:` — just `hash: md5` and `path`.)
+
 ## Troubleshooting
 
 | symptom | cause | fix |
