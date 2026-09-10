@@ -499,6 +499,35 @@ def cmd_dvc_meta(args: argparse.Namespace) -> int:
     return rc
 
 
+def cmd_ping(args: argparse.Namespace) -> int:
+    """Is a pin pullable right now? Reach the archive + fetch one sample byte."""
+    from archivefs.ping import ping, verdict_line
+
+    def on_step(kind: str, message: str) -> None:
+        mark = {"start": "  … ", "ok": "  ✓ ", "fail": "  ✗ ", "wait": "  ⏳ "}
+        suffix = "…" if kind == "start" else ""
+        print(f"{mark.get(kind, '  ')}{message}{suffix}", file=sys.stderr, flush=True)
+
+    print(f"pinging {args.target}", file=sys.stderr)
+    try:
+        result = ping(args.target, retries=args.retries, on_step=on_step)
+    except ArchiveFSError as exc:
+        print(f"  ✗ {exc}", file=sys.stderr)
+        print("verdict: SETUP — could not resolve the pin", file=sys.stderr)
+        return 2
+
+    print(f"verdict: {verdict_line(result)}", file=sys.stderr)
+    if result.ok:
+        return 0
+    if result.transient and args.retries <= 1:
+        print(
+            f"  → re-run, or `archivefs ping {args.target} --retries 5` to keep trying "
+            f"while the archive recovers.",
+            file=sys.stderr,
+        )
+    return 1 if result.transient else 2
+
+
 def cmd_config(args: argparse.Namespace) -> int:
     """Show the configuration layers and what they resolve to (issue: config model)."""
     from archivefs import config
@@ -1110,6 +1139,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="print the block instead of writing it",
     )
     dvc_meta.set_defaults(func=cmd_dvc_meta)
+
+    ping = sub.add_parser(
+        "ping",
+        help="is a pin pullable right now? (reach the archive + fetch one sample byte)",
+        description=(
+            "Probe whether TARGET can be pulled from its archive now, without "
+            "downloading it. Walks the same chain a `dvc pull` uses — resolve the pin, "
+            "reach the record's metadata endpoint, fetch a single sample byte — and "
+            "reports a verdict that says whose fault a failure is: a transient archive "
+            "outage (retry), gone, auth, network, or local setup. TARGET is a "
+            "chiro://md5 reference, an archive URL, or a .dvc file."
+        ),
+    )
+    ping.add_argument("target", metavar="TARGET")
+    ping.add_argument(
+        "--retries",
+        type=int,
+        default=1,
+        metavar="N",
+        help="on a transient failure, keep retrying up to N times (default 1)",
+    )
+    ping.set_defaults(func=cmd_ping)
 
     return parser
 
