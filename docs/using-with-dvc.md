@@ -472,6 +472,32 @@ provenance legible on GitHub, `grep`-able, and a recovery hint if the store is e
 | `CredentialsNotFoundError: …` listing four places it looked | EGA credentials absent | [`credentials.md`](credentials.md) |
 | `not enough values to unpack (expected 2, got 1)` | `--fs-config` ate the URL | add `--` before the URL |
 | `ArchiveNotFoundError: 'x' is not in Y. It holds: …` | typo in the path | the message lists the real contents |
+| a `dvc pull` dies with a gateway/`502`/`504` timeout minutes in | the archive is down *or* your setup is wrong — the traceback does not say which | `archivefs ping` the pin first (below) |
+
+### Is the archive reachable? `archivefs ping`
+
+A `dvc pull` that fails on a gateway timeout does not tell a reviewer whether the
+archive is down (retry later), the pin is broken, they lack credentials, or their machine
+has no route out. `archivefs ping` answers in seconds, before any download: it walks the
+same chain a pull uses — resolve the pin, reach the record's metadata endpoint, fetch a
+single sample byte — and prints a verdict naming the culprit.
+
+```console
+$ archivefs ping data/pathology_annotations.dvc
+pinging data/pathology_annotations.dvc
+  ✓ resolved: zenodo · doi:10.5281/zenodo.18917099
+  … reaching the archive (record metadata)…
+  ✓ metadata ok
+  … fetching a sample byte from annotations.parquet…
+  ✓ content ok
+verdict: PULLABLE — the data is reachable, go ahead
+```
+
+The target is a `.dvc` file, a `chiro://md5:` reference, or an archive URL. The verdict is
+one of **PULLABLE**, **ARCHIVE-UNAVAILABLE** (transient — the archive is down, not your
+setup; retry), **GONE**, **AUTH**, **NETWORK**, or **SETUP**; exit code is `0` pullable,
+`1` transient, `2` a real problem. On a transient failure, `--retries N` keeps trying
+while the archive recovers. See [`cli-ping.md`](cli-ping.md).
 
 ## See also
 
