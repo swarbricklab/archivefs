@@ -22,6 +22,7 @@ One page per subcommand: syntax, every option, worked scenarios, exit codes.
 | [`archivefs info`](cli-info.md) | is this installation wired up? |
 | [`archivefs ls`](cli-ls.md) | what is in this record, before downloading it |
 | [`archivefs stat`](cli-stat.md) | everything known about one path, as JSON |
+| [`archivefs versions`](cli-versions.md) | list a deposit's versions, newest first, so you can pin one |
 | [`archivefs get`](cli-get.md) | download, verifying against published checksums |
 | [`archivefs manifest`](cli-manifest.md) | write a `.chiro` pin for a deposit, download-free where it can |
 | [`archivefs check`](cli-check.md) | has the *deposit* drifted from its manifest? |

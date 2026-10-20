@@ -212,6 +212,48 @@ def cmd_stat(args: argparse.Namespace) -> int:
     return 0
 
 
+def _version_row(entry: dict) -> tuple[str, str, str]:
+    """``(identifier, date, label)`` from a backend's version dict, generically.
+
+    The backends return different shapes — cBioPortal a git commit, Zenodo/Mendeley a
+    record/version — so pick the most identifying field each publishes rather than
+    hard-code one backend's keys here.
+    """
+    ident = (
+        entry.get("accession")
+        or entry.get("doi")
+        or entry.get("commit")
+        or str(entry.get("version") or entry.get("record_id") or "?")
+    )
+    date = entry.get("date") or entry.get("publish_date") or entry.get("updated") or ""
+    label = entry.get("message") or entry.get("title") or entry.get("name") or ""
+    return ident, date, label
+
+
+def cmd_versions(args: argparse.Namespace) -> int:
+    """List a deposit's versions, newest first (cbioportal/zenodo/mendeley)."""
+    fs, path = _filesystem(args.url, args.option)
+    versions = getattr(fs, "versions", None)
+    if not callable(versions):
+        raise SystemExit(
+            f"{getattr(fs, 'protocol', '?')}:// does not expose a version history. "
+            f"Versions are available for cbioportal://, zenodo:// and mendeley://."
+        )
+    # A member URL still lists the *container's* versions, so reduce to the container.
+    container, _ = fs._split(fs._strip_protocol(path))
+    entries = versions(container)
+    if args.json:
+        _emit(fs, entries)
+        return 0
+    if not entries:
+        print("no versions found")
+        return 0
+    for entry in entries:
+        ident, date, label = _version_row(entry)
+        print(f"{ident}  {date}  {label}".rstrip())
+    return 0
+
+
 def cmd_get(args: argparse.Namespace) -> int:
     import hashlib
     import posixpath
@@ -908,6 +950,15 @@ def build_parser() -> argparse.ArgumentParser:
     stat.add_argument("url")
     add_common(stat)
     stat.set_defaults(func=cmd_stat)
+
+    versions = sub.add_parser(
+        "versions",
+        help="list a deposit's versions, newest first (cbioportal/zenodo/mendeley)",
+    )
+    versions.add_argument("url")
+    add_common(versions)
+    versions.add_argument("--json", action="store_true")
+    versions.set_defaults(func=cmd_versions)
 
     get = sub.add_parser("get", help="download, verifying against published checksums")
     get.add_argument("url")
