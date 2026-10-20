@@ -2979,7 +2979,19 @@ Mendeley's reverse-engineered frontend):
 
 Same checksum story as Mendeley: sha256, not md5 (`version_id = sha256`, `md5 = None`); version-aware
 pins and reviewer pull-through both verified live against `dvc import-url` / `dvc pull` (`push:
-false`, no remote). GitHub needs a User-Agent (it 403s without). *Open items:* studies aren't
-versioned like a DOI — the backend tracks `master`, and the per-file sha256 is the byte-level pin;
-a future revision can address a specific git ref. Still EXPERIMENTAL and branch-only until the
-approach is reviewed. `dbgap://` remains the sole deferred backend.
+false`, no remote). GitHub needs a User-Agent (it 403s without).
+
+**Version pinning by git ref.** A cBioPortal study is versioned by the datahub's git history — each
+commit that touches `public/<study>/` is a release (for `brca_metabric`, eight: gene-table
+migrations, panel additions, survival-data updates…), and the repo also carries a `v1.0.0`
+release tag. So a version is pinned in the URL as `cbioportal://<study>@<ref>`, where `<ref>` is a
+tag, a commit SHA, or a branch (default `master`); the ref rides on the study segment because a git
+ref has no slash. `version_accession` resolves whatever ref was addressed to the study's **head
+commit at that ref** (the newest commit that actually changed the study) rather than the bare ref,
+which makes a pin both *immutable* (a later `master` move cannot change it) and *stable* (an
+unrelated study's update does not move it); `concept` stays version-less (`cbioportal:<study>`) so
+`archivefs update` tracks latest, and `versions()` lists the commit history. Verified live: pinning
+`@v1.0.0` fetches genuinely older bytes (`data_cna.txt` and `data_clinical_patient.txt` both differ
+from `master`), and `dvc import-url` of a `@ref` URL round-trips (the `@` survives DVC's URL
+parsing). Still EXPERIMENTAL and branch-only until the approach is reviewed. `dbgap://` remains the
+sole deferred backend.

@@ -146,10 +146,19 @@ on them:
   is rate-limited to 60 requests/hour (set `$GITHUB_TOKEN` to raise it).
 - **Files live in folders.** A member path is `<folder>/<file>` (Mendeley) or may sit
   under a subdir like `case_lists/` (cBioPortal).
+- **Pinning a version.** Mendeley carries explicit versions in the path
+  (`…/yzxtxn4nmd/4/…`). cBioPortal is versioned by the datahub's git history, pinned as
+  `cbioportal://<study>@<ref>` — a tag (`@v1.0.0`), a commit SHA, or a branch (default
+  `master`). `archivefs ls mendeley://<id>` / `archivefs ls cbioportal://<study>` list
+  the deposit; for cBioPortal's version history, the backend exposes the study's commits.
+  A pin records the resolved immutable commit, so a reviewer gets the same bytes even
+  after `master` moves.
 
 ```console
 # anonymous; downloads once, leaves a push:false pin a reviewer can pull
 $ dvc import-url "cbioportal://brca_metabric/data_clinical_sample.txt" samples.txt
+# pin a specific released version of the study (tag or commit SHA):
+$ dvc import-url "cbioportal://brca_metabric@v1.0.0/data_clinical_sample.txt" samples.txt
 $ dvc import-url "mendeley://10.17632/yzxtxn4nmd/4/Supplemental Data Table/README Supplementary Data Table 1 - 2023-01-13.txt" readme.txt
 ```
 

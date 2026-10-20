@@ -19,6 +19,7 @@ geo://GSE176078                        # supplementary / processed files
 bia://S-BIAD599                        # BioImage Archive: imaging depositions
 dbgap://<phs_id>/<SRR_accession>       # deferred, registered, refuses clearly
 cbioportal://brca_metabric             # cBioPortal via GitHub+git-lfs (EXPERIMENTAL, sha256)
+cbioportal://brca_metabric@v1.0.0      # … pinned to a release tag or commit SHA
 ```
 
 ## What it does today

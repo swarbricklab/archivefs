@@ -108,9 +108,11 @@ datahub is *also* the `cBioPortal/datahub` GitHub repo, whose data files are **g
 so an LFS pointer gives a **download-free sha256** per file (small plain files are hashed in place),
 content streams from `media.githubusercontent.com` with ranges, and the whole thing runs on
 documented GitHub infrastructure. Same sha256 (not md5) story as `mendeley`: version-aware pins and
-pull-through work (verified live), no download-free `--no-download` md5. Studies track the datahub's
-`master`; the per-file sha256 is the byte-level pin. Needs a User-Agent (GitHub 403s without);
-`$GITHUB_TOKEN` is optional (it only raises the API rate limit).
+pull-through work (verified live), no download-free `--no-download` md5. A study is versioned by the
+datahub's git history: `cbioportal://<study>@<ref>` pins a release tag (`@v1.0.0`), a commit SHA or
+a branch (default `master`), and the pin records the resolved immutable commit while the per-file
+sha256 pins the exact bytes. Needs a User-Agent (GitHub 403s without); `$GITHUB_TOKEN` is optional
+(it only raises the API rate limit).
 
 **`chiro`** — not a source archive but the *pin* over one: a committed `.chiro` manifest
 addressed directly ([`chiro-protocol.md`](chiro-protocol.md)). It has no row of its own

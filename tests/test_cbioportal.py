@@ -62,7 +62,16 @@ RAW_BODIES = {
     f"{RAW}/meta_study.txt": META,
     f"{RAW}/case_lists/cases_all.txt": CASES,
 }
-MEDIA = "https://media.githubusercontent.com/media/cBioPortal/datahub/master/public/brca_metabric"
+# media host prefix (ref-agnostic for the fake); real URLs embed the ref after /media/
+MEDIA_HOST = "https://media.githubusercontent.com/media/cBioPortal/datahub"
+
+# the study's commit history (newest first), as the GitHub commits API returns it
+COMMITS = [
+    {"sha": "a" * 40, "commit": {"committer": {"date": "2026-01-30T19:02:42Z"},
+                                 "message": "Gene Table v7: migrate symbols\n\nbody"}},
+    {"sha": "b" * 40, "commit": {"committer": {"date": "2023-03-17T16:10:25Z"},
+                                 "message": "update meta"}},
+]
 
 
 class FakeGitHub:
@@ -73,8 +82,11 @@ class FakeGitHub:
     def __call__(self, method: str, url: str, headers: dict, kwargs: dict):
         if "archivefs" in headers.get("User-Agent", ""):
             self.saw_user_agent = True
-        # LFS media endpoint (ranged payload)
-        if url.startswith(MEDIA):
+        # commit history for a study path
+        if "/commits" in url:
+            return FakeResponse(200, json=COMMITS)
+        # LFS media endpoint (ranged payload) — any ref
+        if url.startswith(MEDIA_HOST) and url.endswith("data_mrna.txt"):
             resp = ranged(BIG, headers)
             self.bytes_served += len(resp.content)
             return resp
@@ -197,3 +209,47 @@ def test_get_file_refuses_bytes_that_fail_sha256(fs, tmp_path, monkeypatch):
 def test_lfs_pointer_parsing():
     fields = CBioPortalFileSystem._parse_lfs_pointer(LFS_POINTER)
     assert fields == {"sha256": BIG_SHA, "size": len(BIG)}
+
+
+# ------------------------------------------------------------ version pinning
+
+
+def test_concept_is_version_less(fs):
+    assert fs.concept(STUDY) == f"cbioportal:{STUDY}"
+    assert fs.concept(f"{STUDY}@v1.0.0") == f"cbioportal:{STUDY}"
+
+
+def test_version_accession_resolves_to_the_head_commit(fs):
+    # the study's head commit at the addressed ref is the immutable pin
+    assert fs.version_accession(STUDY) == f"{STUDY}@{'a' * 40}"
+    assert fs.version_accession(f"{STUDY}@v1.0.0") == f"{STUDY}@{'a' * 40}"
+
+
+def test_versions_lists_the_commit_history(fs):
+    versions = fs.versions(STUDY)
+    assert [v["commit"] for v in versions] == ["a" * 40, "b" * 40]
+    assert versions[0]["accession"] == f"{STUDY}@{'a' * 40}"
+    assert versions[0]["date"] == "2026-01-30T19:02:42Z"
+    assert versions[0]["message"] == "Gene Table v7: migrate symbols"  # first line only
+
+
+def test_pinning_a_ref_addresses_that_version(fs):
+    # a @ref container lists the same way; the ref rides on the study segment
+    files = sorted(fs.find(f"{STUDY}@v1.0.0"))
+    assert f"{STUDY}@v1.0.0/data_mrna.txt" in files
+    info = fs.info(f"{STUDY}@v1.0.0/data_mrna.txt")
+    assert info["cbioportal"]["ref"] == "v1.0.0"
+    assert info["cbioportal"]["study"] == STUDY  # study is the bare id
+
+
+def test_pinned_ref_bytes_read_from_media(fs):
+    assert fs.cat_file(f"{STUDY}@v1.0.0/data_mrna.txt") == BIG
+
+
+def test_split_keeps_ref_with_the_study_not_the_member(fs):
+    assert fs._split("brca_metabric@v1.0.0/case_lists/cases_all.txt") == (
+        "brca_metabric@v1.0.0",
+        "case_lists/cases_all.txt",
+    )
+    assert fs._parse_container("brca_metabric@abc123") == ("brca_metabric", "abc123")
+    assert fs._parse_container("brca_metabric") == ("brca_metabric", "master")
