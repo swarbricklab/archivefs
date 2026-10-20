@@ -2957,14 +2957,29 @@ The `download_url`'s nominal expiry is a century out, so it is read at listing t
 if a real transfer ever hits an expired URL, the fix is to re-resolve it per read — not built
 speculatively.
 
-**`cbioportal://` is deferred, dbGaP-style.** cBioPortal's datahub publishes only a whole-study
-`.tar.gz` — no per-file URLs, and a `.tar.gz` has no central directory and cannot be range-read,
-so a member can only be reached by fetching and decompressing the whole archive (the opposite of
-D9's download-free listing). It publishes no per-file checksums, so a member md5 needs
-download-to-hash — no `--no-download` path at all, unlike Zenodo/Mendeley. And the tarball
-returned HTTP 403 from our network on both S3 endpoints, so even that fallback is untestable until
-a reachable mirror is found. So, exactly as dbGaP is handled (`backends/dbgap.py`): registered as a
-*known* protocol that refuses with an explanation and the licit interim (mirror the study to a
-supported archive and pin that), advertising nothing to DVC (no wrapper, no config, no concept
-scheme). An implementation is worth doing once a reachable byte source makes it testable; until
-then a backend that refuses clearly beats one that half-works.
+**`cbioportal://` — first deferred, then implemented via GitHub+git-lfs (EXPERIMENTAL).** The
+obvious route is a dead end: cBioPortal's datahub publishes a whole-study `.tar.gz` with no
+per-file URLs, a `.tar.gz` has no central directory and cannot be range-read, it carries no per-file
+checksums, and the S3 object 403s from our network. On that basis the backend was first registered
+*deferred*, dbGaP-style. But the datahub **is also a GitHub repo** — `cBioPortal/datahub`, each
+study under `public/<study>/` — whose large data files are tracked with **git-lfs**, and that
+turns every blocker around, on documented and stable infrastructure (a firmer footing than
+Mendeley's reverse-engineered frontend):
+
+- **Per-file listing** — the GitHub contents API lists a study dir (and its `case_lists/` subdir),
+  one request each; unauthenticated GitHub allows 60/hour, enough (a couple of calls per study),
+  and raw/LFS fetches don't count against it. A `$GITHUB_TOKEN` raises the limit.
+- **Download-free sha256** — fetching an LFS file's *raw* URL returns the LFS *pointer*
+  (`oid sha256:…` + `size`), so a multi-GB file's digest and size are known without moving the
+  payload (verified: the 689 MB `data_mrna_illumina_microarray.txt` resolves from its 130-byte
+  pointer). Small non-LFS files (`meta_*`, case lists) return their content on the same fetch and
+  are hashed in place — so **every** member gets a sha256, no mixed-checksum gap.
+- **Ranged content** — LFS bytes stream from `media.githubusercontent.com/media/…` (206,
+  Range-capable); non-LFS bytes from `raw.githubusercontent.com`.
+
+Same checksum story as Mendeley: sha256, not md5 (`version_id = sha256`, `md5 = None`); version-aware
+pins and reviewer pull-through both verified live against `dvc import-url` / `dvc pull` (`push:
+false`, no remote). GitHub needs a User-Agent (it 403s without). *Open items:* studies aren't
+versioned like a DOI — the backend tracks `master`, and the per-file sha256 is the byte-level pin;
+a future revision can address a specific git ref. Still EXPERIMENTAL and branch-only until the
+approach is reviewed. `dbgap://` remains the sole deferred backend.

@@ -26,11 +26,11 @@ archivefs 0.1.0
   ✓ mendeley://   ready                           Mendeley Data deposits by DOI or dataset id (versioned; anonymous; EXPERIMENTAL — frontend API, sha256)
   ✓ geo://        ready                           GEO supplementary/processed files over public HTTPS (anonymous)
   ✓ bia://        ready                           BioImage Archive via BioStudies (open; submitted files + OME-Zarr conversions)
+  ✓ cbioportal:// ready                           cBioPortal studies via the datahub GitHub repo + git-lfs (anonymous; EXPERIMENTAL, sha256)
   – dbgap://      deferred (not implemented)      dbGaP via SRA Toolkit — DEFERRED, not implemented
-  – cbioportal:// deferred (not implemented)      cBioPortal datahub studies — DEFERRED, not implemented
 
   ✓ chirograph      manifests give download-free checksums
-  ✓ dvc             registered for bia, ega, geo, mendeley, zenodo
+  ✓ dvc             registered for bia, cbioportal, ega, geo, mendeley, zenodo
 ```
 
 Per backend:
@@ -71,9 +71,10 @@ $ archivefs dvc status >/dev/null || echo "DVC integration is not set up"
 ```console
 $ archivefs info --json | python -c 'import json,sys; d=json.load(sys.stdin); print(d["dvc"])'
 {'dvc_installed': True, 'hook_path': '/…/site-packages/archivefs_dvc.pth',
- 'hook_installed': False, 'registered': ['bia', 'ega', 'geo', 'mendeley', 'zenodo'],
- 'protocols': ['bia', 'ega', 'geo', 'mendeley', 'zenodo'],
- 'deferred': ['cbioportal', 'dbgap']}
+ 'hook_installed': False,
+ 'registered': ['bia', 'cbioportal', 'ega', 'geo', 'mendeley', 'zenodo'],
+ 'protocols': ['bia', 'cbioportal', 'ega', 'geo', 'mendeley', 'zenodo'],
+ 'deferred': ['dbgap']}
 ```
 
 `hook_installed: False` with `dvc_installed: True` is the whole diagnosis: they have

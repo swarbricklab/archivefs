@@ -329,13 +329,29 @@ PROTOCOLS: dict[str, Backend] = {
         protocol="cbioportal",
         class_path="archivefs.backends.cbioportal.CBioPortalFileSystem",
         extra=None,
-        summary="cBioPortal datahub studies — DEFERRED, not implemented",
-        requires=(),
-        status="deferred",
-        # Deferred for the same reason dbGaP is, and like dbGaP it advertises
-        # nothing: no config, no DVC wrapper, no concept scheme. See the module
-        # docstring for the three blockers (whole-study tarball, no per-file
-        # checksums, a 403 S3 object) that an implementation must clear first.
+        summary=(
+            "cBioPortal studies via the datahub GitHub repo + git-lfs "
+            "(anonymous; EXPERIMENTAL, sha256)"
+        ),
+        requires=("requests",),
+        config={
+            "api_url": str,
+            "media_url": str,
+            "repo": str,
+            "ref": str,
+            "chiro": str,
+            "max_concurrent_reads": int,
+            "cache_dir": str,
+            "scratch_dir": str,
+        },
+        dvc_wrapper="CBioPortalDVCFileSystem",
+        concept_scheme="cbioportal",
+        # The datahub's data files are git-lfs tracked, so their LFS pointer gives a
+        # download-free sha256 (and small plain files are hashed in place) — every
+        # member gets a content digest (D44). sha256, not md5: enough for a
+        # version-aware pin, but not a download-free `--no-download` md5 pin.
+        published_checksum="sha256",
+        immutability_basis="file sha256 (git-lfs oid, or computed for small files)",
     ),
 }
 

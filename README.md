@@ -18,7 +18,7 @@ mendeley://10.17632/yzxtxn4nmd/4       # Mendeley Data (anonymous; EXPERIMENTAL,
 geo://GSE176078                        # supplementary / processed files
 bia://S-BIAD599                        # BioImage Archive: imaging depositions
 dbgap://<phs_id>/<SRR_accession>       # deferred, registered, refuses clearly
-cbioportal://brca_metabric             # deferred, registered, refuses clearly
+cbioportal://brca_metabric             # cBioPortal via GitHub+git-lfs (EXPERIMENTAL, sha256)
 ```
 
 ## What it does today

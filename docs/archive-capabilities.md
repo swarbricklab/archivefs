@@ -102,11 +102,15 @@ not optional here if you want either verification or reproducibility.
 
 **`dbgap`** — deferred; the backend refuses with an explanation rather than pretending.
 
-**`cbioportal`** — deferred, like `dbgap` (D44). The datahub publishes only a whole-study
-`.tar.gz` (no per-file URLs, not range-readable), no per-file checksums, and the tarball
-is 403 from our network — so there is nothing to put in this table yet. The backend
-refuses with an explanation and the licit interim (mirror the study to a supported archive
-and pin that).
+**`cbioportal`** — cBioPortal studies, **EXPERIMENTAL** (D44). The datahub's S3 tarball is a
+dead end (whole-study `.tar.gz`, no per-file URLs, no checksums, 403 from our network), but the
+datahub is *also* the `cBioPortal/datahub` GitHub repo, whose data files are **git-lfs** tracked —
+so an LFS pointer gives a **download-free sha256** per file (small plain files are hashed in place),
+content streams from `media.githubusercontent.com` with ranges, and the whole thing runs on
+documented GitHub infrastructure. Same sha256 (not md5) story as `mendeley`: version-aware pins and
+pull-through work (verified live), no download-free `--no-download` md5. Studies track the datahub's
+`master`; the per-file sha256 is the byte-level pin. Needs a User-Agent (GitHub 403s without);
+`$GITHUB_TOKEN` is optional (it only raises the API rate limit).
 
 **`chiro`** — not a source archive but the *pin* over one: a committed `.chiro` manifest
 addressed directly ([`chiro-protocol.md`](chiro-protocol.md)). It has no row of its own

@@ -75,6 +75,8 @@ private file, and every other route is refused. See
 | | `strip_components` | integer, `1` (default) | drop leading directories from a ZIP's interior, but only while each is its sole top-level entry — so `annotations.zip` holding `annotations/…` expands without the redundant level. A **maximum, not a promise**: a ZIP with two real top-level entries is passed through untouched. `0` presents the interior verbatim ([`decisions.md`](decisions.md) D24) |
 | | `api_url` | URL | override the Zenodo API endpoint |
 | `mendeley` | `api_url` | URL | override the Mendeley Data public-API root. Anonymous (no credential); **experimental** — built on Mendeley's undocumented frontend API ([`decisions.md`](decisions.md) D44) |
+| `cbioportal` | `repo`, `ref` | string | the datahub GitHub repo (`cBioPortal/datahub`) and git ref (`master`) to read studies from |
+| | `api_url`, `media_url` | URL | override the GitHub API / LFS media endpoints. Anonymous; `$GITHUB_TOKEN` only raises the API rate limit. **Experimental** ([`decisions.md`](decisions.md) D44) |
 | `geo` | `view` | `supplementary` (default), `raw` | `raw` is a deliberate seam and refuses with an explanation |
 | | `base_url` | URL | override the GEO FTP-over-HTTPS root |
 
@@ -89,8 +91,8 @@ private file, and every other route is refused. See
 | `bia://` submitted | ❌ | a `.chiro` sidecar fixes it |
 | `geo://` | ❌ | a `.chiro` sidecar fixes it |
 | `chiro://` | ✅ MD5 from the manifest | a committed `.chiro` pin; routes to the archive its concept names ([`chiro-protocol.md`](chiro-protocol.md)) |
+| `cbioportal://` | ⚠️ SHA256 (git-lfs) | **experimental** — cBioPortal studies via the `cBioPortal/datahub` GitHub repo; data files carry a download-free LFS sha256 ([`decisions.md`](decisions.md) D44) |
 | `dbgap://` | — | deferred; refuses with an explanation |
-| `cbioportal://` | — | deferred; refuses with an explanation |
 
 Where a checksum is missing, `dvc import-url --no-download` still records a correct
 one — by streaming the whole file. That is the single most surprising cost in the

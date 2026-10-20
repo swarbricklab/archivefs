@@ -103,6 +103,7 @@ MACHINE_KEYS = frozenset(
         "api_url",
         "base_url",
         "s3_url",
+        "media_url",
         "credentials_file",
     }
 )
@@ -118,6 +119,10 @@ CONTENT_KEYS = frozenset(
         "selection",
         "include_index_files",
         "zip_limits",
+        # cbioportal: which datahub repo and git ref a study is read from — these
+        # select *which bytes/version* come back, so they are committed with the data.
+        "repo",
+        "ref",
     }
 )
 

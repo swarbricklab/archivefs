@@ -1,98 +1,300 @@
-"""``cbioportal://`` — **DEFERRED**. Registered, documented, not implemented.
+"""``cbioportal://`` — cBioPortal studies, via the ``cBioPortal/datahub`` GitHub repo.
 
-Requested alongside ``mendeley://`` in issue #47, and deferred for the same reason
-dbGaP is: the archive does not currently expose anything archivefs can address by
-accession without violating the contract the rest of the project rests on. This
-module exists to do the three things :mod:`archivefs.backends.dbgap` does — make
-``cbioportal://`` a *known* protocol so the failure reads as "deferred, here is why"
-rather than "unknown scheme", record the blockers in code, and fix the eventual URL
-grammar — and nothing more.
+**EXPERIMENTAL (issue #47).** The issue proposed addressing a cBioPortal study's
+member files and flagged three blockers for the obvious route (the datahub S3
+tarball): it is a whole-study ``.tar.gz`` with no per-file URLs, carries no per-file
+checksums, and 403s from our network. All three dissolve once you notice the datahub
+*is also a GitHub repo* — ``cBioPortal/datahub``, with each study under
+``public/<study>/`` — whose large data files are tracked with **git-lfs**. That gives
+exactly what archivefs wants, and on documented, stable infrastructure rather than a
+reverse-engineered site (so this is a firmer footing than ``mendeley://``):
 
-The intended scheme (study id → member file of the study bundle)::
+* **Per-file listing** — the GitHub contents API lists a study directory (and its
+  ``case_lists/`` subdir), one request each.
+* **Download-free sha256** — fetching an LFS-tracked file's *raw* URL returns the LFS
+  *pointer* (``oid sha256:…`` + ``size``), not the bytes, so the content digest and
+  size are known without moving the (often multi-GB) payload. Small non-LFS files
+  (``meta_*``, case lists) return their real content, which is hashed in place — so
+  **every** member gets a sha256.
+* **Ranged content** — an LFS file's bytes come from
+  ``media.githubusercontent.com/media/…`` (HTTP 206, Range-capable); a non-LFS file's
+  come from its ``raw.githubusercontent.com`` URL.
 
-    cbioportal://brca_metabric                                    # study -> directory
-    cbioportal://brca_metabric/data_mrna_illumina_microarray.txt  # one member file
+Consequences, the same shape as ``mendeley://`` (``docs/decisions.md`` D44):
 
-Three blockers, each observed against the live service (issue #47):
+* **Checksums are sha256, not md5.** ``info()`` reports ``md5=None`` with the sha256
+  under ``checksum`` and as the ``version_id``. The LFS oid *is* the content's
+  immutable identity, so version-aware pins and reviewer pull-through work; a
+  download-free ``--no-download`` md5 pin does not (DVC's cache is md5-keyed).
+* **GitHub needs a User-Agent** (its API 403s without one), and its unauthenticated
+  API allows 60 requests/hour — enough to list a study (a couple of calls), since the
+  raw/LFS fetches do not count against it. A ``$GITHUB_TOKEN`` raises the limit.
 
-**Only a whole-study tarball is published.** cBioPortal's datahub serves one
-``https://cbioportal-datahub.s3.amazonaws.com/<study>.tar.gz`` per study — there are
-no per-file URLs. A backend would have to address a member *inside* that tarball,
-and a ``.tar.gz`` has no central directory and cannot be range-read, so listing or
-reading one member means fetching and decompressing the whole archive. That is the
-opposite of the download-free listing the project is built on (D9), and unlike a ZIP
-there is no cheap index to lean on.
+URL grammar
+-----------
+::
 
-**No per-file checksums are published.** The datahub ships no digests at all, so a
-member's md5 can only be had by downloading and hashing it (``--download``) — there
-is no ``--no-download`` metadata path here, unlike Zenodo or Mendeley. ``info()``
-would have to report ``md5=None`` and say why, exactly as ``geo://`` does, and the
-archive would be ineligible for DVC's ``version_aware`` route.
+    cbioportal://brca_metabric                         # study -> directory
+    cbioportal://brca_metabric/data_clinical_sample.txt     # one member file
+    cbioportal://brca_metabric/case_lists/cases_all.txt     # a file in a subdir
 
-**The S3 object is unreachable from our network.** The tarball returned HTTP 403
-from both the regional and global S3 endpoints during the provenance pass that filed
-#47 — so even the download-to-hash fallback cannot be exercised yet. An
-implementation needs a reachable endpoint (the documented datahub mirror, the
-GitHub-hosted datahub, or an institutional proxy) established first.
-
-The licit interim, noted in the issue: cBioPortal studies are openly
-redistributable, so mirroring one to a supported archive (Zenodo) and pinning *that*
-keeps the analysis reproducible today. A native ``cbioportal://`` scheme — resolving
-a study id to its tarball and addressing a member path, download-to-hash — is the
-archivefs-idiomatic fix, deferred until a reachable byte source makes it testable.
+Studies are not versioned like a DOI; the datahub repo evolves on ``master``. The
+per-file sha256 still pins the exact bytes, and a ``.chiro`` pin records it; a future
+revision can address a specific git ref.
 """
 
 from __future__ import annotations
 
+import hashlib
+import logging
 from typing import Any, ClassVar
+from urllib.parse import quote
 
 from archivefs.base import ArchiveFileSystem
 from archivefs.credentials import Credential
-from archivefs.errors import NotSupportedError
+from archivefs.errors import ArchiveNotFoundError, NotSupportedError
 
-#: The datahub tarball endpoint an implementation would resolve a study id against,
-#: recorded so the eventual code starts from the observed URL rather than guessing.
-#: It returned 403 from our network (see the module docstring); a reachable mirror
-#: has to be found before this can be used.
-DATAHUB_URL = "https://cbioportal-datahub.s3.amazonaws.com"
+logger = logging.getLogger(__name__)
 
-DEFERRED_MESSAGE = """\
-the cbioportal:// backend is deferred, not missing (issue #47).
+DEFAULT_API_URL = "https://api.github.com"
+DEFAULT_MEDIA_URL = "https://media.githubusercontent.com/media"
+#: owner/repo holding the studies, and the branch + path prefix they live under.
+DEFAULT_REPO = "cBioPortal/datahub"
+DEFAULT_REF = "master"
+PATH_PREFIX = "public"
 
-cBioPortal is in scope but cannot yet be addressed by accession without breaking the
-contract the rest of archivefs relies on. Three things make it different from the
-archives archivefs already speaks:
+#: GitHub requires a User-Agent or returns 403.
+USER_AGENT = (
+    "archivefs/cbioportal (+https://github.com/swarbricklab/archivefs)"
+)
 
-  * the datahub publishes only a whole-study .tar.gz — no per-file URLs, and a
-    .tar.gz has no central directory, so a member cannot be listed or range-read
-    without fetching and decompressing the whole archive;
-  * no per-file checksums are published, so a member's md5 needs download-to-hash
-    (no --no-download metadata path, unlike Zenodo/Mendeley);
-  * the tarball returned HTTP 403 from our network on both S3 endpoints, so even
-    that fallback is untestable until a reachable mirror is found.
-
-If you need a cBioPortal study now: cBioPortal data is openly redistributable, so
-mirror the study tarball to a supported archive (e.g. Zenodo) and pin that with
-zenodo://, or record what you downloaded with a Chirograph 'observed-download'
-manifest so the analysis stays reproducible.\
-"""
+#: The first line of every git-lfs pointer file.
+LFS_MAGIC = b"version https://git-lfs.github.com/spec/v1"
 
 
 class CBioPortalFileSystem(ArchiveFileSystem):
-    """Placeholder that refuses clearly. See the module docstring."""
+    """Read-only fsspec filesystem over cBioPortal datahub studies (experimental).
+
+    Anonymous; an optional ``$GITHUB_TOKEN`` only raises GitHub's API rate limit.
+
+    Parameters
+    ----------
+    api_url, media_url:
+        Override the GitHub API / LFS media endpoints (a mirror, or a test double).
+    repo, ref:
+        The datahub repository (``owner/repo``) and git ref. Defaults pin the public
+        datahub on ``master``.
+    """
 
     protocol = "cbioportal"
     archive_name = "cBioPortal"
-    #: Anonymous: the datahub needs no credential — the blocker is the byte source,
-    #: not authentication. Declared empty so the profile is honest about that.
-    credentials: ClassVar[list[Credential]] = []
+    credentials: ClassVar[list[Credential]] = [
+        Credential(
+            name="token",
+            env=("GITHUB_TOKEN", "GH_TOKEN"),
+            files=("~/.config/archivefs/cbioportal.json",),
+            secret=True,
+            required=False,
+            help=(
+                "a GitHub token, optional — it only raises the API rate limit "
+                "(60/hour anonymous) for listing studies."
+            ),
+        )
+    ]
 
-    def __init__(self, **kwargs: Any) -> None:
-        # Raise before touching the network: there is nothing here to configure yet.
-        raise NotSupportedError(DEFERRED_MESSAGE)
+    def __init__(
+        self,
+        api_url: str | None = None,
+        media_url: str | None = None,
+        repo: str | None = None,
+        ref: str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.api_url = self._setting("api_url", api_url, DEFAULT_API_URL).rstrip("/")
+        self.media_url = self._setting(
+            "media_url", media_url, DEFAULT_MEDIA_URL
+        ).rstrip("/")
+        self.repo = self._setting("repo", repo, DEFAULT_REPO).strip("/")
+        self.ref = self._setting("ref", ref, DEFAULT_REF)
+        self.token = self.creds.get("token")
 
-    def _load_members(self, container: str) -> dict[str, dict]:  # pragma: no cover
-        raise NotSupportedError(DEFERRED_MESSAGE)
+    def _make_session(self) -> Any:
+        session = super()._make_session()
+        session.headers["User-Agent"] = USER_AGENT
+        session.headers["Accept"] = "application/vnd.github+json"
+        return session
 
-    def _data_url(self, info: dict) -> str:  # pragma: no cover
-        raise NotSupportedError(DEFERRED_MESSAGE)
+    # ------------------------------------------------------------------- auth
+
+    def _auth_headers(self) -> dict:
+        if self.token:
+            return {"Authorization": f"Bearer {self.token}"}
+        return {}
+
+    def _auth_remediation(self, status: int, url: str) -> str:
+        return (
+            "GitHub rate-limited or refused the request. Set $GITHUB_TOKEN to raise "
+            "the 60-requests/hour anonymous limit (it need only be a token with no "
+            "scopes, for public data)."
+        )
+
+    # ------------------------------------------------------------------ paths
+
+    def _split(self, path: str) -> tuple[str, str]:
+        head, _, tail = path.partition("/")
+        return head, tail
+
+    def _study_path(self, study: str) -> str:
+        return f"{PATH_PREFIX}/{study}"
+
+    # --------------------------------------------------------------- metadata
+
+    def _contents(self, repo_path: str) -> list[dict]:
+        """One directory's entries from the GitHub contents API."""
+        url = (
+            f"{self.api_url}/repos/{self.repo}/contents/{quote(repo_path)}"
+            f"?ref={quote(self.ref)}"
+        )
+        reply = self._get_json(url)
+        if isinstance(reply, dict):  # a file, not a directory
+            return [reply]
+        return reply or []
+
+    def _resolve_file(self, study: str, entry: dict) -> dict:
+        """Build a member ``info`` from a contents entry, resolving its sha256.
+
+        Fetches the file's *raw* bytes once: an LFS-tracked file returns only its
+        pointer (so its sha256 and real size are read without downloading the
+        payload), while a small plain file returns its content, which is hashed in
+        place. Either way the member ends up with a real sha256.
+        """
+        repo_path = entry["path"]
+        raw_url = entry.get("download_url")
+        # relpath from the study root — may include a subdir like case_lists/.
+        member_rel = self.relpath(self._study_path(study), repo_path)
+        name = f"{study}/{member_rel}"
+
+        body = self._request("GET", raw_url).content
+        is_lfs = body.startswith(LFS_MAGIC)
+        if is_lfs:
+            fields = self._parse_lfs_pointer(body)
+            sha256 = fields.get("sha256")
+            size = fields.get("size")
+            # LFS bytes come from the media endpoint; raw only serves the pointer.
+            content_url = (
+                f"{self.media_url}/{self.repo}/{quote(self.ref)}/{quote(repo_path)}"
+            )
+        else:
+            # A small plain file (meta_*, case lists): raw already gave the content,
+            # so hash it in place and serve it from raw.
+            sha256 = hashlib.sha256(body).hexdigest()
+            size = len(body)
+            content_url = raw_url
+        return {
+            "name": name,
+            "type": "file",
+            "size": size,
+            "md5": None,
+            "checksum": sha256,
+            "checksum_type": "SHA256" if sha256 else None,
+            "version_id": sha256,
+            "url": content_url,
+            "cbioportal": {
+                "study": study,
+                "repo": self.repo,
+                "ref": self.ref,
+                "repo_path": repo_path,
+                "git_lfs": is_lfs,
+                "sha256": sha256,
+            },
+        }
+
+    @staticmethod
+    def _parse_lfs_pointer(body: bytes) -> dict:
+        """``oid sha256:<hex>`` and ``size <n>`` out of an LFS pointer file."""
+        out: dict[str, Any] = {}
+        for line in body.decode("utf-8", "replace").splitlines():
+            if line.startswith("oid sha256:"):
+                out["sha256"] = line[len("oid sha256:") :].strip()
+            elif line.startswith("size "):
+                value = line[len("size ") :].strip()
+                if value.isdigit():
+                    out["size"] = int(value)
+        return out
+
+    def _walk_study(self, study: str) -> list[dict]:
+        """Every file under a study, recursing subdirectories (e.g. ``case_lists/``)."""
+        root = self._study_path(study)
+        try:
+            top = self._contents(root)
+        except ArchiveNotFoundError:
+            raise ArchiveNotFoundError(
+                f"cBioPortal has no study {study!r} in {self.repo} (looked for "
+                f"{root}). Check the study id, e.g. cbioportal://brca_metabric."
+            ) from None
+        files: list[dict] = []
+        stack = list(top)
+        while stack:
+            entry = stack.pop()
+            if entry.get("type") == "dir":
+                stack.extend(self._contents(entry["path"]))
+            elif entry.get("type") == "file":
+                files.append(entry)
+        return files
+
+    def _load_members(self, container: str) -> dict[str, dict]:
+        study = container
+        members: dict[str, dict] = {}
+        for entry in self._walk_study(study):
+            info = self._resolve_file(study, entry)
+            members[info["name"]] = info
+        if not members:
+            raise ArchiveNotFoundError(
+                f"study {study} lists no files in {self.repo}."
+            )
+        return members
+
+    def _list_root(self) -> list[dict]:
+        raise NotSupportedError(
+            "cBioPortal has no listable root: address a study, e.g. "
+            "cbioportal://brca_metabric."
+        )
+
+    # --------------------------------------------------------------- transfer
+
+    def _data_url(self, info: dict) -> str:
+        url = info.get("url")
+        if not url:
+            raise OSError(f"no content URL for {info.get('name')}.")
+        return url
+
+    def get_file(self, rpath: str, lpath: str, **kwargs: Any) -> Any:
+        """Download, then verify against the published **sha256** (not md5)."""
+        import os
+
+        info = self.info(rpath)
+        super(ArchiveFileSystem, self).get_file(rpath, lpath, **kwargs)
+        is_sha256 = info.get("checksum_type") == "SHA256"
+        expected = info.get("checksum") if is_sha256 else None
+        if (
+            info.get("type") == "directory"
+            or not expected
+            or kwargs.get("outfile") is not None
+            or kwargs.get("start") is not None
+            or kwargs.get("end") is not None
+        ):
+            return
+        digest = hashlib.sha256()
+        with open(lpath, "rb") as handle:
+            for chunk in iter(lambda: handle.read(4 * 1024 * 1024), b""):
+                digest.update(chunk)
+        actual = digest.hexdigest()
+        if actual != expected:
+            from archivefs.errors import VerificationError
+
+            try:
+                os.remove(lpath)
+            except OSError:  # pragma: no cover - best-effort
+                logger.debug("could not remove unverified %s", lpath)
+            raise VerificationError(info.get("name", "?"), "sha256", expected, actual)
