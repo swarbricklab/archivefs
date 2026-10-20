@@ -74,6 +74,7 @@ private file, and every other route is refused. See
 | `zenodo` | `extract_zips` | `true`, `false` (default) | list ZIP contents as directories, read members by range. **Off by default**, though the reason that justified it has gone — an expanded ZIP is now pullable from Zenodo by a reviewer with no remote ([`decisions.md`](decisions.md) D23). Do not combine with `--no-download`: it costs a full transfer and buys nothing |
 | | `strip_components` | integer, `1` (default) | drop leading directories from a ZIP's interior, but only while each is its sole top-level entry — so `annotations.zip` holding `annotations/…` expands without the redundant level. A **maximum, not a promise**: a ZIP with two real top-level entries is passed through untouched. `0` presents the interior verbatim ([`decisions.md`](decisions.md) D24) |
 | | `api_url` | URL | override the Zenodo API endpoint |
+| `mendeley` | `api_url` | URL | override the Mendeley Data public-API root. Anonymous (no credential); **experimental** — built on Mendeley's undocumented frontend API ([`decisions.md`](decisions.md) D44) |
 | `geo` | `view` | `supplementary` (default), `raw` | `raw` is a deliberate seam and refuses with an explanation |
 | | `base_url` | URL | override the GEO FTP-over-HTTPS root |
 
@@ -82,12 +83,14 @@ private file, and every other route is refused. See
 | backend | download-free checksum | notes |
 |---|---|---|
 | `zenodo://` | ✅ MD5 from record metadata | record id, version DOI, or concept DOI (→ latest) |
+| `mendeley://` | ⚠️ SHA256 (not md5) | **experimental** — anonymous, via the site's undocumented frontend API; DOI or dataset id, versioned, files in folders ([`decisions.md`](decisions.md) D44) |
 | `ega://` | ✅ MD5 of the *decrypted* bytes | needs credentials + DAC authorisation |
 | `bia://` derived | ✅ MD5 from S3 ETag | OME-Zarr pyramids and thumbnails |
 | `bia://` submitted | ❌ | a `.chiro` sidecar fixes it |
 | `geo://` | ❌ | a `.chiro` sidecar fixes it |
 | `chiro://` | ✅ MD5 from the manifest | a committed `.chiro` pin; routes to the archive its concept names ([`chiro-protocol.md`](chiro-protocol.md)) |
 | `dbgap://` | — | deferred; refuses with an explanation |
+| `cbioportal://` | — | deferred; refuses with an explanation |
 
 Where a checksum is missing, `dvc import-url --no-download` still records a correct
 one — by streaming the whole file. That is the single most surprising cost in the

@@ -2895,3 +2895,76 @@ and `confirm` compares the coordinates that *are* present (crc32, size, containe
 never caught would be faithfully pinned wrong. Acceptable because DVC computed it from the same
 immutable deposit, and `confirm` / verify-on-read still check bytes on any later fetch;
 `--download` remains the path for a from-scratch, self-verified capture.
+
+## D44 — `mendeley://` fits the Zenodo mould; `cbioportal://` is deferred like dbGaP (issue #47)
+
+Two public breast-cancer transcriptomic archives we depend on — SCAN-B (Mendeley Data) and
+METABRIC (cBioPortal) — cannot be addressed by accession through `dvc import-url`, because
+neither exposes stable per-file URLs. That is exactly the gap archivefs exists to close, so #47
+asked for a `mendeley://` and a `cbioportal://` backend. They land very differently.
+
+**`mendeley://` is EXPERIMENTAL, and the issue's premise was wrong — found by live testing.**
+#47 hypothesised that "a `--no-download` md5 import should be feasible with a token." It is not.
+Tested against the live API (with a real OAuth user token that resolves the account), what Mendeley
+actually exposes is:
+
+- **Dataset metadata — anonymous, fine.** `GET {api}/datasets/{id}[?version=N]` returns the id,
+  the version DOI (`doi.id` = `10.17632/<id>.<N>`), the resolved `version`, the `versions` list and
+  the licence. So `versions()` and a directory `info()` cost no credential.
+- **The official `/public-api/.../files` endpoint lists only datasets you *own*.** A third-party
+  published deposit (SCAN-B, owned by someone else) returns `[]` *even with a valid user token* —
+  `profiles/me` confirms the token has a user; the files API simply scopes to ownership. So there is
+  **no documented third-party file-manifest API**, and no token fixes it. (This is why the backend
+  declares **no credentials** — a token buys nothing here.)
+- **What the website actually uses is an undocumented *frontend* API**, discovered by reading the
+  site's JS bundle, and it works **anonymously**:
+  - `GET /public-api/datasets/{id}/folders/{version}` → the folder list;
+  - `GET /public-api/datasets/{id}/files?folder_id={fid}&version={N}` with literal
+    `$start`/`$limit` paging → the files in one folder (`fid=root` for loose files). Files live in
+    folders, so the root call alone returns `[]` — the dead end that made the official endpoint look
+    broken;
+  - each file carries `content_details` with **`sha256_hash`**, `size` and a **stable**
+    `download_url` (`/public-files/.../file_downloaded`, nominal expiry a century out) that 302s to
+    S3 and supports ranged reads.
+  - One client gotcha: Cloudflare 403s the default `requests`/`urllib` User-Agent, so the session
+    sends a browser-like UA.
+
+So the backend is built on that frontend API — *functional but undocumented*, which is why it lands
+on a branch, not `main`: a working prototype to take to Mendeley and ask for a documented per-file
+endpoint. Design consequences, all deliberate:
+
+- **Checksums are sha256, never md5** (verified: 0 of 33 files in the test deposit carry an md5).
+  `info()` reports `md5=None` with the sha256 under `checksum` and as the `version_id`. A published
+  version is immutable, so sha256 *is* a download-free immutable per-entry token — enough for
+  version-aware pins (`published_checksum=sha256`, `immutability_basis="file sha256"`). What it
+  cannot buy is a **download-free** `--no-download` md5 pin: DVC's cache is md5-keyed, so a completed
+  `dvc import-url` hashes the downloaded bytes to md5 itself, but there is no md5 to record *without*
+  downloading. The `d15086ef…` md5 in the issue was computed by downloading and hashing, not read
+  from the API.
+- **DVC handles sha256 end-to-end — verified live.** `dvc import-url` of a member records
+  `outs.md5` (from the download), `deps.version_id = <sha256>` and `outs.push: false`; a fresh
+  `dvc pull` with *no* DVC remote then re-fetches straight from Mendeley via the version-aware
+  fallback storage (D23). The whole reviewer route works, on sha256.
+- **Concept scheme is `mendeley:`, not `doi:`.** Mendeley concepts *are* DOIs, but `doi:` belongs to
+  Zenodo and `registry.protocol_for_concept` keys on a scheme unique to one backend
+  (`test_concept_schemes_are_unique`). `version_accession` returns `<concept DOI>/<version>` so a
+  pin fetches the exact version while `concept` tracks latest.
+
+**Cost to change my mind / open items.** The frontend API is unversioned — Mendeley can change it
+and break this backend; that is the explicit reason it is a branch prototype, not merged. Folder
+nesting is assumed flat (true for the deposits seen); a nested layout would need parent-walking.
+The `download_url`'s nominal expiry is a century out, so it is read at listing time and used as-is;
+if a real transfer ever hits an expired URL, the fix is to re-resolve it per read — not built
+speculatively.
+
+**`cbioportal://` is deferred, dbGaP-style.** cBioPortal's datahub publishes only a whole-study
+`.tar.gz` — no per-file URLs, and a `.tar.gz` has no central directory and cannot be range-read,
+so a member can only be reached by fetching and decompressing the whole archive (the opposite of
+D9's download-free listing). It publishes no per-file checksums, so a member md5 needs
+download-to-hash — no `--no-download` path at all, unlike Zenodo/Mendeley. And the tarball
+returned HTTP 403 from our network on both S3 endpoints, so even that fallback is untestable until
+a reachable mirror is found. So, exactly as dbGaP is handled (`backends/dbgap.py`): registered as a
+*known* protocol that refuses with an explanation and the licit interim (mirror the study to a
+supported archive and pin that), advertising nothing to DVC (no wrapper, no config, no concept
+scheme). An implementation is worth doing once a reachable byte source makes it testable; until
+then a backend that refuses clearly beats one that half-works.

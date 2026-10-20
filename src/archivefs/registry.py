@@ -199,6 +199,35 @@ PROTOCOLS: dict[str, Backend] = {
         immutability_basis="file md5, or (container md5, member CRC32) inside a ZIP",
         expands_containers=True,
     ),
+    "mendeley": Backend(
+        protocol="mendeley",
+        class_path="archivefs.backends.mendeley.MendeleyFileSystem",
+        extra=None,
+        summary=(
+            "Mendeley Data deposits by DOI or dataset id "
+            "(versioned; anonymous; EXPERIMENTAL — frontend API, sha256)"
+        ),
+        requires=("requests",),
+        config={
+            "api_url": str,
+            "chiro": str,
+            "max_concurrent_reads": int,
+            "cache_dir": str,
+            "scratch_dir": str,
+        },
+        dvc_wrapper="MendeleyDVCFileSystem",
+        # Its own scheme, not `doi` — that belongs to Zenodo, and the reverse map
+        # (`protocol_for_concept`) keys on a unique scheme per backend. Mendeley's
+        # concept is still a DOI; the identifier after the colon is that DOI.
+        concept_scheme="mendeley",
+        # Mendeley publishes **sha256**, not md5 (verified live, docs/decisions.md
+        # D44). A published version is immutable, so that sha256 is a download-free
+        # immutable per-entry token — enough for version-aware pins. It is *not* an
+        # md5, so DVC's md5-keyed `--no-download` path cannot be download-free here
+        # (a completed import hashes the downloaded bytes to md5 itself).
+        published_checksum="sha256",
+        immutability_basis="file sha256 (immutable once a version is published)",
+    ),
     "geo": Backend(
         protocol="geo",
         class_path="archivefs.backends.geo.GEOFileSystem",
@@ -295,6 +324,18 @@ PROTOCOLS: dict[str, Backend] = {
         # No config and no wrapper: deferred means DVC must not be told it exists.
         # The empty profile is deliberate rather than missing — it shows the shape
         # of the work left to do.
+    ),
+    "cbioportal": Backend(
+        protocol="cbioportal",
+        class_path="archivefs.backends.cbioportal.CBioPortalFileSystem",
+        extra=None,
+        summary="cBioPortal datahub studies — DEFERRED, not implemented",
+        requires=(),
+        status="deferred",
+        # Deferred for the same reason dbGaP is, and like dbGaP it advertises
+        # nothing: no config, no DVC wrapper, no concept scheme. See the module
+        # docstring for the three blockers (whole-study tarball, no per-file
+        # checksums, a 403 S3 object) that an implementation must clear first.
     ),
 }
 

@@ -90,6 +90,9 @@ class FakeSession:
     def __init__(self, handler: Handler) -> None:
         self.handler = handler
         self.calls: list[dict] = []
+        #: session-level default headers, merged into every request like requests does
+        #: (so a backend that sets, e.g., a User-Agent on the session is observable).
+        self.headers: dict = {}
 
     def request(
         self,
@@ -100,15 +103,16 @@ class FakeSession:
         timeout: int | None = None,
         **kwargs: Any,
     ) -> FakeResponse:
+        merged = {**self.headers, **(headers or {})}
         record = {
             "method": method,
             "url": url,
-            "headers": dict(headers or {}),
+            "headers": dict(merged),
             "stream": stream,
             **kwargs,
         }
         self.calls.append(record)
-        return self.handler(method, url, dict(headers or {}), kwargs)
+        return self.handler(method, url, dict(merged), kwargs)
 
     def get(self, url: str, **kwargs: Any) -> FakeResponse:
         return self.request("GET", url, **kwargs)

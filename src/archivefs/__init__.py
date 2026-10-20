@@ -6,6 +6,7 @@ Address data by accession or DOI and pull it through the fsspec ecosystem
     ega://EGAD00001006673                  # dataset -> directory
     ega://EGAD00001006673/EGAF00004908765  # one file
     zenodo://<record_id>/<filename>        # or zenodo://10.5281/zenodo.<id>
+    mendeley://10.17632/<id>[/<version>]   # Mendeley Data (anonymous; experimental)
     geo://<GSE_accession>                  # supplementary/processed files
     dbgap://<phs_id>/<SRR_accession>       # deferred, not implemented
 

@@ -21,14 +21,16 @@ it is the first thing to run when something else fails in a confusing way.
 $ archivefs info
 archivefs 0.1.0
 
-  ✓ ega://     ready                              European Genome-phenome Archive (controlled access; needs credentials)
-  ✓ zenodo://  ready                              Zenodo records by id or DOI (public; token only for restricted)
-  ✓ geo://     ready                              GEO supplementary/processed files over public HTTPS (anonymous)
-  ✓ bia://     ready                              BioImage Archive via BioStudies (open; submitted files + OME-Zarr conversions)
-  – dbgap://   deferred (not implemented)         dbGaP via SRA Toolkit — DEFERRED, not implemented
+  ✓ ega://        ready                           European Genome-phenome Archive (controlled access; needs credentials)
+  ✓ zenodo://     ready                           Zenodo records by id or DOI (public; token only for restricted)
+  ✓ mendeley://   ready                           Mendeley Data deposits by DOI or dataset id (versioned; anonymous; EXPERIMENTAL — frontend API, sha256)
+  ✓ geo://        ready                           GEO supplementary/processed files over public HTTPS (anonymous)
+  ✓ bia://        ready                           BioImage Archive via BioStudies (open; submitted files + OME-Zarr conversions)
+  – dbgap://      deferred (not implemented)      dbGaP via SRA Toolkit — DEFERRED, not implemented
+  – cbioportal:// deferred (not implemented)      cBioPortal datahub studies — DEFERRED, not implemented
 
   ✓ chirograph      manifests give download-free checksums
-  ✓ dvc             registered for bia, ega, geo, zenodo
+  ✓ dvc             registered for bia, ega, geo, mendeley, zenodo
 ```
 
 Per backend:
@@ -69,8 +71,9 @@ $ archivefs dvc status >/dev/null || echo "DVC integration is not set up"
 ```console
 $ archivefs info --json | python -c 'import json,sys; d=json.load(sys.stdin); print(d["dvc"])'
 {'dvc_installed': True, 'hook_path': '/…/site-packages/archivefs_dvc.pth',
- 'hook_installed': False, 'registered': ['bia', 'ega', 'geo', 'zenodo'],
- 'protocols': ['bia', 'ega', 'geo', 'zenodo'], 'deferred': ['dbgap']}
+ 'hook_installed': False, 'registered': ['bia', 'ega', 'geo', 'mendeley', 'zenodo'],
+ 'protocols': ['bia', 'ega', 'geo', 'mendeley', 'zenodo'],
+ 'deferred': ['cbioportal', 'dbgap']}
 ```
 
 `hook_installed: False` with `dvc_installed: True` is the whole diagnosis: they have

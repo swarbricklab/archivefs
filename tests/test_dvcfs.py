@@ -203,7 +203,7 @@ def test_every_profile_option_reaches_dvcs_schema():
 # --------------------------------------------------------------- the wrappers
 
 
-@pytest.mark.parametrize("protocol", ["ega", "zenodo", "geo", "chiro"])
+@pytest.mark.parametrize("protocol", ["ega", "zenodo", "mendeley", "geo", "chiro"])
 def test_wrapper_declares_md5_as_the_checksum_field(protocol):
     """This one line is what makes `import-url --no-download` record a real hash."""
     from fsspec.registry import _import_class
@@ -243,7 +243,14 @@ def test_unstrip_protocol_round_trips():
 
 @pytest.mark.parametrize(
     ("protocol", "expected"),
-    [("zenodo", True), ("ega", True), ("geo", False), ("bia", False), ("chiro", False)],
+    [
+        ("zenodo", True),
+        ("mendeley", True),
+        ("ega", True),
+        ("geo", False),
+        ("bia", False),
+        ("chiro", False),
+    ],
 )
 def test_version_awareness_follows_the_archive_profile(protocol, expected):
     """On where an immutable per-entry token exists, off where it does not.
@@ -427,7 +434,8 @@ def test_status_probe_reports_what_actually_works():
     report = dvcfs.status()
     assert report["dvc_installed"] is True
     assert sorted(report["registered"]) == sorted(dvcfs.DVC_PROTOCOLS)
-    assert report["deferred"] == ["dbgap"]
+    # Both deferred backends (dbGaP, cbioportal) are absent from DVC on purpose.
+    assert report["deferred"] == ["cbioportal", "dbgap"]
 
 
 def test_boolean_config_values_are_coerced_not_passed_as_strings():

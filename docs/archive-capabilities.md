@@ -13,17 +13,17 @@ or observed ([`decisions.md`](decisions.md) D22): **published checksum**
 
 ## The matrix
 
-| capability | `zenodo` | `ega` | `bia` submitted | `bia` derived | `geo` |
-|---|---|---|---|---|---|
-| **Published per-file checksum** (download-free) | ✅ md5 | ✅ md5¹ | ⚠️ only a depositor md5 column | ✅ md5 (S3 ETag) | ❌ |
-| **Immutable version token** (`version_aware`) | ✅ | ✅ | ❌ | ❌² | ❌ |
-| **Source is immutable** (a name that can't serve other bytes) | ✅ version DOI | ✅ stable accession | ❌ record mutates in place | ❌ regenerated | ❌ record mutates in place |
-| **Version-addressable retrieval** (fetch a *past* snapshot) | ✅ | ⚠️ latest only³ | ❌ | ❌ | ❌ |
-| **Native concept reference** (track-latest) | ✅ concept DOI | ✅ accession | ✅ accession | ✅ | ✅ accession |
-| **Native version reference** (a frozen pin) | ✅ version DOI | ⚠️ via md5³ | ❌ | ❌ | ❌ |
-| **Safe DVC pull-through** (fallback from the archive) | ✅ | ✅ | ❌⁴ | ❌ | ❌⁴ |
-| **Verify-on-read possible** (a checksum to enforce) | ✅ | ✅ | ⚠️ if column present | ✅ | ❌ |
-| **Needs Chirograph for a reproducible pin** | no | no | **yes** | **yes** | **yes** |
+| capability | `zenodo` | `mendeley` | `ega` | `bia` submitted | `bia` derived | `geo` |
+|---|---|---|---|---|---|---|
+| **Published per-file checksum** (download-free) | ✅ md5 | ✅ sha256⁵ | ✅ md5¹ | ⚠️ only a depositor md5 column | ✅ md5 (S3 ETag) | ❌ |
+| **Immutable version token** (`version_aware`) | ✅ | ✅ | ✅ | ❌ | ❌² | ❌ |
+| **Source is immutable** (a name that can't serve other bytes) | ✅ version DOI | ✅ version DOI | ✅ stable accession | ❌ record mutates in place | ❌ regenerated | ❌ record mutates in place |
+| **Version-addressable retrieval** (fetch a *past* snapshot) | ✅ | ✅ | ⚠️ latest only³ | ❌ | ❌ | ❌ |
+| **Native concept reference** (track-latest) | ✅ concept DOI | ✅ concept DOI | ✅ accession | ✅ accession | ✅ | ✅ accession |
+| **Native version reference** (a frozen pin) | ✅ version DOI | ✅ version DOI | ⚠️ via md5³ | ❌ | ❌ | ❌ |
+| **Safe DVC pull-through** (fallback from the archive) | ✅ | ✅ | ✅ | ❌⁴ | ❌ | ❌⁴ |
+| **Verify-on-read possible** (a checksum to enforce) | ✅ | ✅ | ✅ | ⚠️ if column present | ✅ | ❌ |
+| **Needs Chirograph for a reproducible pin** | no | no | no | **yes** | **yes** | **yes** |
 
 ¹ md5 of the **decrypted** bytes — the ones that land on disk (D1).
 ² the derived view *has* md5s, but the profile declares `immutability_basis=None`
@@ -35,6 +35,12 @@ or observed ([`decisions.md`](decisions.md) D22): **published checksum**
 ⁴ the partial-import route (`--no-download`, don't `dvc update`) *works* mechanically,
    but with no integrity gate on the fetch (D34); it is not *safe* against a revised
    record without a Chirograph pin.
+⁵ **sha256, not md5** — and `mendeley://` is EXPERIMENTAL (D44). Mendeley exposes no documented
+   third-party file API (the official one is owner-scoped), so the backend is built on the site's
+   *undocumented, anonymous* frontend API; it may break if Mendeley changes it. sha256 is the
+   immutable per-entry token (version-aware pins and pull-through both verified live), but it is not
+   an md5, so a *download-free* `--no-download` pin is impossible — DVC hashes the downloaded bytes
+   to md5 itself. Reads need a browser-like User-Agent (Cloudflare blocks the default).
 
 ---
 
@@ -61,6 +67,15 @@ model natively. `dvc update` on a concept DOI tracks latest; on a version DOI it
 no-op. Expands ZIP members as directories (`extract_zips`). Nothing here needs
 Chirograph.
 
+**`mendeley`** — Mendeley Data, **EXPERIMENTAL** (D44). A versioned, DOI-bearing record, like
+Zenodo in shape — but Mendeley exposes no documented third-party file API (the official one lists
+only datasets *you own*). So this backend is built on the site's **undocumented, anonymous**
+frontend API (folders + per-folder files), which may break if Mendeley changes it — hence a branch
+prototype, not merged. Checksums are **sha256, not md5**: enough for version-aware pins and
+pull-through (both verified live against `dvc`), but no download-free `--no-download` pin. Concept
+scheme is `mendeley:` (not `doi:`, which Zenodo owns). Files live in folders, so a member path is
+`<folder>/<file>`. Needs a browser-like User-Agent (Cloudflare blocks the default client).
+
 **`ega`** — controlled access (credentials + DAC authorisation). Publishes the md5 of
 the decrypted bytes and is version-aware, so completed imports are pullable and
 verifiable. Accessions are stable, so this is safe; but there is no "previous version"
@@ -86,6 +101,12 @@ problem: no checksums, and records that mutate under a stable accession. Chirogr
 not optional here if you want either verification or reproducibility.
 
 **`dbgap`** — deferred; the backend refuses with an explanation rather than pretending.
+
+**`cbioportal`** — deferred, like `dbgap` (D44). The datahub publishes only a whole-study
+`.tar.gz` (no per-file URLs, not range-readable), no per-file checksums, and the tarball
+is 403 from our network — so there is nothing to put in this table yet. The backend
+refuses with an explanation and the licit interim (mirror the study to a supported archive
+and pin that).
 
 **`chiro`** — not a source archive but the *pin* over one: a committed `.chiro` manifest
 addressed directly ([`chiro-protocol.md`](chiro-protocol.md)). It has no row of its own
