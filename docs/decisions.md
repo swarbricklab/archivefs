@@ -2969,11 +2969,18 @@ Mendeley's reverse-engineered frontend):
 - **Per-file listing** — the GitHub contents API lists a study dir (and its `case_lists/` subdir),
   one request each; unauthenticated GitHub allows 60/hour, enough (a couple of calls per study),
   and raw/LFS fetches don't count against it. A `$GITHUB_TOKEN` raises the limit.
-- **Download-free sha256** — fetching an LFS file's *raw* URL returns the LFS *pointer*
-  (`oid sha256:…` + `size`), so a multi-GB file's digest and size are known without moving the
-  payload (verified: the 689 MB `data_mrna_illumina_microarray.txt` resolves from its 130-byte
-  pointer). Small non-LFS files (`meta_*`, case lists) return their content on the same fetch and
-  are hashed in place — so **every** member gets a sha256, no mixed-checksum gap.
+- **sha256 per file, but of two provenances.** Fetching an LFS file's *raw* URL returns the LFS
+  *pointer* (`oid sha256:…` + `size`), so a multi-GB file's digest and size are known without moving
+  the payload (verified: the 689 MB `data_mrna_illumina_microarray.txt` resolves from its 130-byte
+  pointer) — a **published, download-free** checksum. The non-LFS files (`meta_*`, `case_lists/*`,
+  `LICENSE`, `Readme`) carry no published digest; their content is fetched and the sha256 **derived**
+  by hashing it. So every member ends up with a sha256 (and `info()` records which kind in
+  `checksum_source`), but the two are not the same warrant and a study *listing is not wholly
+  download-free* — it reads every non-LFS file. For `brca_metabric` that is **8 published** (the
+  `data_*` matrices) and **19 derived** (metadata + case lists + licence), a minority of the bytes
+  but a majority of the files. The profile keeps `published_checksum=sha256` because every entry
+  *does* get an immutable sha256 `version_id` (so version-aware is safe for all of them), but the
+  "published/download-free" guarantee strictly covers only the LFS data files.
 - **Ranged content** — LFS bytes stream from `media.githubusercontent.com/media/…` (206,
   Range-capable); non-LFS bytes from `raw.githubusercontent.com`.
 

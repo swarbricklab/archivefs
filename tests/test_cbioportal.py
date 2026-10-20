@@ -167,6 +167,16 @@ def test_small_plain_file_gets_a_computed_sha256(fs):
     assert info["size"] == len(META)
 
 
+def test_checksum_source_distinguishes_published_from_derived(fs):
+    """The sha256's provenance differs: published (LFS) vs derived (we hashed it)."""
+    lfs = fs.info(f"{STUDY}/data_mrna.txt")
+    plain = fs.info(f"{STUDY}/meta_study.txt")
+    assert "published" in lfs["checksum_source"]
+    assert "derived" in plain["checksum_source"]
+    # the per-backend block carries it too
+    assert lfs["cbioportal"]["checksum_source"] == lfs["checksum_source"]
+
+
 # -------------------------------------------------------------------- transfer
 
 

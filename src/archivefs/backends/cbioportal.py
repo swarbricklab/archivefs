@@ -11,11 +11,15 @@ reverse-engineered site (so this is a firmer footing than ``mendeley://``):
 
 * **Per-file listing** — the GitHub contents API lists a study directory (and its
   ``case_lists/`` subdir), one request each.
-* **Download-free sha256** — fetching an LFS-tracked file's *raw* URL returns the LFS
-  *pointer* (``oid sha256:…`` + ``size``), not the bytes, so the content digest and
-  size are known without moving the (often multi-GB) payload. Small non-LFS files
-  (``meta_*``, case lists) return their real content, which is hashed in place — so
-  **every** member gets a sha256.
+* **sha256 per file — published for the data, derived for the metadata.** An
+  LFS-tracked file's *raw* URL returns the LFS *pointer* (``oid sha256:…`` + ``size``),
+  so the big data matrices' digests are known **without** downloading them — a
+  *published*, download-free checksum. The non-LFS files (``meta_*``, ``case_lists/*``,
+  ``LICENSE``, ``Readme``) carry no published digest; their content is fetched and the
+  sha256 *derived* by hashing it. So every member ends up with a sha256 (``info()``
+  records which kind in ``checksum_source``), but — unlike Zenodo — a study *listing*
+  is not wholly download-free: it reads every non-LFS file (for ``brca_metabric``, 19
+  of 27 files, though a small fraction of the bytes).
 * **Ranged content** — an LFS file's bytes come from
   ``media.githubusercontent.com/media/…`` (HTTP 206, Range-capable); a non-LFS file's
   come from its ``raw.githubusercontent.com`` URL.
@@ -186,10 +190,15 @@ class CBioPortalFileSystem(ArchiveFileSystem):
     ) -> dict:
         """Build a member ``info`` from a contents entry, resolving its sha256.
 
-        Fetches the file's *raw* bytes once: an LFS-tracked file returns only its
-        pointer (so its sha256 and real size are read without downloading the
-        payload), while a small plain file returns its content, which is hashed in
-        place. Either way the member ends up with a real sha256.
+        Fetches the file's *raw* URL once. An LFS-tracked file (the data matrices)
+        returns only its pointer, so its sha256 and real size are read **without**
+        downloading the payload — a *published*, download-free digest. A non-LFS file
+        (``meta_*``, ``case_lists/*``, ``LICENSE``, ``Readme``) returns its content,
+        from which the sha256 is **derived** by hashing it here; those are the minority
+        of bytes but, for ``brca_metabric``, the majority of files (19 of 27). So the
+        member always ends up with a real sha256, but ``checksum_source`` records which
+        of the two it is, and a study listing is *not* wholly download-free — it reads
+        every non-LFS file.
         """
         repo_path = entry["path"]
         raw_url = entry.get("download_url")
@@ -203,16 +212,22 @@ class CBioPortalFileSystem(ArchiveFileSystem):
             fields = self._parse_lfs_pointer(body)
             sha256 = fields.get("sha256")
             size = fields.get("size")
-            # LFS bytes come from the media endpoint; raw only serves the pointer.
+            # The sha256 is *published* by git-lfs in the pointer, so it is known
+            # without moving the (often multi-GB) payload; bytes come from media.
             content_url = (
                 f"{self.media_url}/{self.repo}/{quote(ref)}/{quote(repo_path)}"
             )
+            checksum_source = "git-lfs pointer (published, download-free)"
         else:
-            # A small plain file (meta_*, case lists): raw already gave the content,
-            # so hash it in place and serve it from raw.
+            # A non-LFS file (meta_*, case_lists, LICENSE, Readme). These are not
+            # git-lfs tracked, so there is no published digest: `raw` returns the
+            # content itself, which we *derive* a sha256 from by hashing it. Cheap
+            # only because such files are small — a non-LFS *large* file would be
+            # downloaded in full here. (For brca_metabric this is 19 of 27 files.)
             sha256 = hashlib.sha256(body).hexdigest()
             size = len(body)
             content_url = raw_url
+            checksum_source = "derived by archivefs (hash of the downloaded content)"
         return {
             "name": name,
             "type": "file",
@@ -220,6 +235,9 @@ class CBioPortalFileSystem(ArchiveFileSystem):
             "md5": None,
             "checksum": sha256,
             "checksum_type": "SHA256" if sha256 else None,
+            # Say where the digest came from, like geo.py does: a git-lfs file
+            # publishes it download-free, a plain file's is computed here.
+            "checksum_source": checksum_source,
             "version_id": sha256,
             "url": content_url,
             "cbioportal": {
@@ -229,6 +247,7 @@ class CBioPortalFileSystem(ArchiveFileSystem):
                 "repo_path": repo_path,
                 "git_lfs": is_lfs,
                 "sha256": sha256,
+                "checksum_source": checksum_source,
             },
         }
 

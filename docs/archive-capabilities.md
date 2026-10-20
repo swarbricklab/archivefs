@@ -104,10 +104,13 @@ not optional here if you want either verification or reproducibility.
 
 **`cbioportal`** — cBioPortal studies, **EXPERIMENTAL** (D44). The datahub's S3 tarball is a
 dead end (whole-study `.tar.gz`, no per-file URLs, no checksums, 403 from our network), but the
-datahub is *also* the `cBioPortal/datahub` GitHub repo, whose data files are **git-lfs** tracked —
-so an LFS pointer gives a **download-free sha256** per file (small plain files are hashed in place),
-content streams from `media.githubusercontent.com` with ranges, and the whole thing runs on
-documented GitHub infrastructure. Same sha256 (not md5) story as `mendeley`: version-aware pins and
+datahub is *also* the `cBioPortal/datahub` GitHub repo, whose large **data files are git-lfs**
+tracked — so an LFS pointer gives a **published, download-free sha256** for those (verified on a
+689 MB matrix). The non-LFS files (`meta_*`, case lists, licence) carry no published digest, so
+their sha256 is **derived** by downloading and hashing them (small, but a study listing therefore is
+*not* wholly download-free — for `brca_metabric`, 19 of 27 files). Every member still gets a sha256
+(`info().checksum_source` says which kind); content streams from `media.githubusercontent.com` with
+ranges, on documented GitHub infrastructure. Same sha256 (not md5) story as `mendeley`: version-aware pins and
 pull-through work (verified live), no download-free `--no-download` md5. A study is versioned by the
 datahub's git history: `cbioportal://<study>@<ref>` pins a release tag (`@v1.0.0`), a commit SHA or
 a branch (default `master`), and the pin records the resolved immutable commit while the per-file
