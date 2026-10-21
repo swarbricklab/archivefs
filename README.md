@@ -14,9 +14,12 @@ ega://EGAD00001006673                  # dataset → directory
 ega://EGAD00001006673/EGAF00004908765  # single file
 zenodo://1486184/data.zip              # record id …
 zenodo://10.5281/zenodo.1486184        # … or DOI (concept DOI → latest version)
+mendeley://10.17632/yzxtxn4nmd/4       # Mendeley Data (anonymous; EXPERIMENTAL, sha256)
 geo://GSE176078                        # supplementary / processed files
 bia://S-BIAD599                        # BioImage Archive: imaging depositions
 dbgap://<phs_id>/<SRR_accession>       # deferred, registered, refuses clearly
+cbioportal://brca_metabric             # cBioPortal via GitHub+git-lfs (EXPERIMENTAL, sha256)
+cbioportal://brca_metabric@v1.0.0      # … pinned to a release tag or commit SHA
 ```
 
 ## What it does today

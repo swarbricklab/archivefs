@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "archivefs"
-description = "Read-only fsspec filesystems for scientific data archives (EGA, Zenodo, GEO)."
+description = "Read-only fsspec filesystems for scientific data archives (EGA, Zenodo, Mendeley Data, GEO)."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Swarbrick Lab" }]
-keywords = ["fsspec", "dvc", "reproducibility", "ega", "zenodo", "geo", "provenance"]
+keywords = ["fsspec", "dvc", "reproducibility", "ega", "zenodo", "mendeley", "geo", "provenance"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Science/Research",
@@ -64,10 +64,12 @@ archivefs = "archivefs.cli:main"
 [project.entry-points."fsspec.specs"]
 ega = "archivefs.backends.ega:EGAFileSystem"
 zenodo = "archivefs.backends.zenodo:ZenodoFileSystem"
+mendeley = "archivefs.backends.mendeley:MendeleyFileSystem"
 geo = "archivefs.backends.geo:GEOFileSystem"
 bia = "archivefs.backends.bia:BIAFileSystem"
 chiro = "archivefs.backends.chiro:ChiroFileSystem"
 dbgap = "archivefs.backends.dbgap:DbGaPFileSystem"
+cbioportal = "archivefs.backends.cbioportal:CBioPortalFileSystem"
 
 [tool.setuptools_scm]
 version_scheme = "post-release"

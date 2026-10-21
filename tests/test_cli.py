@@ -124,6 +124,40 @@ def test_stat_is_json(fake_geo, capsys):
     assert info["size"] == len(BODIES["meta.tsv"])
 
 
+CBIO_COMMITS = [
+    {"sha": "a" * 40, "commit": {"committer": {"date": "2026-01-30T19:02:42Z"},
+                                 "message": "Gene Table v7: migrate symbols\n\nbody"}},
+    {"sha": "b" * 40, "commit": {"committer": {"date": "2023-03-17T16:10:25Z"},
+                                 "message": "update meta"}},
+]
+
+
+def test_versions_lists_a_cbioportal_study_history(monkeypatch, capsys):
+    def handler(method, url, headers, kwargs):
+        if "/commits" in url:
+            return FakeResponse(200, json=CBIO_COMMITS)
+        return FakeResponse(404, json={})
+
+    monkeypatch.setattr(base_mod, "requests", FakeRequestsModule(handler))
+    assert main(["versions", "cbioportal://brca_metabric"]) == 0
+    out = capsys.readouterr().out
+    assert f"brca_metabric@{'a' * 40}" in out  # accession is a usable pin URL
+    assert "Gene Table v7: migrate symbols" in out  # first line of the message only
+    # a member URL still lists the study's versions
+    assert main(["versions", "cbioportal://brca_metabric/data_mutations.txt"]) == 0
+    assert f"brca_metabric@{'a' * 40}" in capsys.readouterr().out
+    # --json emits the structured records
+    assert main(["versions", "--json", "cbioportal://brca_metabric"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload[0]["accession"] == f"brca_metabric@{'a' * 40}"
+
+
+def test_versions_refused_for_a_backend_without_history(capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["versions", f"geo://{GSE}"])
+    assert "does not expose a version history" in str(exc.value)
+
+
 def test_unknown_protocol_is_refused(capsys):
     with pytest.raises(SystemExit) as exc:
         main(["ls", "sftp://nope"])

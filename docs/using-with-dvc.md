@@ -60,6 +60,12 @@ actually want ([`cli-ls.md`](cli-ls.md)).
 
 This is the most important thing on this page.
 
+> The experimental `mendeley://` and `cbioportal://` backends work the **same way** —
+> a plain `dvc import-url` leaves a `push: false` pin a reviewer can pull from the
+> archive — but on a **sha256** (not md5) immutable token, and with the caveats in
+> *"Experimental: `mendeley://` and `cbioportal://`"* below. Read that before relying
+> on them.
+
 **Just import.** A plain `dvc import-url` of a Zenodo or EGA path records everything a
 reviewer needs, and someone who clones your repo with **no DVC remote, no cache and no
 manifest** can materialise the data straight from the archive:
@@ -117,9 +123,48 @@ someone else's deposit records *your* observation rather than the archive's clai
 honest and useful, but a different warrant from a Zenodo md5, and worth saying so if
 the checksums are offered as evidence.
 
+## Experimental: `mendeley://` and `cbioportal://`
+
+Both address a deposit by accession, list it anonymously, and — via a plain
+`dvc import-url` — leave a `push: false` pin a reviewer can pull straight from the
+archive, exactly like `zenodo://`/`ega://` above. Both are **EXPERIMENTAL**
+([`decisions.md`](decisions.md) D44) and carry caveats you should know before relying
+on them:
+
+- **The immutable token is sha256, not md5.** A published Mendeley version, and a
+  cBioPortal git-lfs object, are immutable, so their sha256 pins the exact bytes and
+  drives version-aware pull-through. It is recorded in the `.dvc` under `version_id`
+  and `checksum`; the `outs` md5 is still DVC's own, computed from the download.
+- **`--no-download` buys nothing here** — unlike Zenodo/EGA, these archives publish no
+  md5, so `dvc import-url --no-download` *downloads the bytes anyway* to compute one
+  (measured: ~2x the file size for a cBioPortal member), then discards the output. Use
+  a plain `dvc import-url`: it downloads once and leaves the pullable pin.
+- **`mendeley://` rests on an undocumented API.** It uses Mendeley's own website
+  endpoints (the official per-file API only serves datasets *you own*), which Mendeley
+  can change without notice. `cbioportal://` is on firmer ground — the documented
+  GitHub API + git-lfs for the `cBioPortal/datahub` repo — but GitHub's anonymous API
+  is rate-limited to 60 requests/hour (set `$GITHUB_TOKEN` to raise it).
+- **Files live in folders.** A member path is `<folder>/<file>` (Mendeley) or may sit
+  under a subdir like `case_lists/` (cBioPortal).
+- **Pinning a version.** Mendeley carries explicit versions in the path
+  (`…/yzxtxn4nmd/4/…`). cBioPortal is versioned by the datahub's git history, pinned as
+  `cbioportal://<study>@<ref>` — a tag (`@v1.0.0`), a commit SHA, or a branch (default
+  `master`). `archivefs ls mendeley://<id>` / `archivefs ls cbioportal://<study>` list
+  the deposit; for cBioPortal's version history, the backend exposes the study's commits.
+  A pin records the resolved immutable commit, so a reviewer gets the same bytes even
+  after `master` moves.
+
+```console
+# anonymous; downloads once, leaves a push:false pin a reviewer can pull
+$ dvc import-url "cbioportal://brca_metabric/data_clinical_sample.txt" samples.txt
+# pin a specific released version of the study (tag or commit SHA):
+$ dvc import-url "cbioportal://brca_metabric@v1.0.0/data_clinical_sample.txt" samples.txt
+$ dvc import-url "mendeley://10.17632/yzxtxn4nmd/4/Supplemental Data Table/README Supplementary Data Table 1 - 2023-01-13.txt" readme.txt
+```
+
 | form | bytes now | `.dvc` written | reviewer can pull from archive | use when |
 |---|---|---|---|---|
-| `dvc import-url URL out` | yes | yes | **yes** for `zenodo`/`ega`; no otherwise | the normal case — start here |
+| `dvc import-url URL out` | yes | yes | **yes** for `zenodo`/`ega` (and experimental `mendeley`/`cbioportal`); no otherwise | the normal case — start here |
 | `dvc import-url --no-download URL out` then `dvc pull` | yes | yes | **yes**, if a checksum is published | `geo`/`bia`, or you want `dvc push` to keep working |
 | `dvc import-url --no-download URL out` | *usually* not | yes | as above | you want the pin now, the data later |
 | `dvc import-url --no-exec URL out` | no | yes, **without checksums** | no | you only want the wiring |
