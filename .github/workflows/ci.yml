@@ -1,0 +1,40 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # setuptools-scm derives the version from tags; it needs full history.
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          # chirograph is not on PyPI yet; install it from git so the [chiro]
+          # extra resolves. Remove this line once chirograph is published.
+          pip install "chirograph @ git+https://github.com/Swarbricklab/chirograph@v0.2.0"
+          pip install -e ".[dev]"
+      - name: Lint
+        run: ruff check .
+      - name: Test (offline — skip network/credentialed archive tests)
+        run: pytest -m "not network and not credentials"

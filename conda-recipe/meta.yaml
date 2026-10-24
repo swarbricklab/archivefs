@@ -1,0 +1,65 @@
+{# conda-forge recipe for archivefs.                                              #}
+{# This is the file to copy into conda-forge/staged-recipes as                    #}
+{# `recipes/archivefs/meta.yaml` once archivefs is on PyPI. See ../RELEASING.md.  #}
+{# Two placeholders must be filled at submission time:                            #}
+{#   * `version` — the released PyPI version (must equal the git tag).            #}
+{#   * `sha256`  — the sha256 of the PyPI *sdist* (`.tar.gz`); grayskull or the   #}
+{#      PyPI "Download files" page gives it. The 64 zeros below are a placeholder. #}
+{% set name = "archivefs" %}
+{% set version = "0.2.0" %}
+
+package:
+  name: {{ name|lower }}
+  version: {{ version }}
+
+source:
+  url: https://pypi.org/packages/source/{{ name[0] }}/{{ name }}/{{ name }}-{{ version }}.tar.gz
+  sha256: 0000000000000000000000000000000000000000000000000000000000000000
+
+build:
+  noarch: python
+  number: 0
+  script: {{ PYTHON }} -m pip install . -vv --no-deps --no-build-isolation
+  entry_points:
+    - archivefs = archivefs.cli:main
+
+requirements:
+  host:
+    - python >=3.9
+    - pip
+    - setuptools >=77
+  run:
+    - python >=3.9
+    - fsspec >=2023.9.0
+    - requests >=2.28
+  # Optional extras are not hard run deps (archivefs works with plain fsspec):
+  #   dvc   -> dvc >=3.0        (the DVC adaptor)
+  #   chiro -> chirograph >=0.1 (download-free checksums via .chiro manifests)
+  # A user who wants them installs the conda packages alongside.
+
+test:
+  imports:
+    - archivefs
+    - archivefs.backends.mendeley
+    - archivefs.backends.cbioportal
+  commands:
+    - archivefs --help
+    - pip check
+  requires:
+    - pip
+
+about:
+  home: https://github.com/swarbricklab/archivefs
+  summary: Read-only fsspec filesystems for scientific data archives (EGA, Zenodo, Mendeley, cBioPortal, GEO, BIA)
+  description: |
+    archivefs lets you address data in scientific repositories by accession/DOI and
+    pull it through the fsspec ecosystem — including DVC via `dvc import-url` — with
+    checksum certainty and version-controlled provenance.
+  license: Apache-2.0
+  license_file: LICENSE
+  doc_url: https://github.com/swarbricklab/archivefs/tree/main/docs
+  dev_url: https://github.com/swarbricklab/archivefs
+
+extra:
+  recipe-maintainers:
+    - johnyaku
