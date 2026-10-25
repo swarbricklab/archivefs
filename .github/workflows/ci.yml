@@ -30,10 +30,15 @@ jobs:
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          # chirograph is not on PyPI yet; install it from git so the [chiro]
-          # extra resolves. Remove this line once chirograph is published.
-          pip install "chirograph @ git+https://github.com/Swarbricklab/chirograph@v0.2.0"
-          pip install -e ".[dev]"
+          # Install everything except the [chiro] extra. chirograph is a private,
+          # pre-PyPI dependency, so CI cannot resolve chirograph>=0.1 (and cannot
+          # clone the private repo without credentials). Install the rest explicitly.
+          pip install -e ".[dbgap,dvc]" pytest pytest-cov responses ruff
+          # Then pull chirograph best-effort: the chiro:// and update tests
+          # importorskip it and skip cleanly when it is absent. Once chirograph is
+          # published this install succeeds and those tests run automatically — no
+          # further CI change needed.
+          pip install chirograph || echo "chirograph unavailable (private/pre-PyPI); chiro tests will skip"
       - name: Lint
         run: ruff check .
       - name: Test (offline — skip network/credentialed archive tests)
