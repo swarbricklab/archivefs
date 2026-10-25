@@ -1,0 +1,64 @@
+# Publish archivefs to PyPI via trusted publishing (OIDC — no API token).
+#
+# DORMANT until PyPI is set up. It runs only on manual dispatch, so it never fails
+# unexpectedly. To go live (see docs/releasing.md for the full walkthrough):
+#
+#   1. Create the `archivefs` project on PyPI (a first manual upload, or a
+#      pending publisher).
+#   2. On PyPI -> the project -> Publishing, add a **trusted publisher**:
+#        owner:        swarbricklab
+#        repository:   archivefs
+#        workflow:     publish.yml
+#        environment:  pypi
+#   3. Create a GitHub environment named `pypi` (Settings -> Environments).
+#   4. Uncomment the `release:` trigger below so a published GitHub Release
+#      publishes automatically. (Leave `workflow_dispatch` for manual re-runs.)
+#
+# The version comes from the git tag via setuptools-scm, so publish from a tagged
+# commit (a GitHub Release does this). `fetch-depth: 0` lets setuptools-scm see it.
+
+name: publish
+
+on:
+  workflow_dispatch: {}
+  # release:
+  #   types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --outdir dist .
+      - name: Check the distributions
+        run: |
+          python -m pip install --upgrade twine
+          python -m twine check --strict dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write # trusted publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

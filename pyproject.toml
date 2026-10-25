@@ -1,22 +1,30 @@
 [build-system]
-requires = ["setuptools>=64", "setuptools-scm>=8"]
+requires = ["setuptools>=77", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "archivefs"
-description = "Read-only fsspec filesystems for scientific data archives (EGA, Zenodo, Mendeley Data, GEO)."
+description = "Read-only fsspec filesystems for scientific data archives (EGA, Zenodo, Mendeley Data, cBioPortal, GEO, BioImage Archive)."
 readme = "README.md"
 requires-python = ">=3.9"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "Swarbrick Lab" }]
-keywords = ["fsspec", "dvc", "reproducibility", "ega", "zenodo", "mendeley", "geo", "provenance"]
+keywords = ["fsspec", "dvc", "reproducibility", "ega", "zenodo", "mendeley", "cbioportal", "geo", "provenance"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Science/Research",
-  "License :: OSI Approved :: Apache Software License",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
   "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Topic :: Scientific/Engineering :: Bio-Informatics",
   "Topic :: System :: Filesystems",
+  "Typing :: Typed",
 ]
 dynamic = ["version"]
 
@@ -53,6 +61,9 @@ dev = [
 [project.urls]
 Homepage = "https://github.com/swarbricklab/archivefs"
 Source = "https://github.com/swarbricklab/archivefs"
+Issues = "https://github.com/swarbricklab/archivefs/issues"
+Changelog = "https://github.com/swarbricklab/archivefs/blob/main/CHANGELOG.md"
+Documentation = "https://github.com/swarbricklab/archivefs/tree/main/docs"
 
 [project.scripts]
 archivefs = "archivefs.cli:main"
@@ -78,6 +89,10 @@ fallback_version = "0.0.0"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# Ship the PEP 561 marker so downstream type-checkers use archivefs' own hints.
+[tool.setuptools.package-data]
+archivefs = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

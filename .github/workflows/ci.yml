@@ -1,0 +1,45 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # setuptools-scm derives the version from tags; it needs full history.
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          # Install everything except the [chiro] extra. chirograph is a private,
+          # pre-PyPI dependency, so CI cannot resolve chirograph>=0.1 (and cannot
+          # clone the private repo without credentials). Install the rest explicitly.
+          pip install -e ".[dbgap,dvc]" pytest pytest-cov responses ruff
+          # Then pull chirograph best-effort: the chiro:// and update tests
+          # importorskip it and skip cleanly when it is absent. Once chirograph is
+          # published this install succeeds and those tests run automatically — no
+          # further CI change needed.
+          pip install chirograph || echo "chirograph unavailable (private/pre-PyPI); chiro tests will skip"
+      - name: Lint
+        run: ruff check .
+      - name: Test (offline — skip network/credentialed archive tests)
+        run: pytest -m "not network and not credentials"
