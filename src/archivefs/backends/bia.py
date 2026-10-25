@@ -619,7 +619,7 @@ class BIAFileSystem(ArchiveFileSystem):
         return {
             "name": f"{accession}/{path}",
             "type": "file",
-            "size": int(size) if isinstance(size, int | str) and str(size).isdigit()
+            "size": int(size) if isinstance(size, (int, str)) and str(size).isdigit()
             else None,
             # BioStudies itself publishes no per-file digest, and the FIRE ETag is
             # not one: measured, it is `"187eb43-64dfaf2d57cc9"` where 0x187eb43 is
