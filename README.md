@@ -3,6 +3,11 @@
 **Read-only [fsspec](https://filesystem-spec.readthedocs.io/) filesystems for
 scientific data archives.**
 
+[![PyPI version](https://img.shields.io/pypi/v/archivefs.svg)](https://pypi.org/project/archivefs/)
+[![Python versions](https://img.shields.io/pypi/pyversions/archivefs.svg)](https://pypi.org/project/archivefs/)
+[![License: Apache-2.0](https://img.shields.io/pypi/l/archivefs.svg)](https://github.com/swarbricklab/archivefs/blob/main/LICENSE)
+[![CI](https://github.com/swarbricklab/archivefs/actions/workflows/ci.yml/badge.svg)](https://github.com/swarbricklab/archivefs/actions/workflows/ci.yml)
+
 `archivefs` lets you address data in scientific repositories by accession/DOI and
 pull it through the fsspec ecosystem — including [DVC](https://dvc.org/) via
 `dvc import-url`. A reviewer, collaborator, or student can then start from the *same
