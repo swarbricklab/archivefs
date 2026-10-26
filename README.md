@@ -72,7 +72,7 @@ file, so it is not free. [`docs/decisions.md`](docs/decisions.md) D14.
 ## Install
 
 ```
-pip install archivefs           # all four backends: Zenodo, GEO, EGA, BIA
+pip install archivefs           # Zenodo, GEO, EGA, BIA, Mendeley, cBioPortal
 pip install archivefs[chiro]    # + read .chiro.json manifests
 pip install archivefs[dvc]      # + the DVC adaptor
 ```
@@ -117,8 +117,8 @@ Credentials are always resolved at **pull time** from the local environment and
 
 ## Status
 
-All four backends work against the live archives, with the plan's blocking question
-resolved.
+All working backends run against the live archives, with the plan's blocking question
+resolved; `mendeley://` and `cbioportal://` are new and marked **experimental**.
 
 | backend | state | download-free checksum | notes |
 |---|---|---|---|
@@ -126,6 +126,8 @@ resolved.
 | `ega://` | working | ✅ MD5 of the *decrypted* bytes (verified) | OAuth2 + refresh-on-401; 16-byte range alignment |
 | `geo://` | working | ⚠️ none published — a `.chiro` sidecar fixes it | index-based listing; SRA seam drawn, not built |
 | `bia://` | working | ⚠️ none for submitted files · ✅ MD5 for the OME-Zarr tier | two views; the imaging half of a split deposit |
+| `mendeley://` | working · experimental | ✅ sha256 (published) | DOI/id, versioned, folder-aware; anonymous frontend API |
+| `cbioportal://` | working · experimental | ✅ sha256 for git-lfs data files · ⚠️ derived for small metadata files | `cBioPortal/datahub` GitHub + git-lfs; version-pin by git ref |
 | `dbgap://` | deferred | — | registered so the error explains itself |
 
 Verified end to end against the live archives: `dvc list-url`, `dvc import-url
