@@ -1,28 +1,22 @@
 # Publish archivefs to PyPI via trusted publishing (OIDC — no API token).
 #
-# DORMANT until PyPI is set up. It runs only on manual dispatch, so it never fails
-# unexpectedly. To go live (see docs/releasing.md for the full walkthrough):
+# ARMED: a published GitHub Release triggers a build + upload via trusted publishing.
+# The upload requires the PyPI side configured first (else the publish job fails at
+# the OIDC exchange with `invalid-publisher`): a pending publisher
+# (owner swarbricklab / repo archivefs / workflow publish.yml / environment pypi)
+# and a `pypi` GitHub environment. See docs/releasing.md for the full walkthrough.
 #
-#   1. Create the `archivefs` project on PyPI (a first manual upload, or a
-#      pending publisher).
-#   2. On PyPI -> the project -> Publishing, add a **trusted publisher**:
-#        owner:        swarbricklab
-#        repository:   archivefs
-#        workflow:     publish.yml
-#        environment:  pypi
-#   3. Create a GitHub environment named `pypi` (Settings -> Environments).
-#   4. Uncomment the `release:` trigger below so a published GitHub Release
-#      publishes automatically. (Leave `workflow_dispatch` for manual re-runs.)
-#
-# The version comes from the git tag via setuptools-scm, so publish from a tagged
-# commit (a GitHub Release does this). `fetch-depth: 0` lets setuptools-scm see it.
+# The version comes from the git tag via setuptools-scm, so the build must run from
+# the tagged commit. `fetch-depth: 0` lets setuptools-scm see tags, and the build
+# checkout pins `ref` to the release tag so the version is derived from exactly that
+# tag (not a post-release dev version). `workflow_dispatch` stays for manual re-runs.
 
 name: publish
 
 on:
   workflow_dispatch: {}
-  # release:
-  #   types: [published]
+  release:
+    types: [published]
 
 permissions:
   contents: read
@@ -33,6 +27,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          # Build the exact tag on a release (setuptools-scm reads it); fall back to
+          # the dispatched ref for a manual workflow_dispatch run.
+          ref: ${{ github.event.release.tag_name || github.ref }}
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
