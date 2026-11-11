@@ -7,6 +7,14 @@ tags by `setuptools-scm`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`archivefs dvc-meta`** now stamps a pin of one file (`chiro://md5:<digest>/<relpath>`)
+  instead of refusing it as "not a resolvable chiro://md5 ref", records the pinned
+  `file`, and refuses a file the manifest does not list. A `web://` pin is stamped as
+  `archive: web` with the file's `https://` `url` and `web://` `source`, rather than
+  the generic `archive: url`.
+
 ## [0.3.0] — 2026-11-11
 
 Adds `web://`, so a file at a plain HTTPS URL (a journal supplement, a lab website, a

@@ -5,7 +5,8 @@ of legibility: the `.dvc` no longer says *where* the data came from — you must
 the manifest in `.chirograph/` to learn it is even Zenodo. This writes that provenance
 back into the `.dvc` as a free-form ``meta.archivefs`` block, derived from the pin's own
 manifest: the archive, the record / DOI (or BIA study), the concept, the container, a
-clickable landing URL, and the ``zenodo://``/``bia://`` source to re-import from.
+clickable landing URL, and the ``zenodo://``/``bia://``/``web://`` source to re-import
+from. A pin of one file (``chiro://md5:<digest>/<relpath>``) also records that file.
 
 It uses DVC's own `meta:` field, which the spec allows as an arbitrary object and —
 crucially — **excludes from the stage md5** and **preserves across `dvc update`** (both
@@ -27,7 +28,13 @@ from archivefs.errors import ManifestError
 __all__ = ["provenance_meta", "stamp"]
 
 #: concept scheme → the archive's short name.
-_ARCHIVE = {"doi": "zenodo", "biostudies": "bia", "geo": "geo", "ega": "ega"}
+_ARCHIVE = {
+    "doi": "zenodo",
+    "biostudies": "bia",
+    "geo": "geo",
+    "ega": "ega",
+    "url": "web",
+}
 
 _NOTE = (
     "provenance summary only; the chiro:// pin and .chirograph manifest "
@@ -35,8 +42,13 @@ _NOTE = (
 )
 
 
-def provenance_meta(manifest: Any) -> dict[str, Any]:
+def provenance_meta(manifest: Any, member: str | None = None) -> dict[str, Any]:
     """Build the ``{"archivefs": {...}}`` provenance block from a parsed manifest.
+
+    ``member`` is the file a pin names inside the manifest (the ``/<relpath>`` after
+    ``chiro://md5:<digest>``), or ``None`` for a pin of the whole deposit. It is
+    recorded as ``file``; for ``web`` it also makes ``url``/``source`` point at the
+    file itself, which is the only address an HTTPS source has.
 
     Everything comes from the manifest's own routing fields (``concept``,
     ``record_accession``, ``source_url``, ``containers``), so the block is a *view* of
@@ -68,6 +80,12 @@ def provenance_meta(manifest: Any) -> dict[str, Any]:
             info["subtree"] = subtree
         info["url"] = f"https://www.ebi.ac.uk/biostudies/studies/{study}"
         info["source"] = f"bia://{record}"
+    elif archive == "web":
+        # record_accession is ``host/dir``; the concept carries the same as a URL.
+        location = record or concept_value.removeprefix("https://")
+        target = f"{location}/{member}" if member else location
+        info["url"] = f"https://{target}"
+        info["source"] = f"web://{target}"
     elif archive == "geo":
         info["accession"] = record
         info["url"] = f"https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc={record}"
@@ -79,6 +97,8 @@ def provenance_meta(manifest: Any) -> dict[str, Any]:
         if getattr(manifest, "source_url", None):
             info["source"] = manifest.source_url
 
+    if member:
+        info["file"] = member
     info["nfiles"] = manifest.nfiles
     info["note"] = _NOTE
     return {"archivefs": info}
@@ -116,13 +136,20 @@ def stamp(dvc_file: str | Path, *, write: bool = True) -> dict[str, Any]:
             f"{path} has no chiro:// dependency — provenance meta is for chiro:// pins "
             f"(a plain zenodo://…/bia://… dep is already self-describing)."
         )
-    ref = store.as_ref(dep["path"])
+    # A pin may name one file of the deposit: chiro://md5:<digest>/<relpath>.
+    ref_text, _, member = str(dep["path"]).removeprefix("chiro://").partition("/")
+    ref = store.as_ref(ref_text)
     if ref is None:
         raise ManifestError(
             f"{path}: {dep['path']} is not a resolvable chiro://md5 ref."
         )
     manifest = chirograph.load(store.resolve_ref(ref, start=path))
-    block = provenance_meta(manifest)
+    if member and not any(entry.relpath == member for entry in manifest.files):
+        raise ManifestError(
+            f"{path}: {dep['path']} names {member!r}, which is not a file in its "
+            f"manifest."
+        )
+    block = provenance_meta(manifest, member or None)
 
     if write:
         # Merge our key into any existing meta, then re-emit with meta after md5/frozen

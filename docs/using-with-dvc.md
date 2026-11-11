@@ -495,7 +495,9 @@ verified against the manifest. (The tell, as above, is an `outs:` block with **n
 nothing about *where* the data is from — you'd have to resolve the manifest to find out.
 `archivefs dvc-meta data/*.dvc` writes a `meta.archivefs` block into each pin's `.dvc` —
 archive, record/DOI (or BIA study), concept, container, a clickable landing URL, and the
-`zenodo://`/`bia://` source — derived from the pin's own `.chirograph` manifest:
+`zenodo://`/`bia://`/`web://` source — derived from the pin's own `.chirograph` manifest.
+A pin of one file (`chiro://md5:<digest>/<relpath>`) also records that `file`; for a
+`web://` pin its `url` and `source` are the file's own address:
 
 ```console
 $ archivefs dvc-meta data/pathology_annotations.dvc
