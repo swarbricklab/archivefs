@@ -7,6 +7,22 @@ tags by `setuptools-scm`.
 
 ## [Unreleased]
 
+## [0.3.2] — 2026-11-11
+
+Fixes `web://` against hosts that compress responses on the fly. Upgrade, and rebuild
+any `web://` manifest of a text file made with 0.3.0 or 0.3.1.
+
+### Fixed
+
+- **`web://` recorded the wrong size and md5 for a file a host gzips in transit**
+  (GitHub raw, the Broad's MSigDB mirror). `requests` asks for `gzip` by default, so
+  `HEAD`'s `Content-Length` was the compressed length: a `--download` capture then
+  hashed only that many bytes of the file, and a host that dropped the length (and
+  ignored `Range` on the gzip stream) could not be sized at all. The session now sends
+  `Accept-Encoding: identity`, and a length or `Content-Range` from a response that is
+  encoded anyway is not taken as the file's size. Binary files (`.xlsx`, `.zip`) were
+  not compressed by any host seen and were unaffected.
+
 ## [0.3.1] — 2026-11-11
 
 Fixes `archivefs dvc-meta` for single-file pins and `web://` pins. No API changes.
@@ -76,7 +92,8 @@ First tagged release: the shared read-only base and the initial backends —
 accession/DOI and consumable through fsspec and DVC's `import-url`. `dbgap://` is
 registered but deferred.
 
-[Unreleased]: https://github.com/swarbricklab/archivefs/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/swarbricklab/archivefs/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/swarbricklab/archivefs/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/swarbricklab/archivefs/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/swarbricklab/archivefs/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/swarbricklab/archivefs/compare/v0.1.0...v0.2.0
