@@ -7,6 +7,12 @@ tags by `setuptools-scm`.
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-11-11
+
+Adds `web://`, so a file at a plain HTTPS URL (a journal supplement, a lab website, a
+release directory) can be pinned with a `.chiro` manifest and imported through
+`chiro://`. Backward-compatible: every `0.2.0` URL and `.dvc` import keeps working.
+
 ### Added
 
 - **`web://`**: any file at a plain HTTPS URL (journal supplements, lab websites,
@@ -58,6 +64,7 @@ First tagged release: the shared read-only base and the initial backends —
 accession/DOI and consumable through fsspec and DVC's `import-url`. `dbgap://` is
 registered but deferred.
 
-[Unreleased]: https://github.com/swarbricklab/archivefs/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/swarbricklab/archivefs/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/swarbricklab/archivefs/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/swarbricklab/archivefs/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/swarbricklab/archivefs/releases/tag/v0.1.0
