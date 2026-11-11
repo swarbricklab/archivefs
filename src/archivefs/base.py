@@ -956,14 +956,16 @@ class ArchiveFileSystem(AbstractFileSystem):
         protocol = type(self).protocol
         if isinstance(protocol, (list, tuple)):
             protocol = protocol[0]
+        root, source = blockcache.cache_root_and_source(
+            self.cache_dir,
+            self.configured.get("cache_dir"),
+            self._cache_dir_default,
+        )
         options = blockcache.prepare(
-            blockcache.cache_root(
-                self.cache_dir,
-                self.configured.get("cache_dir"),
-                self._cache_dir_default,
-            ),
+            root,
             blockcache.identity_of(str(protocol), info, block_size),
             self.configured.get("cache_max_age_days"),
+            source=source,
         )
         if options is None:
             options = blockcache.scratch_options(

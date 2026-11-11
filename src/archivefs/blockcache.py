@@ -106,25 +106,39 @@ _pruned: set[str] = set()
 _warned: set[str] = set()
 
 
-def _resolve(sources: tuple[Any, ...], what: str) -> Path | None:
+def _resolve_with_source(
+    sources: tuple[Any, ...], what: str
+) -> tuple[Path | None, int | None]:
     """First source that says anything decides, including saying "off".
 
     Precedence, not merging: ``cache_dir=false`` on one command has to beat an
     enabled environment variable, and the environment has to beat a config file, and
     each of those is a *decision* rather than a value to be combined. So the first
     non-``None`` source wins even when what it says is "nowhere".
+
+    Also returns the index of the source that decided (``None`` when none did), so a
+    warning about the location can name what set it.
     """
-    for value in sources:
+    for index, value in enumerate(sources):
         if value is None:
             continue
         if value is False:
-            return None
+            return None, index
         if isinstance(value, str) and value.strip().lower() in _DISABLED:
-            return None
+            return None, index
         if value is True:
             raise ValueError(f"{what} needs a directory, not a bare true")
-        return Path(value).expanduser()
-    return None
+        return Path(value).expanduser(), index
+    return None, None
+
+
+def _resolve(sources: tuple[Any, ...], what: str) -> Path | None:
+    return _resolve_with_source(sources, what)[0]
+
+
+def _labels(option: str, env: str) -> tuple[str, ...]:
+    """How to name each source in a message, in :func:`_resolve` order."""
+    return (f"{option}=", f"${env}", f"{option} in the archivefs config")
 
 
 def cache_root(
@@ -151,10 +165,28 @@ def cache_root(
     now has a better way to say so than a generic variable: one line in the config
     file, visible in ``archivefs config``.
     """
-    return _resolve(
+    return cache_root_and_source(explicit, configured, fallback)[0]
+
+
+def cache_root_and_source(
+    explicit: Any = None, configured: Any = None, fallback: Any = None
+) -> tuple[Path | None, str | None]:
+    """:func:`cache_root`, plus what chose it: a label, or ``None`` for ``fallback``.
+
+    The label is what a warning about the location names. ``None`` means nobody set
+    it — the caller's own default decided, which for DVC is the directory beside the
+    repository's cache — and :func:`prepare` does not warn about a location nobody
+    chose: it follows wherever the user put their DVC cache, so on a laptop it is in
+    the home directory like everything else.
+    """
+    root, index = _resolve_with_source(
         (explicit, os.environ.get(CACHE_DIR_ENV), configured, fallback),
         "cache_dir",
     )
+    labels = _labels("cache_dir", CACHE_DIR_ENV)
+    if index is None or index >= len(labels):
+        return root, None
+    return root, labels[index]
 
 
 def scratch_root(explicit: Any = None, configured: Any = None) -> Path | None:
@@ -193,9 +225,9 @@ def _warn_if_under_home(root: Path, option: str) -> None:
         return
     _warned.add(key)
     logger.warning(
-        "%s=%s is inside your home directory, and one entry is as large as the "
-        "archive it caches. Home quotas are usually far smaller than that (10 GB on "
-        "Gadi) — prefer /scratch or /g/data.",
+        "%s puts archivefs's block cache at %s, inside your home directory, and one "
+        "entry is as large as the file it caches. Home quotas are usually far "
+        "smaller than that (10 GB on Gadi) — prefer /scratch or /g/data.",
         option,
         root,
     )
@@ -203,7 +235,9 @@ def _warn_if_under_home(root: Path, option: str) -> None:
 
 def scratch_options(explicit: Any = None, configured: Any = None) -> dict:
     """``{"scratch": dir}`` for the ephemeral file, ``{}`` to let ``tempfile`` pick."""
-    root = scratch_root(explicit, configured)
+    root, index = _resolve_with_source(
+        (explicit, os.environ.get(SCRATCH_DIR_ENV), configured), "scratch_dir"
+    )
     if root is None:
         return {}
     try:
@@ -213,7 +247,7 @@ def scratch_options(explicit: Any = None, configured: Any = None) -> dict:
         # not a failed import.
         logger.warning("cannot use %s for block scratch space: %s", root, exc)
         return {}
-    _warn_if_under_home(root, SCRATCH_DIR_ENV)
+    _warn_if_under_home(root, _labels("scratch_dir", SCRATCH_DIR_ENV)[index])
     return {"scratch": str(root)}
 
 
@@ -365,16 +399,24 @@ def _read_index(index: Path, data: Path, identity: dict) -> set[int] | None:
 
 
 def prepare(
-    root: Path | None, identity: dict | None, max_age_days: Any = None
+    root: Path | None,
+    identity: dict | None,
+    max_age_days: Any = None,
+    source: str | None = f"${CACHE_DIR_ENV}",
 ) -> dict | None:
     """Cache options for a resumable cache, or ``None`` to use a private one.
 
     Every failure here is a fallback rather than an error: a cache is an
     optimisation, and an import that cannot write one should still run.
+
+    ``source`` names what set ``root``, for the warning when it is under the home
+    directory; ``None`` means a caller's default chose it, and there is no warning
+    (:func:`cache_root_and_source`).
     """
     if root is None or identity is None:
         return None
-    _warn_if_under_home(root, CACHE_DIR_ENV)
+    if source is not None:
+        _warn_if_under_home(root, source)
     data, index, lock = _paths(root, identity)
     try:
         data.parent.mkdir(parents=True, exist_ok=True)

@@ -225,6 +225,8 @@ def apply_manifest(
     native: dict[str, dict],
     manifest_path: str,
     manifest: Any = None,
+    *,
+    unrecorded_is_drift: bool = True,
 ) -> tuple[dict[str, dict], DriftReport]:
     """Re-key a native listing by the manifest, returning the listing and drift.
 
@@ -232,6 +234,14 @@ def apply_manifest(
     materialise as a tree) while the fetch still goes through the native member
     identified by ``source_path`` — the two-path model, with archivefs supplying
     the byte-fetcher half.
+
+    ``unrecorded_is_drift`` decides whether deposit files the manifest does not list
+    count as drift. They do for a manifest that ships *in* the deposit, which claims
+    to describe all of it. They do not for a ``chiro://`` pin: a pin reads only the
+    files it lists, and pinning one file of a record — the natural unit for a file
+    imported on its own — would otherwise warn about every sibling on every pull.
+    Files the pin lists still warn when absent, resized or re-checksummed, and
+    ``archivefs confirm`` still names unrecorded files.
     """
     if manifest is None:
         manifest = load_manifest(fs, manifest_path)
@@ -306,7 +316,9 @@ def apply_manifest(
         members[path] = info
 
     containers = getattr(manifest, "containers", None)
-    if containers:
+    if not unrecorded_is_drift:
+        drift.unrecorded = []
+    elif containers:
         # A container manifest may pin *one* ZIP of a multi-ZIP record, listed at the
         # record (so the delegate's `source_path`s resolve). The record's *other* ZIPs
         # are then in the native listing but were never claimed by this pin — they are

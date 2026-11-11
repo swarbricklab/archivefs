@@ -16,7 +16,7 @@ The model is ssh's. `ssh` has no `-o Password=` — it has `IdentityFile`, which
 
 | protocol | credential | required? |
 |---|---|---|
-| `zenodo://` | personal access token | only for restricted or embargoed records |
+| `zenodo://` | personal access token | only for restricted or embargoed records, or your own unpublished drafts |
 | `geo://` | — | never; public HTTPS |
 | `bia://` | — | never; open BioStudies + anonymous S3 |
 | `ega://` | EGA account **username + password** | always, plus DAC authorisation for the dataset |
@@ -256,7 +256,10 @@ Zenodo is the same shape at `~/.config/archivefs/zenodo.json`:
 ```
 
 Public Zenodo records need no token, which is why that credential is declared
-optional rather than required.
+optional rather than required. Your own unpublished drafts do: Zenodo serves a draft
+only to its owner, so with a token archivefs reads `zenodo://<id>` from the draft when
+the record is not yet published. That is how to build a deposit's manifest and pins,
+and test them, before publication.
 
 ## Recipe: two projects, two EGA accounts
 
