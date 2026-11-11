@@ -629,6 +629,17 @@ class ArchiveFileSystem(AbstractFileSystem):
         """
         return None
 
+    def expect_members(self, container: str, relpaths: Any) -> None:
+        """Announce the files a ``chiro://`` pin expects under ``container``.
+
+        A no-op for every backend that can list its own containers, which is all of
+        them but ``web://``: HTTP has no index, so that backend probes each announced
+        file instead, and without this a ``web`` pin would read as entirely missing
+        upstream. Called by :class:`~archivefs.backends.chiro.ChiroFileSystem` just
+        before it lists the delegate.
+        """
+        return None
+
     def _resolve(self, path: str) -> dict:
         path = self._strip_protocol(path)
         if not path:

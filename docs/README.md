@@ -80,6 +80,7 @@ private file, and every other route is refused. See
 | | `api_url`, `media_url` | URL | override the GitHub API / LFS media endpoints. Anonymous; `$GITHUB_TOKEN` only raises the API rate limit. **Experimental** ([`decisions.md`](decisions.md) D44) |
 | `geo` | `view` | `supplementary` (default), `raw` | `raw` is a deliberate seam and refuses with an explanation |
 | | `base_url` | URL | override the GEO FTP-over-HTTPS root |
+| `web` | — | — | no backend options: the URL is the whole address. Anonymous, https only ([`decisions.md`](decisions.md) D45) |
 
 ## Which archive gives you what
 
@@ -93,6 +94,7 @@ private file, and every other route is refused. See
 | `geo://` | ❌ | a `.chiro` sidecar fixes it |
 | `chiro://` | ✅ MD5 from the manifest | a committed `.chiro` pin; routes to the archive its concept names ([`chiro-protocol.md`](chiro-protocol.md)) |
 | `cbioportal://` | ⚠️ SHA256 (git-lfs) | **experimental** — cBioPortal studies via the `cBioPortal/datahub` GitHub repo; data files carry a download-free LFS sha256 ([`decisions.md`](decisions.md) D44) |
+| `web://` | ❌ (✅ only if the server sends `Content-MD5` / `x-goog-hash`) | any HTTPS file; no listing, so pin it — `archivefs manifest web://… --download` then `chiro://md5:…` ([`decisions.md`](decisions.md) D45) |
 | `dbgap://` | — | deferred; refuses with an explanation |
 
 Where a checksum is missing, `dvc import-url --no-download` still records a correct

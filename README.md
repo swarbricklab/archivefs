@@ -25,6 +25,7 @@ bia://S-BIAD599                        # BioImage Archive: imaging depositions
 dbgap://<phs_id>/<SRR_accession>       # deferred, registered, refuses clearly
 cbioportal://brca_metabric             # cBioPortal via GitHub+git-lfs (EXPERIMENTAL, sha256)
 cbioportal://brca_metabric@v1.0.0      # … pinned to a release tag or commit SHA
+web://ars.els-cdn.com/content/image/<file>.xlsx  # any HTTPS file; pin it with chiro://
 ```
 
 ## What it does today
@@ -77,7 +78,7 @@ file, so it is not free. [`docs/decisions.md`](docs/decisions.md) D14.
 ## Install
 
 ```
-pip install archivefs           # Zenodo, GEO, EGA, BIA, Mendeley, cBioPortal
+pip install archivefs           # Zenodo, GEO, EGA, BIA, Mendeley, cBioPortal, web
 pip install archivefs[chiro]    # + read .chiro.json manifests
 pip install archivefs[dvc]      # + the DVC adaptor
 ```
@@ -133,6 +134,7 @@ resolved; `mendeley://` and `cbioportal://` are new and marked **experimental**.
 | `bia://` | working | ⚠️ none for submitted files · ✅ MD5 for the OME-Zarr tier | two views; the imaging half of a split deposit |
 | `mendeley://` | working · experimental | ✅ sha256 (published) | DOI/id, versioned, folder-aware; anonymous frontend API |
 | `cbioportal://` | working · experimental | ✅ sha256 for git-lfs data files · ⚠️ derived for small metadata files | `cBioPortal/datahub` GitHub + git-lfs; version-pin by git ref |
+| `web://` | working · new | ⚠️ none as a rule — a `.chiro` pin fixes it | any HTTPS file (journal supplements, release dirs); no listing; see [`decisions.md`](docs/decisions.md) D45 |
 | `dbgap://` | deferred | — | registered so the error explains itself |
 
 Verified end to end against the live archives: `dvc list-url`, `dvc import-url

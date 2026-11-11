@@ -13,17 +13,17 @@ or observed ([`decisions.md`](decisions.md) D22): **published checksum**
 
 ## The matrix
 
-| capability | `zenodo` | `mendeley` | `ega` | `bia` submitted | `bia` derived | `geo` |
-|---|---|---|---|---|---|---|
-| **Published per-file checksum** (download-free) | ✅ md5 | ✅ sha256⁵ | ✅ md5¹ | ⚠️ only a depositor md5 column | ✅ md5 (S3 ETag) | ❌ |
-| **Immutable version token** (`version_aware`) | ✅ | ✅ | ✅ | ❌ | ❌² | ❌ |
-| **Source is immutable** (a name that can't serve other bytes) | ✅ version DOI | ✅ version DOI | ✅ stable accession | ❌ record mutates in place | ❌ regenerated | ❌ record mutates in place |
-| **Version-addressable retrieval** (fetch a *past* snapshot) | ✅ | ✅ | ⚠️ latest only³ | ❌ | ❌ | ❌ |
-| **Native concept reference** (track-latest) | ✅ concept DOI | ✅ concept DOI | ✅ accession | ✅ accession | ✅ | ✅ accession |
-| **Native version reference** (a frozen pin) | ✅ version DOI | ✅ version DOI | ⚠️ via md5³ | ❌ | ❌ | ❌ |
-| **Safe DVC pull-through** (fallback from the archive) | ✅ | ✅ | ✅ | ❌⁴ | ❌ | ❌⁴ |
-| **Verify-on-read possible** (a checksum to enforce) | ✅ | ✅ | ✅ | ⚠️ if column present | ✅ | ❌ |
-| **Needs Chirograph for a reproducible pin** | no | no | no | **yes** | **yes** | **yes** |
+| capability | `zenodo` | `mendeley` | `ega` | `bia` submitted | `bia` derived | `geo` | `web` |
+|---|---|---|---|---|---|---|---|
+| **Published per-file checksum** (download-free) | ✅ md5 | ✅ sha256⁵ | ✅ md5¹ | ⚠️ only a depositor md5 column | ✅ md5 (S3 ETag) | ❌ | ❌⁶ |
+| **Immutable version token** (`version_aware`) | ✅ | ✅ | ✅ | ❌ | ❌² | ❌ | ❌ |
+| **Source is immutable** (a name that can't serve other bytes) | ✅ version DOI | ✅ version DOI | ✅ stable accession | ❌ record mutates in place | ❌ regenerated | ❌ record mutates in place | ❌ a URL can serve new bytes |
+| **Version-addressable retrieval** (fetch a *past* snapshot) | ✅ | ✅ | ⚠️ latest only³ | ❌ | ❌ | ❌ | ❌ |
+| **Native concept reference** (track-latest) | ✅ concept DOI | ✅ concept DOI | ✅ accession | ✅ accession | ✅ | ✅ accession | ✅ the URL |
+| **Native version reference** (a frozen pin) | ✅ version DOI | ✅ version DOI | ⚠️ via md5³ | ❌ | ❌ | ❌ | ❌ |
+| **Safe DVC pull-through** (fallback from the archive) | ✅ | ✅ | ✅ | ❌⁴ | ❌ | ❌⁴ | ❌⁴ |
+| **Verify-on-read possible** (a checksum to enforce) | ✅ | ✅ | ✅ | ⚠️ if column present | ✅ | ❌ | ❌ |
+| **Needs Chirograph for a reproducible pin** | no | no | no | **yes** | **yes** | **yes** | **yes** |
 
 ¹ md5 of the **decrypted** bytes — the ones that land on disk (D1).
 ² the derived view *has* md5s, but the profile declares `immutability_basis=None`
@@ -41,6 +41,8 @@ or observed ([`decisions.md`](decisions.md) D22): **published checksum**
    immutable per-entry token (version-aware pins and pull-through both verified live), but it is not
    an md5, so a *download-free* `--no-download` pin is impossible — DVC hashes the downloaded bytes
    to md5 itself. Reads need a browser-like User-Agent (Cloudflare blocks the default).
+⁶ unless the server sends a real content digest (`Content-MD5`, or GCS's `x-goog-hash: md5=`),
+   which `web://` then uses. An ETag is never taken for a checksum (D45).
 
 ---
 
@@ -101,6 +103,17 @@ problem: no checksums, and records that mutate under a stable accession. Chirogr
 not optional here if you want either verification or reproducibility.
 
 **`dbgap`** — deferred; the backend refuses with an explanation rather than pretending.
+
+**`web`** — a file at a plain HTTPS URL (D45): a journal supplement, a lab website, a
+release directory. No accession, no listing, and as a rule no checksum — and the URL is
+the only reference, so it can serve different bytes tomorrow. The worst row in the table
+on purpose: every guarantee comes from the Chirograph pin, and `chiro://` is how such a
+file is meant to be imported. What `web://` itself adds over DVC's own `https://` is that
+a `--no-download` import of a server with **no ETag** still pulls (DVC's invents a token
+it cannot reproduce), and the bytes are checked against the pinned md5 rather than a
+`size-mtime` validator. The host is the container and each file is found by `HEAD`; a
+pin over several files of one directory works because `chiro://` announces them first.
+Sends a browser-like User-Agent that still names archivefs, as `mendeley` does.
 
 **`cbioportal`** — cBioPortal studies, **EXPERIMENTAL** (D44). The datahub's S3 tarball is a
 dead end (whole-study `.tar.gz`, no per-file URLs, no checksums, 403 from our network), but the

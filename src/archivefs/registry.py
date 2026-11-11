@@ -353,6 +353,33 @@ PROTOCOLS: dict[str, Backend] = {
         published_checksum="sha256",
         immutability_basis="file sha256 (git-lfs oid, or computed for small files)",
     ),
+    "web": Backend(
+        protocol="web",
+        class_path="archivefs.backends.web.WebFileSystem",
+        extra=None,
+        summary=(
+            "individual files at plain HTTPS URLs — journal supplements, release "
+            "directories (anonymous; no listing; pin with a .chiro manifest)"
+        ),
+        requires=("requests",),
+        config={
+            "chiro": str,
+            "max_concurrent_reads": int,
+            "cache_dir": str,
+            "scratch_dir": str,
+        },
+        dvc_wrapper="WebDVCFileSystem",
+        # The URL is the only tracker a bare web file has: `url:https://host/path`.
+        concept_scheme="url",
+        # A web server publishes no content digest as a rule. Content-MD5 and GCS's
+        # x-goog-hash are used when a server sends them, but a profile cannot say
+        # "sometimes", so this is recorded as None — a .chiro manifest is what makes
+        # a web file verifiable, exactly as for GEO.
+        published_checksum=None,
+        # An ETag or Last-Modified is a validator, not an immutable token: the same
+        # URL can serve different bytes tomorrow. Never enable version_aware.
+        immutability_basis=None,
+    ),
 }
 
 #: Info keys that say *how to fetch this entry* rather than what it contains, and so

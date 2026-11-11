@@ -7,6 +7,19 @@ tags by `setuptools-scm`.
 
 ## [Unreleased]
 
+### Added
+
+- **`web://`**: any file at a plain HTTPS URL (journal supplements, lab websites,
+  release directories) as an archive. No listing (a file is found by `HEAD`) and, as a
+  rule, no checksum, so it is meant to be pinned: `archivefs manifest web://… --download`,
+  then `dvc import-url --no-download chiro://md5:…/<file>`. Concept scheme `url:`.
+  Unlike DVC's own `https://`, a `--no-download` import of a server that sends no ETag
+  still pulls, and the bytes are verified against the pinned md5. See
+  `docs/decisions.md` D45.
+- `archivefs manifest` accepts a single file and pins it under its parent directory.
+- `ArchiveFileSystem.expect_members()`, the hook `chiro://` uses to announce a pin's files
+  to a backend that cannot list. A no-op for every backend except `web://`.
+
 ## [0.2.0] — 2026-10-26
 
 Adds four new access paths (`mendeley://`, `cbioportal://`, `chiro://`, and Chirograph

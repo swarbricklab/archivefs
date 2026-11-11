@@ -94,10 +94,17 @@ def build_manifest(
     """
     chirograph = _chirograph()
     container = fs._strip_protocol(container)
+    if fs.isfile(container) and "/" in container:
+        # A single file: pin it under its parent, so its relpath is its name rather
+        # than "". This is the natural unit for web://, which cannot list, and works
+        # the same for one file of a Zenodo record or a GEO series.
+        listing = {container: fs.info(container)}
+        container = container.rsplit("/", 1)[0]
+    else:
+        listing = fs.find(container, detail=True)
     if concept is None:
         concept = fs.concept(container)
 
-    listing = fs.find(container, detail=True)
     entries: list[Any] = []
     missing: list[str] = []
     # Container identity is recorded once, keyed by source_root; the first member

@@ -3002,3 +3002,69 @@ unrelated study's update does not move it); `concept` stays version-less (`cbiop
 from `master`), and `dvc import-url` of a `@ref` URL round-trips (the `@` survives DVC's URL
 parsing). Still EXPERIMENTAL and branch-only until the approach is reviewed. `dbgap://` remains the
 sole deferred backend.
+
+---
+
+## D45 — `web://`: a plain HTTPS file as an archive, made trustworthy by a `chiro://` pin
+
+**What prompted it.** A publication repository needed `dvc import-url` for its reference
+data: journal supplements, MSigDB release files, a lab website's workbook. None of these
+is in an archive; each is just an HTTPS URL. DVC's own `https://` filesystem imports
+them, and for most it works: a `--no-download` import records the ETag, and a fresh
+clone pulls the right bytes (MSigDB checked live against the paper's recorded md5). It
+fails in two ways that matter, both found live:
+
+- **No ETag, no pull.** Elsevier's CDN (`ars.els-cdn.com`) and the Weizmann 3CA site send
+  no `ETag`. DVC then records a numeric `checksum` that is not a content hash and that it
+  cannot reproduce, so `dvc pull` of the `--no-download` import fails with "missing
+  files", for good.
+- **An ETag is not a content digest.** Apache's (the Broad's MSigDB mirror) is
+  `size-mtime`, so a re-upload of identical bytes "changes" the file, and a host that
+  serves new bytes under an old validator is not caught at all. On pull, DVC compares the
+  validator, never the md5 the user recorded.
+
+**What I did.** A `web://` backend that is deliberately thin, plus the existing manifest
+machinery doing the work:
+
+- `web://<host>/<path>` is `https://<host>/<path>` byte for byte. The path is **not**
+  decoded or re-encoded, because publisher URLs carry `%3A`/`%2F` *inside* a segment
+  (`art%3A10.1038%2Fs41467-…`) and normalising them requests a different resource.
+  Plain `http` is refused.
+- **The host is the container**, the URL path the member. HTTP has no listing, so a file
+  is known once addressed, by one `HEAD`. A pin over a subtree
+  (`record_accession = <host>/<dir>`) is scoped by the base's prefix-based `relpath`,
+  exactly as a BIA subtree pin is.
+- **Checksums:** `md5` is `None` as a rule, with two exceptions that *are* defined as
+  body digests: `Content-MD5` and GCS's `x-goog-hash: md5=`. An ETag or `Last-Modified`
+  becomes `archive_version` (change detection), never a checksum.
+  `published_checksum=None`, `immutability_basis=None`: a URL can serve different bytes
+  tomorrow, so `version_aware` must never be enabled.
+- **Concept scheme `url:`**, the CURIE being the URL itself (`url:https://host/dir`). It
+  is the only tracker a bare file has, and it routes a `chiro://` pin back to `web://`.
+- **A browser-like User-Agent that names archivefs**, as for Mendeley (D44). The Weizmann
+  host resets any connection whose UA says `python-requests`.
+
+**Two small changes outside the backend.**
+
+1. `ArchiveFileSystem.expect_members(container, relpaths)`, a no-op everywhere else.
+   `chiro://` lists its delegate in the accession's frame before applying the manifest,
+   and `web://` has nothing to list, so every file of a `web` pin read as missing
+   upstream. `ChiroFileSystem` now announces the manifest's `source_path`s first, and
+   `web://` HEADs each one. Announced directories are never probed themselves: many
+   servers answer a directory URL with a 200 HTML index, which would be taken for a file.
+2. `build_manifest` (and so `archivefs manifest`) accepts a **single file** and pins it
+   under its parent. Before, a file URL gave a relpath of `""`. This is the natural unit
+   for `web://`, and it works the same for one file of a Zenodo record or GEO series.
+
+**Verified live.** For the three no-ETag workbooks (two Elsevier, one Weizmann):
+`archivefs manifest web://… --download` produced md5s identical to those the paper had
+recorded independently; `dvc import-url --no-download chiro://md5:…/<file>` wrote
+`deps.md5` from the manifest; a fresh clone with an empty cache and no DVC remote ran
+`dvc pull` and got all three, md5-identical.
+
+**Cost to change my mind / open items.** A `web://` pin is only as durable as the URL;
+the manifest detects drift but cannot recover the old bytes. That is the same limit as a
+GEO pin, and the reason a copy belongs in a remote for anything irreplaceable. Hosts
+that need cookies or a login are out of scope (`401`/`403` explain that rather than
+blaming a credential `web://` never sent). If DVC's `https://` gains content-digest
+pinning, the pull-side reason for this backend weakens; the verification reason does not.
