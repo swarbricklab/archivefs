@@ -7,6 +7,12 @@ tags by `setuptools-scm`.
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-11-12
+
+Reads your own unpublished Zenodo drafts, so a deposit's manifest and `chiro://` pins
+can be built and tested before publication. Also quiets two warnings that fired on
+every ordinary pull.
+
 ### Added
 
 - **`zenodo://` reads your own unpublished drafts.** Zenodo answers 404 for a draft at
@@ -123,7 +129,8 @@ First tagged release: the shared read-only base and the initial backends —
 accession/DOI and consumable through fsspec and DVC's `import-url`. `dbgap://` is
 registered but deferred.
 
-[Unreleased]: https://github.com/swarbricklab/archivefs/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/swarbricklab/archivefs/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/swarbricklab/archivefs/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/swarbricklab/archivefs/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/swarbricklab/archivefs/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/swarbricklab/archivefs/compare/v0.2.0...v0.3.0
