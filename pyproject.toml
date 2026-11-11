@@ -10,7 +10,7 @@ requires-python = ">=3.9"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "Swarbrick Lab" }]
-keywords = ["fsspec", "dvc", "reproducibility", "ega", "zenodo", "mendeley", "cbioportal", "geo", "provenance"]
+keywords = ["fsspec", "dvc", "reproducibility", "ega", "zenodo", "mendeley", "cbioportal", "geo", "https", "provenance"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Science/Research",
@@ -81,6 +81,7 @@ bia = "archivefs.backends.bia:BIAFileSystem"
 chiro = "archivefs.backends.chiro:ChiroFileSystem"
 dbgap = "archivefs.backends.dbgap:DbGaPFileSystem"
 cbioportal = "archivefs.backends.cbioportal:CBioPortalFileSystem"
+web = "archivefs.backends.web:WebFileSystem"
 
 [tool.setuptools_scm]
 version_scheme = "post-release"

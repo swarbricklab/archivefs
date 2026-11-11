@@ -31,7 +31,7 @@ A `chiro://` URL is **not** a raw fetch of each file's `source_url`. It:
 
 1. resolves the digest to a manifest (above), and verifies its bytes;
 2. reads its **`concept`** CURIE — `geo:GSE176078`, `biostudies:S-BIAD3080`,
-   `doi:10.5281/zenodo.…`, `ega:EGAD…` — and maps the scheme back to the backend that
+   `doi:10.5281/zenodo.…`, `ega:EGAD…`, `url:https://…` — and maps the scheme back to the backend that
    owns those bytes;
 3. lists that backend in the manifest's frame and reads through it.
 

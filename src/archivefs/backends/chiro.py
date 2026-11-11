@@ -37,6 +37,12 @@ from archivefs.registry import protocol_for_concept
 
 __all__ = ["ChiroFileSystem"]
 
+
+def _known_schemes() -> set[str]:
+    from archivefs.registry import PROTOCOLS
+
+    return {b.concept_scheme for b in PROTOCOLS.values() if b.concept_scheme}
+
 #: Storage options that mean something to *this* layer and must not be forwarded to
 #: the delegate backend as its own config.
 _OWN_OPTIONS = frozenset({"chiro"})
@@ -150,7 +156,8 @@ class ChiroFileSystem(ArchiveFileSystem):
         if routed is None:
             raise ManifestError(
                 f"{container} names concept {concept!r}, whose scheme belongs to no "
-                f"archivefs backend. Known schemes: doi, geo, biostudies, ega."
+                f"archivefs backend. Known schemes: "
+                f"{', '.join(sorted(_known_schemes()))}."
             )
         protocol, concept_accession = routed
         # Fetch through the **version-pinned** accession (`record_accession`), not the
@@ -189,6 +196,9 @@ class ChiroFileSystem(ArchiveFileSystem):
         # List in the accession's frame (records OR subtrees), then let the manifest
         # be the listing. `find` scopes to the subtree; `apply_manifest` matches each
         # entry's source against it and carries the delegate's fetch metadata across.
+        # A backend that cannot list (web://) learns the pinned files from the
+        # manifest itself; every other backend's hook is a no-op.
+        delegate.expect_members(accession, [entry.source for entry in manifest.files])
         native = delegate.find(accession, detail=True)
         resolved, _drift = apply_manifest(
             delegate, accession, native, container, manifest

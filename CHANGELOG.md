@@ -7,6 +7,25 @@ tags by `setuptools-scm`.
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-11-11
+
+Adds `web://`, so a file at a plain HTTPS URL (a journal supplement, a lab website, a
+release directory) can be pinned with a `.chiro` manifest and imported through
+`chiro://`. Backward-compatible: every `0.2.0` URL and `.dvc` import keeps working.
+
+### Added
+
+- **`web://`**: any file at a plain HTTPS URL (journal supplements, lab websites,
+  release directories) as an archive. No listing (a file is found by `HEAD`) and, as a
+  rule, no checksum, so it is meant to be pinned: `archivefs manifest web://… --download`,
+  then `dvc import-url --no-download chiro://md5:…/<file>`. Concept scheme `url:`.
+  Unlike DVC's own `https://`, a `--no-download` import of a server that sends no ETag
+  still pulls, and the bytes are verified against the pinned md5. See
+  `docs/decisions.md` D45.
+- `archivefs manifest` accepts a single file and pins it under its parent directory.
+- `ArchiveFileSystem.expect_members()`, the hook `chiro://` uses to announce a pin's files
+  to a backend that cannot list. A no-op for every backend except `web://`.
+
 ## [0.2.0] — 2026-10-26
 
 Adds four new access paths (`mendeley://`, `cbioportal://`, `chiro://`, and Chirograph
@@ -45,6 +64,7 @@ First tagged release: the shared read-only base and the initial backends —
 accession/DOI and consumable through fsspec and DVC's `import-url`. `dbgap://` is
 registered but deferred.
 
-[Unreleased]: https://github.com/swarbricklab/archivefs/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/swarbricklab/archivefs/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/swarbricklab/archivefs/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/swarbricklab/archivefs/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/swarbricklab/archivefs/releases/tag/v0.1.0
