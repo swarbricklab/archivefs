@@ -1837,6 +1837,7 @@ def test_a_manifest_built_from_the_draft_matches_the_published_one(
     fake_zenodo, monkeypatch
 ):
     """The point of reading a draft: pins made before publication stay valid after."""
+    pytest.importorskip("chirograph")  # not on Python 3.9
     from archivefs.writer import build_manifest
 
     def fields(manifest):
