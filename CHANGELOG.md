@@ -7,6 +7,37 @@ tags by `setuptools-scm`.
 
 ## [Unreleased]
 
+### Added
+
+- **`zenodo://` reads your own unpublished drafts.** Zenodo answers 404 for a draft at
+  `/records/<id>` and serves it, to its owner only, at `/records/<id>/draft`. With a
+  token, archivefs now falls back there, so a depositor can build the manifest and the
+  `chiro://` pins before publishing and pull them with their own token. A draft has no
+  concept DOI yet; archivefs fills in the one Zenodo mints at publication
+  (`10.5281/zenodo.<conceptrecid>`), so a manifest built from the draft lists the same
+  record, concept and files as one built afterwards. A warning says the record is a
+  draft, and `info()` carries `draft: true`. Without a token the 404 stands, with a
+  hint that the record may be your draft.
+
+### Fixed
+
+- **A `chiro://` pin of one file warned about every other file in its record.**
+  Pinning a single file of a multi-file Zenodo record (the natural unit for a file
+  imported on its own) logged `chiro drift … N deposit file(s) not in the manifest` on
+  every pull. A pin reads only the files it lists, so the record's other files are no
+  longer counted as its drift. A listed file that goes missing, or whose size or
+  checksum changes, still warns, and `archivefs confirm` still names files the
+  manifest does not list. A manifest shipped inside a deposit, which claims to
+  describe all of it, still reports them as drift.
+- **Every DVC pull in a repository under the home directory warned about the block
+  cache**, as `ARCHIVEFS_CACHE_DIR=… is inside your home directory`, though nobody had
+  set that variable. Under DVC the cache defaults to a directory beside the
+  repository's DVC cache, and on a laptop that is always under `$HOME`. That default
+  follows a location the user chose for their DVC cache, so it no longer warns. A
+  location someone sets explicitly under the home directory still does, and the
+  warning now names what set it: `cache_dir=`, `$ARCHIVEFS_CACHE_DIR` or the archivefs
+  config (likewise for `scratch_dir`).
+
 ## [0.3.2] — 2026-11-11
 
 Fixes `web://` against hosts that compress responses on the fly. Upgrade, and rebuild

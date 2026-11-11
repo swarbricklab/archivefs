@@ -174,3 +174,36 @@ def test_an_unknown_concept_scheme_is_refused(tmp_path, geo):
     fs = ChiroFileSystem(skip_instance_cache=True)
     with pytest.raises(ManifestError, match="no archivefs backend"):
         fs.ls(f"{path}")
+
+
+def test_a_one_file_pin_does_not_call_the_records_other_files_drift(
+    zenodo, tmp_path, caplog
+):
+    """Pinning one file of a multi-file record is the natural unit for a file imported
+    on its own. Its siblings are not the pin's concern, and must not warn on every
+    pull."""
+    src = ZenodoFileSystem(skip_instance_cache=True)
+    manifest = build_manifest(src, f"{RECID}/samples.csv")
+    assert [entry.relpath for entry in manifest.files] == ["samples.csv"]
+    path = tmp_path / "one.chiro.json"
+    path.write_text(chirograph.dumps(manifest))
+
+    fs = ChiroFileSystem(skip_instance_cache=True)
+    with caplog.at_level("WARNING"):
+        assert fs.cat_file(f"{path}/samples.csv") == CSV_BYTES
+    assert "drift" not in caplog.text
+
+
+def test_a_pin_still_warns_when_its_own_file_changes(zenodo, tmp_path, caplog):
+    src = ZenodoFileSystem(skip_instance_cache=True)
+    manifest = build_manifest(src, f"{RECID}/samples.csv")
+    path = tmp_path / "one.chiro.json"
+    path.write_text(chirograph.dumps(manifest))
+    entry = next(f for f in zenodo.record["files"] if f["key"] == "samples.csv")
+    entry["checksum"] = "md5:" + "0" * 32
+
+    fs = ChiroFileSystem(skip_instance_cache=True)
+    with caplog.at_level("WARNING"):
+        fs.info(f"{path}/samples.csv")
+    assert "1 checksum mismatch" in caplog.text
+    assert "not in the manifest" not in caplog.text

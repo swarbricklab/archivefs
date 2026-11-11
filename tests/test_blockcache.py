@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from pathlib import Path
 
 import pytest
 
@@ -376,7 +377,26 @@ def test_entries_report_what_is_on_disk_not_what_the_hole_claims(root):
     assert entry["protocol"] == "zenodo"
     assert entry["size"] == 1 << 20
     assert entry["cached"] == 2 << 16
-    assert entry["on_disk"] < entry["size"]
+    # What is reported is the allocation, `st_blocks`, never the apparent size...
+    (data,) = root.rglob(f"*{blockcache.DATA_SUFFIX}")
+    assert entry["on_disk"] == data.stat().st_blocks * 512
+    # ...which is smaller than the file wherever the filesystem leaves holes. Not
+    # every one does: APFS allocated all of a 1 MiB file written this way (macOS 26),
+    # so there the two coincide and only the line above can be checked.
+    if _makes_sparse_files(root):
+        assert entry["on_disk"] < entry["size"]
+
+
+def _makes_sparse_files(directory) -> bool:
+    """Whether a file with a hole occupies less than its size in ``directory``."""
+    probe = directory / "sparse-probe"
+    with open(probe, "wb") as handle:
+        handle.seek((1 << 20) - 1)
+        handle.write(b"\0")
+    try:
+        return probe.stat().st_blocks * 512 < probe.stat().st_size
+    finally:
+        probe.unlink()
 
 
 def test_an_index_claiming_blocks_past_the_end_is_rejected(root):
@@ -470,14 +490,31 @@ def test_the_ephemeral_file_lands_in_the_scratch_directory(tmp_path):
 
 
 def _open_inodes() -> set[str]:
+    """The paths behind this process's open descriptors, unlinked files included.
+
+    Linux names them as links in ``/proc/self/fd``. macOS has no ``/proc``, but
+    ``fcntl(F_GETPATH)`` answers for each descriptor in ``/dev/fd`` — and still gives
+    the path of a file unlinked at creation, which is what this needs.
+    """
+    import fcntl
     import os as _os
 
     found = set()
-    for entry in _os.listdir("/proc/self/fd"):
+    if _os.path.isdir("/proc/self/fd"):
+        for entry in _os.listdir("/proc/self/fd"):
+            try:
+                found.add(_os.readlink(f"/proc/self/fd/{entry}"))
+            except OSError:
+                continue
+        return found
+    if not hasattr(fcntl, "F_GETPATH"):
+        pytest.skip("no way to name an open descriptor on this platform")
+    for entry in _os.listdir("/dev/fd"):
         try:
-            found.add(_os.readlink(f"/proc/self/fd/{entry}"))
-        except OSError:
+            raw = fcntl.fcntl(int(entry), fcntl.F_GETPATH, bytes(1024))
+        except (OSError, ValueError):
             continue
+        found.add(raw.split(b"\0", 1)[0].decode(errors="replace"))
     return found
 
 
@@ -516,3 +553,39 @@ def test_xdg_cache_home_does_not_enable_the_cache(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     assert blockcache.cache_root() is None
     assert blockcache.cache_root(configured=str(tmp_path / "asked-for")) is not None
+
+
+def test_the_source_of_the_cache_location_is_reported(tmp_path, monkeypatch):
+    monkeypatch.delenv(blockcache.CACHE_DIR_ENV, raising=False)
+    where = str(tmp_path / "c")
+    assert blockcache.cache_root_and_source(explicit=where)[1] == "cache_dir="
+    assert blockcache.cache_root_and_source(configured=where)[1] == (
+        "cache_dir in the archivefs config"
+    )
+    assert blockcache.cache_root_and_source(fallback=where) == (Path(where), None)
+    assert blockcache.cache_root_and_source() == (None, None)
+    monkeypatch.setenv(blockcache.CACHE_DIR_ENV, where)
+    assert blockcache.cache_root_and_source(fallback=where)[1] == (
+        f"${blockcache.CACHE_DIR_ENV}"
+    )
+
+
+def test_a_default_location_under_home_does_not_warn(tmp_path, monkeypatch, caplog):
+    """The DVC default sits beside the repository's DVC cache, wherever the user put
+    it. On a laptop that is under the home directory like everything else, and a
+    warning naming a variable nobody set, with advice about /scratch, is noise on
+    every pull."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    blockcache._warned.clear()
+    with caplog.at_level("WARNING"):
+        assert blockcache.prepare(tmp_path / "c", identity(), source=None) is not None
+    assert "home directory" not in caplog.text
+
+
+def test_the_home_warning_names_what_set_the_location(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    blockcache._warned.clear()
+    with caplog.at_level("WARNING"):
+        blockcache.prepare(tmp_path / "c", identity(), source="cache_dir=")
+    assert "cache_dir= puts archivefs's block cache at" in caplog.text
+    assert "ARCHIVEFS_CACHE_DIR" not in caplog.text

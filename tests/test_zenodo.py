@@ -1766,3 +1766,168 @@ def test_one_command_can_still_opt_out_of_a_configured_cache(fake_zenodo, layere
     handle = fs._open_container(ZIP, cache_type="mmap")
     assert handle.cache.location is None
     assert handle.cache.index is None
+
+
+# ------------------------------------------------------------------ drafts
+
+
+def draft_json() -> dict:
+    """The record as Zenodo serves it before publication, at `/records/<id>/draft`.
+
+    Measured on a real draft (2026-11-12): the published shape, except that there is
+    no ``conceptdoi`` (Zenodo mints it at publication) and file links point under
+    ``/draft/files/``.
+    """
+    record = record_json()
+    record.pop("conceptdoi", None)
+    record["status"] = "draft"
+    for entry in record["files"]:
+        entry["links"] = {
+            "self": f"https://zenodo.org/api/records/{RECID}/draft/files/"
+            f"{entry['key']}/content"
+        }
+    return record
+
+
+@pytest.fixture
+def fake_draft(fake_zenodo, monkeypatch):
+    """Record RECID is an unpublished draft that only an owner's token can see."""
+    draft = draft_json()
+    published = fake_zenodo.__call__
+
+    def serve(method, url, headers, kwargs):
+        if url.endswith(f"/records/{RECID}"):
+            return FakeResponse(404, json={"status": 404, "message": "not found"})
+        if url.endswith(f"/records/{RECID}/draft"):
+            if headers.get("Authorization") != "Bearer owner":
+                return FakeResponse(404, json={"status": 404, "message": "not found"})
+            return FakeResponse(200, json=draft)
+        if "/draft/files/" in url and headers.get("Authorization") != "Bearer owner":
+            return FakeResponse(404, json={"status": 404, "message": "not found"})
+        return published(method, url, headers, kwargs)
+
+    monkeypatch.setattr(base_mod, "requests", FakeRequestsModule(serve))
+    return fake_zenodo
+
+
+def test_an_owner_reads_their_unpublished_draft(fake_draft, monkeypatch):
+    monkeypatch.setenv("ZENODO_TOKEN", "owner")
+    fs = ZenodoFileSystem(skip_instance_cache=True)
+    assert sorted(fs.ls(RECID, detail=False)) == [
+        f"{RECID}/archive.zip",
+        f"{RECID}/samples.csv",
+    ]
+    info = fs.info(f"{RECID}/samples.csv")
+    assert info["md5"] == hashlib.md5(CSV_BYTES).hexdigest()  # noqa: S324
+    assert info["zenodo"]["draft"] is True
+    assert "/draft/files/" in info["url"]
+    assert fs.cat_file(f"{RECID}/samples.csv") == CSV_BYTES
+
+
+def test_a_draft_gets_the_concept_doi_zenodo_will_mint(fake_draft, monkeypatch):
+    """Without it, concept() would fall back to the *version* DOI, and a manifest
+    built before publication would name the wrong concept."""
+    monkeypatch.setenv("ZENODO_TOKEN", "owner")
+    fs = ZenodoFileSystem(skip_instance_cache=True)
+    assert fs.concept(RECID) == f"doi:{CONCEPT_DOI}"
+    assert fs.version_accession(RECID) == RECID
+
+
+def test_a_manifest_built_from_the_draft_matches_the_published_one(
+    fake_zenodo, monkeypatch
+):
+    """The point of reading a draft: pins made before publication stay valid after."""
+    from archivefs.writer import build_manifest
+
+    def fields(manifest):
+        return (
+            manifest.record_accession,
+            manifest.concept,
+            [(f.relpath, f.md5, f.size, f.version_id) for f in manifest.files],
+        )
+
+    published = fields(
+        build_manifest(
+            ZenodoFileSystem(skip_instance_cache=True), RECID, self_deposited=True
+        )
+    )
+    draft = draft_json()
+
+    def serve(method, url, headers, kwargs):
+        if url.endswith(f"/records/{RECID}"):
+            return FakeResponse(404, json={"status": 404, "message": "not found"})
+        if url.endswith(f"/records/{RECID}/draft"):
+            return FakeResponse(200, json=draft)
+        return fake_zenodo(method, url, headers, kwargs)
+
+    monkeypatch.setattr(base_mod, "requests", FakeRequestsModule(serve))
+    monkeypatch.setenv("ZENODO_TOKEN", "owner")
+    before = fields(
+        build_manifest(
+            ZenodoFileSystem(skip_instance_cache=True), RECID, self_deposited=True
+        )
+    )
+    assert before == published
+
+
+def test_without_a_token_a_draft_is_not_found_with_a_hint(fake_draft):
+    fs = ZenodoFileSystem(skip_instance_cache=True)
+    with pytest.raises(ArchiveNotFoundError) as exc:
+        fs.ls(RECID)
+    message = str(exc.value)
+    assert "unpublished draft" in message
+    assert "ZENODO_TOKEN" in message
+
+
+def test_someone_elses_draft_stays_not_found(fake_draft, monkeypatch):
+    """A token that does not own the draft gets the original 404, not a draft error."""
+    monkeypatch.setenv("ZENODO_TOKEN", "stranger")
+    fs = ZenodoFileSystem(skip_instance_cache=True)
+    with pytest.raises(ArchiveNotFoundError) as exc:
+        fs.ls(RECID)
+    assert f"/records/{RECID}" in str(exc.value)
+    assert "draft" not in str(exc.value).lower()
+
+
+def test_a_published_record_never_touches_the_draft_endpoint(fake_zenodo, monkeypatch):
+    seen = []
+
+    def serve(method, url, headers, kwargs):
+        seen.append(url)
+        return fake_zenodo(method, url, headers, kwargs)
+
+    monkeypatch.setattr(base_mod, "requests", FakeRequestsModule(serve))
+    monkeypatch.setenv("ZENODO_TOKEN", "owner")
+    fs = ZenodoFileSystem(skip_instance_cache=True)
+    assert fs.ls(RECID, detail=False)
+    assert fs.info(f"{RECID}/samples.csv")["zenodo"]["draft"] is False
+    assert not any("/draft" in url for url in seen)
+
+
+def test_a_dvc_default_cache_under_home_opens_quietly(
+    fake_zenodo, tmp_path, monkeypatch, caplog
+):
+    """End to end: the default DVC hands in is used, and it does not warn."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("ARCHIVEFS_CACHE_DIR", raising=False)
+    blockcache._warned.clear()
+    beside_dvc = tmp_path / "repo" / ".dvc" / "cache" / "archivefs"
+    fs = ZenodoFileSystem(
+        extract_zips=True,
+        cache_dir_default=str(beside_dvc),
+        skip_instance_cache=True,
+    )
+    with caplog.at_level("WARNING"):
+        handle = fs._open_container(ZIP, cache_type="mmap")
+    assert str(beside_dvc) in handle.cache.location
+    handle.cache.release()
+    assert "home directory" not in caplog.text
+
+    blockcache._warned.clear()
+    fs = ZenodoFileSystem(
+        extract_zips=True, cache_dir=str(tmp_path / "mine"), skip_instance_cache=True
+    )
+    with caplog.at_level("WARNING"):
+        handle = fs._open_container(ZIP, cache_type="mmap")
+    handle.cache.release()
+    assert "cache_dir= puts archivefs's block cache" in caplog.text

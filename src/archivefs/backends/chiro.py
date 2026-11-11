@@ -200,8 +200,9 @@ class ChiroFileSystem(ArchiveFileSystem):
         # manifest itself; every other backend's hook is a no-op.
         delegate.expect_members(accession, [entry.source for entry in manifest.files])
         native = delegate.find(accession, detail=True)
+        # A pin reads only what it lists, so the record's other files are not drift.
         resolved, _drift = apply_manifest(
-            delegate, accession, native, container, manifest
+            delegate, accession, native, container, manifest, unrecorded_is_drift=False
         )
         members: dict[str, dict] = {}
         for dpath, info in resolved.items():

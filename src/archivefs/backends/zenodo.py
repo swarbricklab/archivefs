@@ -125,9 +125,10 @@ class ZenodoFileSystem(ArchiveFileSystem):
     Parameters
     ----------
     token:
-        Personal access token, needed only for restricted or embargoed records;
-        public records — the common case — work anonymously. Resolved from
-        ``storage_options`` then ``$ZENODO_TOKEN``.
+        Personal access token, needed only for restricted or embargoed records and
+        for reading your own unpublished drafts; public records — the common case —
+        work anonymously. Resolved from ``$ZENODO_TOKEN`` then
+        ``~/.config/archivefs/zenodo.json``.
     api_url:
         Override for the sandbox or a self-hosted InvenioRDM.
     extract_zips:
@@ -166,7 +167,7 @@ class ZenodoFileSystem(ArchiveFileSystem):
             required=False,
             help=(
                 "a Zenodo personal access token, needed only for restricted or "
-                "embargoed records"
+                "embargoed records and your own unpublished drafts"
             ),
         )
     ]
@@ -313,9 +314,57 @@ class ZenodoFileSystem(ArchiveFileSystem):
 
         # A concept id/DOI answers with a redirect to the latest version, which
         # requests follows; the payload then tells us which version we got.
-        record = self._get_json(f"{self.api_url}/records/{recid}")
+        try:
+            record = self._get_json(f"{self.api_url}/records/{recid}")
+        except ArchiveNotFoundError as missing:
+            record = self._resolve_draft(recid, missing)
         self._records[spec] = record
         self._records[str(record.get("id", recid))] = record
+        return record
+
+    def _resolve_draft(self, recid: str, missing: ArchiveNotFoundError) -> dict:
+        """Read an unpublished draft, which only its owner's token can see.
+
+        Zenodo answers 404 for a record that is still a draft: it is served at
+        ``/records/<id>/draft`` instead, to the owner alone. Falling back there lets a
+        depositor build the manifest and the ``chiro://`` pins *before* publishing,
+        and test them with their own token. Anonymously there is no draft to find, so
+        the original 404 stands, with a hint in case the record is yours.
+
+        The draft's JSON has the published record's shape except for one field:
+        Zenodo mints the concept DOI at publication, so a draft carries only
+        ``conceptrecid``. On Zenodo the concept DOI is always the version DOI's prefix
+        with that id — ``10.5281/zenodo.<conceptrecid>`` — so it is filled in here.
+        That keeps ``concept()`` from falling back to the version DOI, and makes a
+        manifest built from the draft identical to one built after publication: the
+        record id, the version DOI and every file's md5 carry over unchanged.
+
+        A draft is mutable — files can still be added, replaced or removed — so the
+        md5s pin the bytes, but the listing may change until publication.
+        """
+        if not self.token:
+            raise ArchiveNotFoundError(
+                f"{missing} If this is your own unpublished draft, archivefs can read "
+                f"it with your Zenodo token: put it in $ZENODO_TOKEN or in "
+                f"~/.config/archivefs/zenodo.json (mode 0600)."
+            ) from missing
+        try:
+            record = self._get_json(f"{self.api_url}/records/{recid}/draft")
+        except ArchiveNotFoundError:
+            raise missing from None
+        record = dict(record)
+        match = DOI_RE.match(record.get("doi") or "")
+        concept_recid = record.get("conceptrecid")
+        if not record.get("conceptdoi") and match and concept_recid:
+            record["conceptdoi"] = f"{match.group('prefix')}/zenodo.{concept_recid}"
+        record["draft"] = True
+        logger.warning(
+            "Zenodo record %s is an unpublished draft, read with the token from %s. "
+            "Only you can fetch it until it is published, and its files may still "
+            "change.",
+            recid,
+            self.token_source,
+        )
         return record
 
     def _record_provenance(self, record: dict, requested: str | None = None) -> dict:
@@ -335,6 +384,8 @@ class ZenodoFileSystem(ArchiveFileSystem):
             "updated": record.get("updated"),
             "access_right": (record.get("metadata") or {}).get("access_right"),
             "title": record.get("title"),
+            # An unpublished draft read with the owner's token (`_resolve_draft`).
+            "draft": bool(record.get("draft")),
             # True when the URL named a concept and we resolved it to a specific
             # version: the caller asked for "latest", so `dvc update` is expected
             # to move, and the .dvc should record which version it actually took.
