@@ -6,7 +6,7 @@
 {#   * `sha256`  — the sha256 of the PyPI *sdist* (`.tar.gz`); grayskull or the   #}
 {#      PyPI "Download files" page gives it. The 64 zeros below are a placeholder. #}
 {% set name = "archivefs" %}
-{% set version = "0.3.0" %}
+{% set version = "0.3.1" %}
 
 package:
   name: {{ name|lower }}

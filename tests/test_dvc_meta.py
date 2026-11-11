@@ -45,7 +45,16 @@ def _bia_manifest():
     )
 
 
-def _write_pin(tmp_path, manifest, out="data"):
+def _web_manifest():
+    return chirograph.Manifest(
+        files=[chirograph.FileEntry(relpath="mmc4.xlsx", md5=M, size=1)],
+        concept="url:https://ars.example.org/content/image",
+        record_accession="ars.example.org/content/image",
+        generator="test",
+    )
+
+
+def _write_pin(tmp_path, manifest, out="data", member=None):
     """A `chiro://md5:` .dvc beside a store holding `manifest`."""
     (tmp_path / ".chirograph").mkdir(exist_ok=True)
     _dest, ref = store.write_to_store(manifest, start=tmp_path)
@@ -55,7 +64,12 @@ def _write_pin(tmp_path, manifest, out="data"):
             {
                 "md5": "0" * 32,
                 "frozen": True,
-                "deps": [{"hash": "md5", "path": str(ref)}],
+                "deps": [
+                    {
+                        "hash": "md5",
+                        "path": f"{ref}/{member}" if member else str(ref),
+                    }
+                ],
                 "outs": [{"hash": "md5", "path": out}],
             },
             sort_keys=False,
@@ -87,6 +101,21 @@ def test_bia_provenance_fields():
     assert meta["url"] == "https://www.ebi.ac.uk/biostudies/studies/S-BIAD1"
     assert meta["source"] == "bia://S-BIAD1/images/ihc"
     assert "container" not in meta  # loose files, no container
+
+
+def test_web_provenance_fields():
+    meta = provenance_meta(_web_manifest())["archivefs"]
+    assert meta["archive"] == "web"
+    assert meta["url"] == "https://ars.example.org/content/image"
+    assert meta["source"] == "web://ars.example.org/content/image"
+    assert "file" not in meta
+
+
+def test_web_provenance_for_one_file_points_at_the_file():
+    meta = provenance_meta(_web_manifest(), "mmc4.xlsx")["archivefs"]
+    assert meta["url"] == "https://ars.example.org/content/image/mmc4.xlsx"
+    assert meta["source"] == "web://ars.example.org/content/image/mmc4.xlsx"
+    assert meta["file"] == "mmc4.xlsx"
 
 
 # ----------------------------------------------------------------- stamp
@@ -121,6 +150,28 @@ def test_stamp_is_idempotent_and_preserves_user_meta(tmp_path):
     assert first == second                        # idempotent
     assert second["meta"]["owner"] == "someone"   # user key kept
     assert second["meta"]["archivefs"]["archive"] == "zenodo"
+
+
+def test_stamp_a_single_file_pin(tmp_path):
+    dvc = _write_pin(tmp_path, _web_manifest(), out="mmc4.xlsx", member="mmc4.xlsx")
+    stamp(dvc)
+    meta = yaml.safe_load(dvc.read_text())["meta"]["archivefs"]
+    assert meta["archive"] == "web"
+    assert meta["file"] == "mmc4.xlsx"
+    assert meta["url"] == "https://ars.example.org/content/image/mmc4.xlsx"
+
+
+def test_stamp_a_member_of_a_zenodo_pin(tmp_path):
+    dvc = _write_pin(tmp_path, _zenodo_manifest(), member="archive.zip/x.csv")
+    meta = stamp(dvc)["archivefs"]
+    assert meta["file"] == "archive.zip/x.csv"
+    assert meta["record"] == "10.5281/zenodo.1000"
+
+
+def test_stamp_rejects_a_member_not_in_the_manifest(tmp_path):
+    dvc = _write_pin(tmp_path, _web_manifest(), member="other.xlsx")
+    with pytest.raises(ManifestError, match="not a file in its manifest"):
+        stamp(dvc)
 
 
 def test_stamp_rejects_a_non_chiro_dep(tmp_path):
