@@ -10,6 +10,7 @@ percent-encoded path segments that must reach the server untouched (Springer).
 from __future__ import annotations
 
 import base64
+import gzip
 import hashlib
 
 import pytest
@@ -51,6 +52,9 @@ class FakeWeb:
         self.extra_headers: dict[str, dict] = {}
         self.forbidden: set[str] = set()
         self.requests_made: list[tuple[str, str, dict]] = []
+        #: Compress on the fly unless the client asks for identity, as GitHub raw and
+        #: the Broad's MSigDB mirror do; HEAD then reports the gzip length.
+        self.gzip_unless_identity = False
 
     def __call__(self, method: str, url: str, headers: dict, kwargs: dict):
         self.requests_made.append((method, url, headers))
@@ -64,6 +68,15 @@ class FakeWeb:
         if body is None:
             return FakeResponse(404, b"not found")
         extra = self.extra_headers.get(path, {})
+        if self.gzip_unless_identity and headers.get("Accept-Encoding") != "identity":
+            packed = gzip.compress(body)
+            if method == "HEAD":
+                return FakeResponse(
+                    200,
+                    b"",
+                    {"Content-Encoding": "gzip", "Content-Length": str(len(packed))},
+                )
+            return FakeResponse(200, body, {"Content-Encoding": "gzip", **extra})
         if method == "HEAD":
             head = dict(extra)
             if self.send_length_on_head:
@@ -138,6 +151,37 @@ def test_sends_the_identifying_browser_like_user_agent(fs, server):
     _, _, headers = server.requests_made[0]
     assert headers["User-Agent"] == USER_AGENT
     assert "archivefs" in USER_AGENT and USER_AGENT.startswith("Mozilla/5.0")
+
+
+def test_asks_for_the_files_own_bytes_not_a_compressed_rendering(fs, server):
+    server.gzip_unless_identity = True
+    body = BODIES["/content/supp/notes.txt"]
+    assert fs.info(f"{DIR}/notes.txt")["size"] == len(body)
+    _, _, headers = server.requests_made[0]
+    assert headers["Accept-Encoding"] == "identity"
+
+
+def test_a_length_of_an_encoded_response_is_not_the_files_size(fs, server):
+    # A server that compresses regardless of what was asked for.
+    body = BODIES["/content/supp/notes.txt"]
+    server.extra_headers["/content/supp/notes.txt"] = {"Content-Encoding": "gzip"}
+    server.send_length_on_head = True
+    info = fs.info(f"{DIR}/notes.txt")
+    # Not the HEAD length (that was taken as encoded): resolved by a range instead.
+    assert info["size"] == len(body)
+    assert server.requests_made[-1][2].get("Range") == "bytes=0-0"
+
+
+def test_capture_hashes_the_whole_file_when_the_host_compresses(server):
+    from archivefs.writer import build_manifest
+
+    pytest.importorskip("chirograph")
+    server.gzip_unless_identity = True
+    fs = WebFileSystem(skip_instance_cache=True)
+    manifest = build_manifest(fs, f"{DIR}/notes.txt", download=True)
+    (entry,) = manifest.files
+    body = BODIES["/content/supp/notes.txt"]
+    assert (entry.md5, entry.size) == (md5(body), len(body))
 
 
 def test_an_etag_is_a_version_never_a_checksum(fs, server):

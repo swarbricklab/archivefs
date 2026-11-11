@@ -42,6 +42,15 @@ used when present: ``Content-MD5`` (RFC 1864) and Google Cloud Storage's
 ``x-goog-hash: md5=…``. An ETag is recorded as ``archive_version`` (change detection),
 never as a checksum.
 
+Content encoding
+----------------
+The session asks for ``Accept-Encoding: identity``. Left to ``requests``' default
+(``gzip, deflate``) many hosts compress text on the fly (GitHub raw, the Broad's MSigDB
+mirror), and then every byte count describes the *compressed* response: ``HEAD``'s
+``Content-Length`` is the gzip size, or is dropped altogether, and a ``Range`` is
+ignored or applies to the gzip stream. A pin is of the file's own bytes, so archivefs
+only ever asks for those, and a size from a response that is encoded anyway is not used.
+
 User-Agent
 ----------
 Some hosts refuse the ``python-requests`` default outright (the Weizmann 3CA site
@@ -99,6 +108,12 @@ def _md5_from_headers(headers: Any) -> str | None:
     return None
 
 
+def _is_encoded(headers: Any) -> bool:
+    """Whether a response's body is a content-coded rendering (gzip, br, …)."""
+    encoding = (headers.get("Content-Encoding") or "").strip().lower()
+    return encoding not in ("", "identity")
+
+
 class WebFileSystem(ArchiveFileSystem):
     """Read-only fsspec filesystem over individual files at HTTPS URLs.
 
@@ -113,6 +128,9 @@ class WebFileSystem(ArchiveFileSystem):
     def _make_session(self) -> Any:
         session = super()._make_session()
         session.headers["User-Agent"] = USER_AGENT
+        # The file's own bytes, never a compressed rendering of them: see the module
+        # docstring. Sizes, ranges and the hash a manifest records all depend on it.
+        session.headers["Accept-Encoding"] = "identity"
         return session
 
     # ------------------------------------------------------------------- paths
@@ -178,6 +196,9 @@ class WebFileSystem(ArchiveFileSystem):
             return None
         headers = response.headers
         length = headers.get("Content-Length", "")
+        if _is_encoded(headers):
+            # A length of the compressed response, not of the file.
+            length = ""
         md5 = _md5_from_headers(headers)
         etag = headers.get("ETag")
         modified = headers.get("Last-Modified")
@@ -265,7 +286,10 @@ class WebFileSystem(ArchiveFileSystem):
             "GET", info["url"], headers={"Range": "bytes=0-0"}, stream=True
         )
         try:
-            total = self._range_total(response)
+            # Content-Range of an encoded response counts encoded bytes.
+            total = (
+                None if _is_encoded(response.headers) else self._range_total(response)
+            )
         finally:
             response.close()
         if total is None:
