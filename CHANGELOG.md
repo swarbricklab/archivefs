@@ -7,6 +7,10 @@ tags by `setuptools-scm`.
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-11-11
+
+Fixes `archivefs dvc-meta` for single-file pins and `web://` pins. No API changes.
+
 ### Fixed
 
 - **`archivefs dvc-meta`** now stamps a pin of one file (`chiro://md5:<digest>/<relpath>`)
@@ -72,7 +76,8 @@ First tagged release: the shared read-only base and the initial backends —
 accession/DOI and consumable through fsspec and DVC's `import-url`. `dbgap://` is
 registered but deferred.
 
-[Unreleased]: https://github.com/swarbricklab/archivefs/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/swarbricklab/archivefs/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/swarbricklab/archivefs/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/swarbricklab/archivefs/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/swarbricklab/archivefs/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/swarbricklab/archivefs/releases/tag/v0.1.0
