@@ -3,7 +3,7 @@
 **Does the live deposit still match this `.chiro` manifest? — download-free for a ZIP.**
 
 ```
-archivefs confirm [-o KEY=VALUE]… [--download] TARGET
+archivefs confirm [-o KEY=VALUE]… [--download] [--strict] TARGET
 ```
 
 `TARGET` is a [`chiro://md5:<digest>`](chiro-protocol.md) reference (or a path to a
@@ -30,6 +30,13 @@ that cross-checks it anyway, as cheaply as the container format allows.
 
 3. For a **loose** file (under no container) it compares the archive's published md5 where
    there is one — download-free — else size, or a real read under `--download`.
+4. Reports deposit files the manifest does not list (`unrecorded`). By default only those
+   under a container the manifest declares count, because a manifest may pin *part* of a
+   deposit — one ZIP of several, or one file of a record — and the rest is not its
+   concern. **`--strict`** counts every unlisted file, loose ones included, so the check
+   becomes "does the deposit hold exactly the manifest's files?" It uses the listing
+   already fetched, so it is still download-free and makes no extra request. A
+   `.chiro.json` in the deposit is exempt, since a manifest never lists itself.
 
 The value split is deliberate: `crc32` is weak on its own, but here it is *anchored* — the
 container's md5 authenticates the whole ZIP (so its central directory, and the `crc32`s in
@@ -60,6 +67,15 @@ chiro://md5:b3150a…: deposit 1486184 DIFFERS from the manifest — 1 matched, 
   crc32      github-mark.zip/github-mark.svg [crc32] — manifest b8576d45 vs deposit 0af31c22
 ```
 
+With `--strict`, a stray or leftover upload fails the check:
+
+```console
+$ archivefs confirm --strict chiro://md5:e529bf…
+chiro://md5:e529bf…: deposit 23938551 DIFFERS from the manifest — 1 matched, 14 unrecorded
+  unrecorded 3563_2D_Xe5k.h5ad (in the deposit, not the manifest)
+  …
+```
+
 A clean member is not printed — the report is scoped to what needs attention (`crc32` /
 `size` / `md5` mismatches, `missing` promised members, `unrecorded` extras). A `size-only`
 line means the format offered no cheap content check and `--download` was not given.
@@ -69,8 +85,12 @@ line means the format offered no cheap content check and `--download` was not gi
 | code | when |
 |---|---|
 | 0 | the deposit matches the manifest |
-| 1 | a container md5, member, or file set differs |
+| 1 | a container md5, member, or file set differs (with `--strict`, including any deposit file the manifest does not list) |
 | 2 | not a manifest, no `concept` to route on, or an archive-level failure |
+
+For a self-deposited record, `chirograph validate && archivefs confirm --strict` is a
+complete, download-free gate: the manifest is well formed, and the record holds exactly its
+files with matching checksums, before publication (a draft, read with your token) and after.
 
 ## Limitations
 

@@ -451,7 +451,10 @@ def cmd_confirm(args: argparse.Namespace) -> int:
 
     _chirograph()  # MissingExtraError names the install, not a traceback
     report = confirm(
-        args.target, _parse_options(args.option), download=args.download
+        args.target,
+        _parse_options(args.option),
+        download=args.download,
+        strict=args.strict,
     )
     print(report.summary())
     for container in report.containers:
@@ -1081,6 +1084,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--download",
         action="store_true",
         help="read and hash bytes where no cheap check exists (tar.gz, unchecksummed)",
+    )
+    confirm.add_argument(
+        "--strict",
+        action="store_true",
+        help=(
+            "also fail on deposit files the manifest does not list, loose files "
+            "included: the deposit must hold exactly the manifest's files. Without it, "
+            "only unlisted members of a declared container are reported, since a "
+            "manifest may pin part of a deposit. Uses the same listing, so it is still "
+            "download-free"
+        ),
     )
     add_common(confirm)
     confirm.set_defaults(func=cmd_confirm)
