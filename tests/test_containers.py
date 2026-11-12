@@ -289,3 +289,85 @@ def test_chiro_url_reads_a_relocated_manifest(zip_subtree_manifest, zenodo):
         interior = next(iter(ZIP_CRCS))
         expected = zf.read(interior)
     assert fs.cat_file(f"{path}/{interior}") == expected
+
+
+# ------------------------------------------------------------ confirm --strict
+
+
+@pytest.fixture
+def one_file_manifest(zenodo, tmp_path):
+    """A manifest pinning only `samples.csv` of a record that also holds a ZIP."""
+    fs = ZenodoFileSystem(skip_instance_cache=True)
+    manifest = build_manifest(fs, f"{RECID}/samples.csv", self_deposited=True)
+    assert [entry.relpath for entry in manifest.files] == ["samples.csv"]
+    path = tmp_path / "one.chiro.json"
+    path.write_text(chirograph.dumps(manifest))
+    return path
+
+
+def test_confirm_ignores_loose_files_a_partial_manifest_does_not_list(
+    one_file_manifest,
+):
+    """By default a manifest may pin part of a deposit, so its siblings pass."""
+    from archivefs.confirm import confirm
+
+    report = confirm(str(one_file_manifest))
+    assert report.ok
+    assert report.unrecorded == []
+
+
+def test_confirm_strict_reports_loose_files_the_manifest_does_not_list(
+    one_file_manifest,
+):
+    """Issue #60: a stray or leftover upload must not pass a strict check."""
+    from archivefs.confirm import confirm
+
+    report = confirm(str(one_file_manifest), strict=True)
+    assert not report.ok
+    assert report.unrecorded == ["archive.zip"]
+    assert "1 unrecorded" in report.summary()
+    assert [m.status for m in report.members] == ["matched"]
+
+
+def test_confirm_strict_passes_a_manifest_of_the_whole_deposit(
+    container_manifest, zenodo
+):
+    from archivefs.confirm import confirm
+
+    _, path = container_manifest
+    report = confirm(str(path), strict=True)
+    assert report.ok, report.summary()
+
+
+def test_confirm_strict_exempts_a_manifest_the_deposit_ships(
+    one_file_manifest, zenodo
+):
+    """A manifest never lists itself, so its own file in the deposit is not extra."""
+    from archivefs.confirm import confirm
+
+    body = b"{}"
+    zenodo.bodies["deposit.chiro.json"] = body
+    zenodo.record["files"].append(
+        {
+            "id": "ccc",
+            "key": "deposit.chiro.json",
+            "size": len(body),
+            "checksum": f"md5:{hashlib.md5(body).hexdigest()}",  # noqa: S324
+            "links": {
+                "self": f"https://zenodo.org/api/records/{RECID}/files/"
+                "deposit.chiro.json/content"
+            },
+        }
+    )
+    report = confirm(str(one_file_manifest), {"chiro": False}, strict=True)
+    assert report.unrecorded == ["archive.zip"]
+
+
+def test_confirm_strict_cli_exit_codes(one_file_manifest, capsys):
+    from archivefs.cli import main
+
+    assert main(["confirm", str(one_file_manifest)]) == 0
+    capsys.readouterr()
+    assert main(["confirm", "--strict", str(one_file_manifest)]) == 1
+    out = capsys.readouterr().out
+    assert "unrecorded archive.zip (in the deposit, not the manifest)" in out

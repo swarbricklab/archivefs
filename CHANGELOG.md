@@ -7,6 +7,21 @@ tags by `setuptools-scm`.
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-11-12
+
+Adds `archivefs confirm --strict`, so a deposit holding files its manifest does not list
+fails the check.
+
+### Added
+
+- **`archivefs confirm --strict`** also fails on deposit files the manifest does not list,
+  loose files included, so a stray or leftover upload no longer passes (#60). Without it,
+  `confirm` still reports only unlisted members of a container the manifest declares,
+  since a manifest may pin part of a deposit. The check uses the listing `confirm`
+  already fetches: no extra request, no bytes read. A `.chiro.json` in the deposit is
+  exempt. Matches `chirograph verify --strict`, and with `chirograph validate` makes a
+  complete gate for a self-deposited record, draft or published.
+
 ## [0.4.0] — 2026-11-12
 
 Reads your own unpublished Zenodo drafts, so a deposit's manifest and `chiro://` pins
@@ -129,7 +144,8 @@ First tagged release: the shared read-only base and the initial backends —
 accession/DOI and consumable through fsspec and DVC's `import-url`. `dbgap://` is
 registered but deferred.
 
-[Unreleased]: https://github.com/swarbricklab/archivefs/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/swarbricklab/archivefs/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/swarbricklab/archivefs/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/swarbricklab/archivefs/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/swarbricklab/archivefs/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/swarbricklab/archivefs/compare/v0.3.0...v0.3.1

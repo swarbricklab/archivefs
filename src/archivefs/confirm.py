@@ -36,7 +36,7 @@ import hashlib
 from dataclasses import dataclass, field
 from typing import Any
 
-from archivefs.chiro import _chirograph
+from archivefs.chiro import MANIFEST_SUFFIX, _chirograph
 from archivefs.errors import ManifestError
 from archivefs.registry import protocol_for_concept
 from archivefs.update import _load_manifest
@@ -86,8 +86,11 @@ class ConfirmReport:
     download_free: bool = True
     containers: list[ContainerResult] = field(default_factory=list)
     members: list[MemberResult] = field(default_factory=list)
-    #: live files under a declared container that the manifest does not list
+    #: live files the manifest does not list: those under a declared container, and
+    #: with ``strict`` every loose file too
     unrecorded: list[str] = field(default_factory=list)
+    #: whether loose deposit files outside the manifest were checked (``strict``)
+    strict: bool = False
 
     @property
     def ok(self) -> bool:
@@ -136,7 +139,11 @@ def _hash_member(delegate: Any, path: str) -> str:
 
 
 def confirm(
-    target: str, options: dict[str, Any] | None = None, *, download: bool = False
+    target: str,
+    options: dict[str, Any] | None = None,
+    *,
+    download: bool = False,
+    strict: bool = False,
 ) -> ConfirmReport:
     """Cross-check ``target``'s manifest against the live deposit it pins.
 
@@ -145,6 +152,15 @@ def confirm(
     (central-directory tail reads) for ZIP members and loose files that publish a
     checksum; falls back to reading bytes only where the container format offers no
     cheap check *and* ``download=True`` was given.
+
+    By default a deposit file the manifest does not list is reported only when it sits
+    under a container the manifest declares: a manifest may pin part of a deposit (one
+    ZIP of several, or one file of a record), and the rest is not its concern.
+    ``strict`` asks the other question — does the deposit hold *exactly* the manifest's
+    files? — and reports every unlisted file, loose ones included, as ``unrecorded``,
+    which fails the report. It is the same listing ``confirm`` already fetched, so it
+    costs no request and reads no bytes. A ``.chiro.json`` shipped in the deposit is
+    exempt: a manifest never lists itself. Matches ``chirograph verify --strict``.
     """
     _chirograph()  # raises MissingExtraError naming the install if absent
     options = dict(options or {})
@@ -193,6 +209,7 @@ def confirm(
     report = ConfirmReport(
         manifest_ref=target,
         record_accession=str(accession),
+        strict=strict,
     )
     # Container class by source_root, and the container md5 we must confirm once.
     class_by_root = {c.source_root: c for c in manifest.containers}
@@ -239,13 +256,17 @@ def confirm(
             )
         )
 
-    # Live files under a declared container that the manifest omits.
+    # Live files the manifest omits: under a declared container always, and with
+    # `strict` anywhere in the deposit, except a manifest the deposit ships.
     roots = tuple(class_by_root)
     report.unrecorded = sorted(
         source
         for source in live_by_source
         if source not in accounted
-        and any(source == r or source.startswith(f"{r}/") for r in roots)
+        and (
+            any(source == r or source.startswith(f"{r}/") for r in roots)
+            or (strict and not source.endswith(MANIFEST_SUFFIX))
+        )
     )
     return report
 
